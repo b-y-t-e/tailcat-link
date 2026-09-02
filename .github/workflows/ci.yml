@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      # The zero-warning rule is only a rule if the build enforces it.
+      - name: Build
+        run: dotnet build --no-restore --configuration Release -warnaserror
+
+      # The live tests dial Tailscale's public relays. They are opt-in so CI
+      # neither depends on that service nor adds load to it; everything else
+      # runs on every push.
+      - name: Test
+        run: dotnet test --no-build --configuration Release

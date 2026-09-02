@@ -1,0 +1,358 @@
+# tailcat-dotnet-lib
+
+A .NET 10 port of the parts of [tailscale/tailcat](https://github.com/tailscale/tailcat)
+that tailcat implements itself: the `ConnBlob` wire format, the meow
+handshake framing, DERP map fetching and caching, the SOCKS5 address
+classifier, the web demo handler, and connection proxying.
+
+Tests are xUnit v3 and were written first, ported case for case from the Go
+tests.
+
+## Layout
+
+| Project | Go counterpart |
+| --- | --- |
+| `src/Tailcat` | the root `tailcat` package (`tailcat.go`, `wire.go`, `disco.go`) |
+| `src/Tailcat.WebDemo` | `webdemo/` |
+| `src/Tailcat.Cli` | `cmd/tailcat/` (the pure logic, so far) |
+| `src/Tailcat.Derp` | `tailscale.com/derp` — a DERP relay client |
+| `src/Tailcat.Net` | the job `magicsock` + `wgengine` + netstack do in Go |
+| `src/Tailcat.Demo` | `tailcat-demo`, a CLI for verifying a link between two machines |
+| `tests/Tailcat.Tests` | `tailcat_test.go`, `wire_test.go` |
+| `tests/Tailcat.WebDemo.Tests` | `webdemo/webdemo_test.go` |
+| `tests/Tailcat.Cli.Tests` | `cmd/tailcat/socks_test.go` |
+| `tests/Tailcat.Derp.Tests` | (new) framing, handshake, and routing tests |
+| `tests/Tailcat.Net.Tests` | (new) STUN, sealed messages, paths, and live session tests |
+
+## What was ported
+
+| Go | .NET |
+| --- | --- |
+| `ConnInfo`, `ConnInfo.ConnBlob` | `ConnInfo`, `ConnInfo.ToConnBlob` |
+| `ParseConnBlob`, `ParseConnBlobRaw` | `ConnBlob.Parse`, `ConnBlob.ParseRaw` |
+| `ConnBlob.Resolve` | `ConnBlob.ResolveAsync` |
+| `ConnInfo.Expand` | `ConnInfo.ExpandAsync` |
+| `wireConnInfo`, `wireRegion`, `wireNode` | `WireConnInfo`, `WireRegion`, `WireNode` |
+| `cbor:"n,omitempty"` struct tags | `[CborProperty("n", order, OmitEmpty = true)]` |
+| `FetchDERPMap`, `DERPMapCache` | `DerpMapFetcher.FetchAsync`, `IDerpMapCache` |
+| variadic `opts ...any` | `ExpandOptions` |
+| `IsMeowPacket`, `EncodeMeowPing`, … | `Disco.IsMeowPacket`, `Disco.EncodeMeowPing`, … |
+| `tcAddrForKey` | `TcAddr.ForKey` |
+| `ProxyConns` | `Proxy.ConnsAsync` |
+| `webdemo.Handler` | `WebDemo.MapWebDemo` |
+| `classifySOCKSAddr`, `socksTarget` | `SocksAddr.ClassifyAsync`, `SocksTarget` |
+| `normalizeListenAddrPort` | `ListenAddr.Normalize` |
+| `key.NodePrivate`/`NodePublic`/`Disco*` | `Tailcat.Keys.*` (X25519 via BouncyCastle) |
+| `discoPrivateForNode` | `DiscoPrivate.ForNode` |
+| `tailcfg.DERPMap`/`DERPRegion`/`DERPNode` | `Tailcat.Tailcfg.*` |
+
+The wire format is byte-compatible: `ConnBlobTests` asserts the same base64
+blobs the Go test pins (`tcoWFwWC…`, `tcomFwWC…`), which means the CBOR field
+names, field order, and omitempty behaviour all match fxamacker/cbor's
+output for the Go structs.
+
+Two deliberate API departures, both because the Go idiom has no C# equivalent:
+
+- Go's variadic `opts ...any` with a type switch became the `ExpandOptions`
+  record. Same options, checked at compile time.
+- `PickBestRegion` (netcheck/STUN latency probing) is an interface,
+  `IRegionPicker`, defaulting to `NoRegionPicker`, which reports "no
+  measurement" so callers fall back to a random region exactly as Go does
+  when netcheck fails. Implementing real probing needs a STUN client.
+
+`MemDerpMapCache` takes a `TimeProvider` so cache-freshness tests don't
+sleep; the default is the system clock.
+
+## Connecting hosts across networks that can't see each other
+
+`Tailcat.Derp` is a client of Tailscale's DERP relays. Both hosts connect
+**outbound** to a relay on port 443, so neither needs an inbound port, a
+firewall rule, or a NAT mapping — which is what makes two mutually invisible
+subnets reachable to each other. The relay routes by Curve25519 public key:
+send to a key, and whoever holds it receives it.
+
+Verified against a live public relay (`tc301a.ipn.dev`): the login handshake
+completes and packets flow between two clients.
+
+Two things about the relay shape everything built on top:
+
+- **It sees the traffic.** Whatever rides on DERP must bring its own
+  end-to-end encryption.
+- **It does not guarantee delivery.** Packets can be dropped, so reliability
+  is the caller's job too.
+
+### Why not `SslStream`
+
+A DERP relay appends a self-signed **Ed25519 "meta certificate"** to its TLS
+chain (subject `CN=derpkey<hex>`), which is how it publishes its DERP public
+key. Windows' Schannel rejects that chain outright — the handshake dies with
+`SEC_E_INVALID_TOKEN` before any validation callback runs — so `SslStream`
+cannot talk to a DERP relay at all on Windows. `DerpTlsConnector` therefore
+uses BouncyCastle's TLS stack and validates the certificate itself: the meta
+cert is set aside, and the rest of the chain is verified against the OS trust
+store with the host name checked, as a browser would. The key from the meta
+cert is then cross-checked against the key the relay greets us with, so a
+rewritten connection is caught.
+
+## Connecting two hosts: how it actually works
+
+```
+TailcatNode.ConnectAsync(peerKey)
+        │
+        ├─ 1. meet at the relay        both sides are already connected outbound
+        ├─ 2. sealed Hello / HelloAck  exchange TLS fingerprints + candidate addresses
+        ├─ 3. QUIC handshake           over the relay path, pinned to that fingerprint
+        └─ 4. hole punch               probe candidates; move onto a direct path if one answers
+```
+
+**Verified live** against a public relay: two nodes that know only each
+other's public keys open a session, exchange a stream, and end up on a direct
+path. `dotnet test` runs those end-to-end tests when `TAILCAT_LIVE_TESTS=1` is set
+(they need internet access and use the public rate-limited relays); otherwise
+they skip. Their timeouts are generous on purpose: a shared relay under load
+varies a lot, and the tests are there to show a session forms, not to measure
+this machine.
+
+```csharp
+await using TailcatNode node = await TailcatNode.CreateAsync();
+Console.WriteLine(node.Address);   // hand this to the other side
+
+// One side listens:
+await using TailcatConnection conn = await node.AcceptConnectionAsync();
+await using Stream stream = await conn.AcceptStreamAsync();
+
+// The other dials that address:
+await using TailcatConnection conn = await node.ConnectAsync(address);
+await using Stream stream = await conn.OpenStreamAsync();
+Console.WriteLine(conn.CurrentPath);   // "relay (mtu 65024)" or "direct 203.0.113.9:51820 (23 ms, mtu 1400)"
+```
+
+### Why an address, not just a key
+
+A node listens in the relay region closest to itself. Two nodes far apart
+therefore pick *different* regions — and a node that only knew a peer public
+key would send into its own region, where nobody is listening. The handshake
+would simply time out, with everything appearing correct.
+
+So a node address is its public key **and** its home region, in the same
+compact `tc…` form the Go implementation uses:
+
+```
+tco2FwWCDRh1raQ5-4WVvjPImw4tL9B4-mZ-oadOTh4vSXitOjeWFrWCCcfd76PYE76USuQsZKyf8eCUzR5fEr-M07C5VfhMsRBGFpAQ
+```
+
+The address also carries the node's *disco* public key, derived from its node
+key by an HMAC (`DiscoPrivate.ForNode`) so that only the node key is worth
+persisting. The two are deliberately unlinkable: a disco key is shown in the
+clear on a direct path, while the node key is the unguessable part of the
+address. Tailcat originally reused the node key's bytes as its disco key and
+[fixed that](https://github.com/tailscale/tailcat/commit/cb1e0d753) after
+release; this port follows, and — unlike Go, whose whole data plane is
+disco-based — still accepts an address written before the split, because it
+meets peers over QUIC and never consults a peer's disco key.
+
+To reach a peer, a node opens a connection into *that peer's* region and
+sends there; the handshake carries each side's home region so the answer goes
+back to the right place. Connections to other regions are pooled and the
+least recently used is dropped past a limit — the home connection never is.
+This is the arrangement Tailscale uses, and `MultiRegionTests` pins it down
+by connecting two nodes deliberately placed in different regions.
+
+### Why it needs no inbound port
+
+Both sides dial *out* to the relay on 443, so neither network has to accept an
+inbound connection — that is what makes two mutually invisible subnets
+reachable. The direct path is then punched open by probing: each probe opens a
+NAT mapping on its way out, so the peer's probes arriving from the other side
+find a way in. If the NATs are hostile enough that no direct path exists, the
+session stays on the relay and keeps working.
+
+### What secures it
+
+- **The relay is untrusted.** It routes by public key but holds neither
+  private key. Every control message is sealed in a NaCl box between the two
+  node keys, so a relay can neither read one nor forge one.
+- **No certificate authority.** Each node's QUIC certificate is generated
+  fresh and is meaningless by itself; what makes it trustworthy is that its
+  fingerprint arrives inside a sealed message. Both sides pin that exact
+  fingerprint, in both directions.
+- **The traffic itself is QUIC**, so encryption, reliability, and stream
+  multiplexing come from a TLS 1.3 stack rather than anything hand-rolled.
+
+### Seeing what it did
+
+A session that ends up relayed instead of direct is not an error, and it
+looks identical from the outside to one that never tried — so a node reports
+its steps to an `ITailcatObserver`:
+
+```csharp
+await TailcatNode.CreateAsync(new TailcatNodeOptions
+{
+    Observer = new TextTailcatObserver(Console.Error.WriteLine),
+});
+```
+
+```
+relay: connected to region 301
+endpoints: 192.168.0.146:58061, [2a02:a312:44bf:9100::de82]:58061, ...
+session: handshaking with f24953dc0b78 in region 301
+path: f24953dc0b78 now on direct [2a02:a312:44bf:9100:...]:61765 (2 ms, mtu 1200)
+session: f24953dc0b78 up in 3376 ms
+```
+
+Counters are published on the `Tailcat.Net` meter for anything collecting
+`System.Diagnostics.Metrics`.
+
+`TailcatNodeOptions.TimeProvider` sets the clock the node measures with, so
+endpoint freshness can be tested without waiting.
+
+### Keeping it up
+
+- **The relay reconnects.** A DERP connection is one long-lived TCP
+  connection, and those end. `DerpConnection` re-dials with backoff, keeping
+  the node key, so peers can still find the node afterwards. Callers read
+  from a channel that outlives any single connection.
+- **The closest region is measured, not guessed.** `StunRegionPicker` times a
+  STUN round trip to every region and takes the lowest — the port of Go's
+  `PickBestRegion`. Every relayed byte crosses the relay twice, so the choice
+  matters. If nothing answers, the node falls back to a region rather than
+  failing.
+- **Address changes are announced.** Moving between networks invalidates
+  every address a peer knows. The node watches for it, re-runs discovery, and
+  sends each live session an `EndpointUpdate` — sealed like every other
+  control message, so it cannot be forged to redirect a session.
+- **IPv4 and IPv6 direct paths.** The UDP socket is dual-stack and routable
+  IPv6 addresses are offered as candidates, which are often the easiest
+  direct path of all: no NAT to punch through. Addresses are normalized to
+  one canonical form, or an IPv4 peer seen through a dual-stack socket would
+  appear as two separate paths and neither would gather enough evidence to
+  win.
+- **MTU is discovered per path.** Paths start at QUIC's 1200-byte floor;
+  once a direct path answers, a padded probe tests 1400. A datagram too large
+  for the direct path goes over the relay (which carries far more) instead of
+  being dropped, since losing only the large packets looks like a mysterious
+  stall rather than a lost packet.
+- **The chosen path is sticky.** A rival must be faster by 10 ms *and* by a
+  fifth before traffic moves to it. Two paths to the same peer often measure
+  within noise of each other — a LAN address and a tunnel address, say — and
+  without a margin the link alternates between them on every probe, churning
+  NAT mappings and burying real path changes in noise.
+- **Candidates expire.** A peer that moves networks announces a fresh set of
+  addresses each time, and an address nobody has heard from in a minute is
+  forgotten rather than probed for the life of the session.
+- **Leaving a path is reported too.** A path is abandoned by falling silent,
+  not by announcing it, so the move back to the relay produces no answer to
+  react to. The probe loop reports it, which is the case an observer most
+  needs: traffic quietly back on the relay is exactly what "why is this
+  suddenly slow?" looks like.
+
+### Two implementation notes worth knowing
+
+**QUIC over a custom transport.** The platform QUIC stack will only speak to a
+UDP socket, so `UdpBridge` gives it one: a loopback socket standing in for the
+peer. QUIC therefore sees a single stable peer address while the link
+underneath moves between the relay and a direct path — which is why the switch
+doesn't interrupt a stream. It's the trick magicsock plays on WireGuard.
+
+**A received datagram is only borrowed.** The receive loop reads every packet
+into one buffer and reuses it, so anything that outlives the call — notably
+`UdpBridge`, whose send to the local QUIC endpoint is fire-and-forget — must
+copy first. Without the copy the next packet overwrites the bytes mid-send,
+which surfaces only once a direct path is in use and only under load, and
+reads as random loss rather than corruption. `PeerLink.DatagramReceived`
+states the contract; `UdpBridgeTests` holds it to it.
+
+**A TLS write is best effort.** `DerpTlsStream.WriteAsync` encrypts and
+queues; the pump sends afterwards, so a connection dying at that moment
+surfaces on the reading side, not from the write. That suits a relay, whose
+delivery was never guaranteed, but it means a successful write is not a
+delivered write.
+
+**BouncyCastle TLS must run non-blocking.** In stream mode it holds its lock
+for the whole of a blocking read, so a parked receive loop blocks every send
+behind it — measured here as a 63-second stall on a DERP connection, which is
+exactly the shape a node's relay loop has. `DerpTlsStream` uses non-blocking
+mode instead: the protocol object only transforms buffers under a short lock,
+never while waiting on the network, and a single pump writes outbound records
+so TLS never sees them reordered.
+
+### Verifying it between two real machines
+
+`tailcat-demo` exists to check the direct path across actual networks, which
+is the one thing a single machine cannot prove.
+
+```
+# machine A
+$ tailcat-demo listen
+measuring relay regions and connecting ...
+  [relay: connected to region 301]
+node up in 5486 ms
+  region:    301
+  reachable: 192.168.0.146:65430, [2a02:a312:44bf:9100::de82]:65430
+
+Run this on the other machine:
+
+    tailcat-demo connect tcomFwWCDySVPcC3gLpPLOP5n40rrAJluCcfm1A0a9RvWb0af-DmFpGQEt
+
+# machine B
+$ tailcat-demo ping tcomFwWCDySVPcC3gLpPLOP5n40rrAJluCcfm1A0a9RvWb0af-DmFpGQEt
+session up in 1476 ms over relay (mtu 65024)
+#1     126.6 ms  relay (mtu 65024)
+path changed -> direct 100.84.18.10:55862 (2 ms, mtu 1200)
+#2       2.2 ms  direct 100.84.18.10:55862 (2 ms, mtu 1400)
+```
+
+That trace is the whole design in six lines: the session forms over the
+relay, a direct path is punched open, traffic moves to it, and MTU discovery
+then raises the packet size. Both sides only ever dial out.
+
+The run above was two processes on one machine, so its direct path was a
+certainty. Between two machines on different networks the outcome depends on
+the NATs involved — if hole punching fails, the `path changed` line simply
+never appears and the session keeps running on the relay.
+
+### Not done yet
+
+- **Rekeying.** A session TLS certificate lives as long as the process.
+- **QUIC session resumption.** The relay reconnects and paths fail over, but
+  a QUIC connection that dies must be re-established by the caller.
+- **Throughput measurement.** Nothing here says what the relay path or a
+  direct path actually sustains.
+- **A security review.** The primitives are libsodium and TLS 1.3, but the
+  authentication design — pinning a certificate fingerprint announced inside
+  a sealed box — has not been reviewed by anyone else.
+
+## What was not ported, and why
+
+tailcat is a thin layer over Tailscale's whole data plane. These parts have
+no .NET equivalent to build on:
+
+- `Server`, `Client`, `locoBackend` — magicsock, wgengine, netstack/gVisor,
+  disco, and the WireGuard packet filter. `Tailcat.Net` does the same *job* —
+  meet at a relay, punch a direct path, carry reliable streams — but over
+  QUIC rather than WireGuard, so it does not interoperate with the Go
+  implementation.
+- `tailcat_ssh.go`, `cmd/tailcat/ssh.go` — the auth-free SSH server on the
+  tunnel.
+- `web/`, `internal/wasmbuild`, `cmd/tailcat-webdist` — the Go js/wasm build
+  and its toolchain. `Tailcat.WebDemo` serves a dist directory but does not
+  produce one.
+- `PickBestRegion` — see `IRegionPicker` above. `Tailcat.Derp` does not yet
+  do STUN latency probing either.
+
+The tests that exercise those layers therefore have no counterpart:
+`TestTailcat`, `TestHalfClose`, `TestSSHSuite`, `TestPipeMode`,
+`TestBrowserReceives`, and `TestBrowserSends`. `ProxyTests` covers the
+half-close behaviour of `TestHalfClose` directly over loopback TCP, which is
+the part that doesn't need the tunnel.
+
+## Running the tests
+
+```
+dotnet test                      # unit tests only
+TAILCAT_LIVE_TESTS=1 dotnet test # also the end-to-end tests over a public relay
+```
+
+CI runs the unit tests on Linux, macOS and Windows (`.github/workflows/ci.yml`).
+The live tests stay opt-in there, so the build depends on nobody public
+service and adds no load to it.

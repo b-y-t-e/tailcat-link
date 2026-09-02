@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Tailcat.Derp</RootNamespace>
+    <IsPackable>true</IsPackable>
+    <PackageId>Tailcat.Derp</PackageId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Sodium.Core" Version="1.4.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Tailcat\Tailcat.csproj" />
+  </ItemGroup>
+
+</Project>

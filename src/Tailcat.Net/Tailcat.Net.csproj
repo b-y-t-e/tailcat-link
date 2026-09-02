@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Tailcat.Net</RootNamespace>
+    <IsPackable>true</IsPackable>
+    <PackageId>Tailcat.Net</PackageId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Sodium.Core" Version="1.4.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- A PeerLink is created by a node, so its constructor is internal;
+         the tests build one directly to exercise path selection. -->
+    <InternalsVisibleTo Include="Tailcat.Net.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Tailcat\Tailcat.csproj" />
+    <ProjectReference Include="..\Tailcat.Derp\Tailcat.Derp.csproj" />
+  </ItemGroup>
+
+</Project>

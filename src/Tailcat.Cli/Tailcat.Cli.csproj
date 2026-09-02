@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Tailcat.Cli</RootNamespace>
+    <IsPackable>true</IsPackable>
+    <PackageId>Tailcat.Cli</PackageId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Tailcat\Tailcat.csproj" />
+  </ItemGroup>
+
+</Project>

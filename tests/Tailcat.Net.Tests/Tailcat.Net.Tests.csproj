@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <OutputType>Exe</OutputType>
+    <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+    <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
+    <RootNamespace>Tailcat.Net.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" Version="3.1.0" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Tailcat.Net\Tailcat.Net.csproj" />
+    <ProjectReference Include="..\Tailcat.TestSupport\Tailcat.TestSupport.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- PeerLink's constructor is internal: it is built by a node, not by hand. -->
+    <Using Include="Tailcat.Net" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Doubles shared by more than one test project. It is a plain library, not
+       a test project: it holds no tests and the runner never loads it. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Tailcat.TestSupport</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Sodium.Core" Version="1.4.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Tailcat.Derp\Tailcat.Derp.csproj" />
+  </ItemGroup>
+
+</Project>
