@@ -226,6 +226,12 @@ public class NodeSessionTests
 
         await WaitUntilAsync(() => listener.SessionCount == 1, "the Hello should have opened a session", ct);
 
+        // The session goes in before the pending accept whose start time is
+        // the handshake deadline, so advancing the clock in between would
+        // stamp that deadline from the advanced clock and never expire.
+        await WaitUntilAsync(
+            () => listener.PendingAcceptCount == 1, "the Hello should have opened a pending accept", ct);
+
         // Nothing else happens; only the clock moves past the timeout.
         time.Advance(TimeSpan.FromSeconds(30));
 

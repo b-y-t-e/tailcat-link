@@ -238,6 +238,47 @@ public class ConnBlobTests
     }
 
     /// <summary>
+    /// A region ID wider than an int is malformed, not a crash: CBOR encodes
+    /// integers by value, so a blob can carry one that our int fields can't
+    /// hold (Go widened its own wire fields to int64 when upstream tailcfg
+    /// changed region IDs). It has to fail like any other bad blob.
+    /// </summary>
+    [Fact]
+    public void ParseRejectsAnOutOfRangeRegionId()
+    {
+        ConnBlob topLevel = Blob(w =>
+        {
+            w.WriteStartMap(2);
+            w.WriteTextString("p");
+            w.WriteByteString(TestKey().Raw32());
+            w.WriteTextString("i");
+            w.WriteUInt64(5_000_000_000);
+            w.WriteEndMap();
+        });
+        ConnBlob inRegion = Blob(w =>
+        {
+            w.WriteStartMap(2);
+            w.WriteTextString("p");
+            w.WriteByteString(TestKey().Raw32());
+            w.WriteTextString("r");
+            w.WriteStartArray(1);
+            w.WriteStartMap(1);
+            w.WriteTextString("i");
+            w.WriteUInt64(ulong.MaxValue);
+            w.WriteEndMap();
+            w.WriteEndArray();
+            w.WriteEndMap();
+        });
+
+        Assert.Throws<TailcatException>(() => topLevel.Parse());
+        Assert.Throws<TailcatException>(() => inRegion.Parse());
+        Assert.Throws<TailcatException>(() => topLevel.ParseRaw());
+
+        Assert.False(topLevel.TryParse(out _));
+        Assert.False(inRegion.TryParse(out _));
+    }
+
+    /// <summary>
     /// Port of TestParseConnBlobRawKeepsNulls: the raw form stays permissive,
     /// because it exists to show what a broken blob actually contains.
     /// </summary>

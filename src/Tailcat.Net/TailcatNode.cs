@@ -215,6 +215,11 @@ public sealed class TailcatNode : IAsyncDisposable
 
     internal int RoutedEndpointCount => _linksByEndpoint.Count;
 
+    // A Hello registers its session before the pending accept that carries the
+    // handshake deadline, so a test that advances the clock between the two
+    // stamps the deadline from the already-advanced clock and waits forever.
+    internal int PendingAcceptCount => _acceptsByBridge.Count;
+
     /// <summary>
     /// This node's address: its public key together with the region it
     /// listens in, in the same compact form the Go implementation uses.

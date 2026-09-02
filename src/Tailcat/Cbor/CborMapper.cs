@@ -149,6 +149,31 @@ public static class CborMapper
         return value;
     }
 
+    // ReadInt32 reads an integer field, which the wire types all model as an
+    // int. CBOR encodes an integer by value, so a blob can carry one wider
+    // than that — Go's own wire types were widened to int64 when upstream
+    // tailcfg changed region IDs — and CborReader.ReadInt32 signals that with
+    // an OverflowException, which is not one of the malformed-input exceptions
+    // callers expect. A value we can't represent is a malformed blob, so say
+    // so in the vocabulary the decode already speaks.
+    private static int ReadInt32(CborReader reader)
+    {
+        long value;
+        try
+        {
+            value = reader.ReadInt64();
+        }
+        catch (OverflowException ex)
+        {
+            throw new CborContentException($"integer out of range: {ex.Message}", ex);
+        }
+        if (value is < int.MinValue or > int.MaxValue)
+        {
+            throw new CborContentException($"integer {value} doesn't fit in an int");
+        }
+        return (int)value;
+    }
+
     private static object? ReadValue(CborReader reader, Type type)
     {
         if (reader.PeekState() == CborReaderState.Null)
@@ -158,7 +183,7 @@ public static class CborMapper
         }
         if (type == typeof(int))
         {
-            return reader.ReadInt32();
+            return ReadInt32(reader);
         }
         if (type == typeof(string))
         {
