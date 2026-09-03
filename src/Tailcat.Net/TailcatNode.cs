@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Quic;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading.Channels;
@@ -899,8 +900,12 @@ public sealed class TailcatNode : IAsyncDisposable
             {
                 return;
             }
-            catch (Exception ex) when (ex is QuicException or ObjectDisposedException)
+            catch (Exception ex) when (ex is QuicException or AuthenticationException or ObjectDisposedException)
             {
+                // One peer's handshake failing must not end the loop: a TLS
+                // alert arrives here as an AuthenticationException, and a
+                // stranger whose certificate this node refuses would otherwise
+                // take away its ability to accept anyone ever again.
                 if (ex is ObjectDisposedException)
                 {
                     return;
