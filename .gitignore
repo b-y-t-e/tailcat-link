@@ -2,3 +2,6 @@ bin/
 obj/
 TestResults/
 *.user
+
+# mTiles workspace state
+.mtiles/
