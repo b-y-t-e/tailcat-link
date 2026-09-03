@@ -147,7 +147,7 @@ public class NodeSessionTests
             new byte[PeerHello.FingerprintLen],
             [],
             HomeRegionId: RegionId,
-            Transport: (PeerTransport)200);
+            Transports: [(PeerTransport)200]);
         await client.SendAsync(
             listener.PublicKey,
             PeerMessage.Seal(PeerMessageType.Hello, hello.Encode(), stranger, listener.PublicKey),
@@ -162,9 +162,61 @@ public class NodeSessionTests
 
         // The answer names what this node does have, so the caller can say why
         // it is giving up rather than only that it did.
-        Assert.Equal(PeerTransport.Quic, ack.Transport);
+        Assert.Equal([PeerTransport.Quic], ack.Transports);
         Assert.Equal(0, listener.SessionCount);
         Assert.Contains(observer.Failures, f => f.Reason.Contains("200", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The answerer takes the best it shares with the dialler, not the first
+    /// thing it recognises: the dialler's list is in its order of preference,
+    /// so a peer that offers something better first and QUIC as a fallback
+    /// must still end up on QUIC when that is all this node has.
+    /// </summary>
+    [Fact]
+    public async Task TheAnswererTakesTheBestTransportBothSpeak()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+        await relay.WaitForClientAsync(listener.PublicKey, ct);
+
+        NodePrivate stranger = NodePrivate.NewKey();
+        await using DerpClient client = await DerpClient.ConnectOverStreamAsync(
+            await relay.DialAsync(ct), stranger, relay.PublicKey, ct);
+
+        PeerHello hello = new(
+            SessionId: 1,
+            new byte[PeerHello.FingerprintLen],
+            [],
+            HomeRegionId: RegionId,
+            Transports: [(PeerTransport)200, PeerTransport.Quic]);
+        await client.SendAsync(
+            listener.PublicKey,
+            PeerMessage.Seal(PeerMessageType.Hello, hello.Encode(), stranger, listener.PublicKey),
+            ct);
+
+        // The agreed transport means a session, and a session starts probing,
+        // so the answer arrives among path probes rather than alone.
+        PeerHello? ack = null;
+        while (ack is null)
+        {
+            DerpReceivedPacket answer = await client.ReceiveAsync(ct);
+            if (PeerMessage.TryOpen(
+                    answer.Payload.Span, stranger, listener.PublicKey,
+                    out PeerMessageType type, out byte[]? payload) &&
+                type == PeerMessageType.HelloAck)
+            {
+                Assert.True(PeerHello.TryDecode(payload, out ack));
+            }
+        }
+
+        // Exactly one, and the one they share — not the peer's first choice.
+        Assert.Equal([PeerTransport.Quic], ack.Transports);
     }
 
     /// <summary>

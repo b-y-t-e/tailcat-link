@@ -158,22 +158,28 @@ public class PeerMessageTests
         byte[] encoded = new PeerHello(1, new byte[PeerHello.FingerprintLen],
             [new IPEndPoint(IPAddress.Loopback, 1234)]).Encode();
 
-        Assert.False(PeerHello.TryDecode(encoded.AsSpan(0, encoded.Length - 2), out _));
+        // Past the transport list, into the endpoint it announced: cutting
+        // only the list leaves a hello that is short but still whole.
+        Assert.False(PeerHello.TryDecode(encoded.AsSpan(0, encoded.Length - 3), out _));
         Assert.False(PeerHello.TryDecode([], out _));
     }
 
+    /// <summary>
+    /// The whole list survives, in order: it is a preference, so the order is
+    /// the meaning, and the answerer picks the first entry it shares.
+    /// </summary>
     [Fact]
-    public void HelloCarriesTheTransportItAsksFor()
+    public void HelloCarriesEveryTransportItOffersInOrder()
     {
         PeerHello hello = new(
             1,
             new byte[PeerHello.FingerprintLen],
             [new IPEndPoint(IPAddress.Loopback, 1234)],
             HomeRegionId: 7,
-            Transport: (PeerTransport)200);
+            Transports: [(PeerTransport)200, PeerTransport.Quic]);
 
         Assert.True(PeerHello.TryDecode(hello.Encode(), out PeerHello? got));
-        Assert.Equal((PeerTransport)200, got.Transport);
+        Assert.Equal([(PeerTransport)200, PeerTransport.Quic], got.Transports);
         Assert.Equal(7, got.HomeRegionId);
     }
 
@@ -183,14 +189,27 @@ public class PeerMessageTests
     /// refuse every peer that has not been rebuilt.
     /// </summary>
     [Fact]
-    public void HelloWithoutATransportByteIsReadAsQuic()
+    public void HelloWithoutATransportListIsReadAsQuic()
     {
         byte[] encoded = new PeerHello(1, new byte[PeerHello.FingerprintLen],
             [new IPEndPoint(IPAddress.Loopback, 1234)]).Encode();
 
-        Assert.True(PeerHello.TryDecode(encoded.AsSpan(0, encoded.Length - 1), out PeerHello? got));
-        Assert.Equal(PeerTransport.Quic, got.Transport);
+        // Everything the list occupies removed: one count byte and the one
+        // entry it announced.
+        Assert.True(PeerHello.TryDecode(encoded.AsSpan(0, encoded.Length - 2), out PeerHello? got));
+        Assert.Equal([PeerTransport.Quic], got.Transports);
         Assert.Equal(1234, Assert.Single(got.Endpoints).Port);
+    }
+
+    /// <summary>A list longer than the bytes behind it is not a list.</summary>
+    [Fact]
+    public void HelloWithATruncatedTransportListIsRejected()
+    {
+        byte[] encoded = new PeerHello(1, new byte[PeerHello.FingerprintLen],
+            [new IPEndPoint(IPAddress.Loopback, 1234)],
+            Transports: [PeerTransport.Quic, (PeerTransport)9]).Encode();
+
+        Assert.False(PeerHello.TryDecode(encoded.AsSpan(0, encoded.Length - 1), out _));
     }
 
     [Fact]

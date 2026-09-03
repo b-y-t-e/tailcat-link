@@ -340,6 +340,9 @@ public class PeerLinkTests
             await Task.Delay(20, ct);
         }
 
+        // Seeing it once is the assertion: the sweep that forgets a dead path
+        // and the burst that re-adds it both run on the probe loop, so a
+        // second look afterwards can land on either side of them.
         using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(15));
         while (!h.Link.Paths.Any(p => Equals(p.Remote, candidate)))
@@ -347,7 +350,7 @@ public class PeerLinkTests
             time.Advance(TimeSpan.FromSeconds(30));
             await Task.Delay(50, cts.Token);
         }
-        Assert.Contains(h.Link.Paths, p => Equals(p.Remote, candidate));
+
         Assert.Equal(PeerPathKind.Relay, h.Link.CurrentPath.Kind);
     }
 

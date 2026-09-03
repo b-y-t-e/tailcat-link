@@ -163,7 +163,8 @@ public sealed class TailcatNode : IAsyncDisposable
     private readonly DerpRegionPool _relays;
     private readonly DerpMap _derpMap;
     private readonly Socket _udp;
-    private readonly QuicListener _listener;
+    private readonly QuicListener? _listener;
+    private readonly IReadOnlyList<PeerTransport> _transports;
     private readonly IReadOnlyList<IPEndPoint> _stunServers;
     private readonly IReadOnlyList<string> _stunFallbackHosts;
     private IReadOnlyList<IPEndPoint>? _resolvedFallback;
@@ -201,7 +202,8 @@ public sealed class TailcatNode : IAsyncDisposable
         DerpRegionPool relays,
         DerpMap derpMap,
         Socket udp,
-        QuicListener listener,
+        QuicListener? listener,
+        IReadOnlyList<PeerTransport> transports,
         IReadOnlyList<IPEndPoint> stunServers,
         IReadOnlyList<string> stunFallbackHosts,
         TimeSpan handshakeTimeout,
@@ -213,6 +215,7 @@ public sealed class TailcatNode : IAsyncDisposable
         _derpMap = derpMap;
         _udp = udp;
         _listener = listener;
+        _transports = transports;
         _stunServers = stunServers;
         _stunFallbackHosts = stunFallbackHosts;
         _handshakeTimeout = handshakeTimeout;
@@ -221,7 +224,7 @@ public sealed class TailcatNode : IAsyncDisposable
 
         _derpLoop = Task.Run(() => DerpReceiveLoopAsync(_cts.Token));
         _udpLoop = Task.Run(() => UdpReceiveLoopAsync(_cts.Token));
-        _acceptLoop = Task.Run(() => QuicAcceptLoopAsync(_cts.Token));
+        _acceptLoop = listener is null ? Task.CompletedTask : Task.Run(() => QuicAcceptLoopAsync(_cts.Token));
         _sweepLoop = Task.Run(() => SweepLoopAsync(_cts.Token));
         _endpointLoop = Task.Run(() => EndpointWatchLoopAsync(_cts.Token));
 
@@ -282,9 +285,22 @@ public sealed class TailcatNode : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         options ??= new TailcatNodeOptions();
-        if (!QuicListener.IsSupported)
+
+        // QUIC is not everywhere: Windows 10 has none at all, and Linux needs
+        // libmsquic from the distribution. A node without it is not broken,
+        // it simply has one transport fewer to offer — so what it can speak
+        // is worked out here rather than being assumed, and only a node left
+        // with nothing at all is refused.
+        List<PeerTransport> transports = [];
+        if (QuicListener.IsSupported)
         {
-            throw new PlatformNotSupportedException("QUIC is not supported on this platform");
+            transports.Add(PeerTransport.Quic);
+        }
+        if (transports.Count == 0)
+        {
+            throw new PlatformNotSupportedException(
+                "this platform has no QUIC (Windows 10 has none; Linux needs libmsquic installed), " +
+                "and no other transport is implemented yet — see docs/relay1.md");
         }
 
         NodeIdentity identity = NodeIdentity.Create(options.PrivateKey);
@@ -338,7 +354,7 @@ public sealed class TailcatNode : IAsyncDisposable
                 cancellationToken).ConfigureAwait(false);
 
             TailcatNode node = new(
-                identity, relays, map, udp, listener, stun, stunFallback,
+                identity, relays, map, udp, listener, transports, stun, stunFallback,
                 options.HandshakeTimeout, options.Observer, options.TimeProvider);
             ready.SetResult(node);
             options.Observer.RelayConnected(homeRegionId);
@@ -428,7 +444,7 @@ public sealed class TailcatNode : IAsyncDisposable
             _identity.Fingerprint,
             await LocalEndpointsAsync(cts.Token).ConfigureAwait(false),
             HomeRegionId,
-            PeerTransport.Quic);
+            _transports);
         byte[] msg = PeerMessage.Seal(PeerMessageType.Hello, hello.Encode(), _identity.PrivateKey, peer);
 
         PeerHello ack;
@@ -445,15 +461,17 @@ public sealed class TailcatNode : IAsyncDisposable
             throw new TailcatException($"peer {peer} in region {peerRegionId} did not answer: {reason}");
         }
 
-        // The answer names the transport the peer will actually use. It only
-        // differs from what was asked for when the peer cannot do it, and
-        // going on regardless would leave this end sending QUIC packets to
-        // somebody who is not listening for them — silence, rather than an
-        // error anyone could act on.
-        if (ack.Transport != PeerTransport.Quic)
+        // The answer names the one transport the peer chose out of what was
+        // offered. Anything else means it shares none of them, and going on
+        // regardless would leave this end sending QUIC packets to somebody
+        // who is not listening for them — silence, rather than an error
+        // anyone could act on.
+        if (ack.Transports.Count != 1 || !_transports.Contains(ack.Transports[0]))
         {
             await CloseSessionAsync(peer).ConfigureAwait(false);
-            string reason = $"peer answered with transport {(byte)ack.Transport}, which this node does not have";
+            string reason =
+                $"no transport in common: this node speaks [{Describe(_transports)}], " +
+                $"the peer [{Describe(ack.Transports)}]";
             _observer.HandshakeFailed(peer, reason);
             TailcatMetrics.SessionsFailed.Add(1);
             throw new TailcatException($"peer {peer} in region {peerRegionId} refused the session: {reason}");
@@ -1037,14 +1055,32 @@ public sealed class TailcatNode : IAsyncDisposable
         int peerRegion = hello.HomeRegionId != 0 ? hello.HomeRegionId : HomeRegionId;
         DerpConnection relay = await _relays.ForRegionAsync(peerRegion, ct).ConfigureAwait(false);
 
-        // A peer built against a transport this node does not have is told so,
-        // rather than dropped: the answer costs one relayed message and turns
-        // what would be a handshake timeout into an error naming the cause.
-        if (hello.Transport != PeerTransport.Quic)
+        // The dialler's list is in its order of preference, so the first of
+        // it that this node also has is the best the pair can do. A peer that
+        // shares none is told what this node speaks rather than dropped: the
+        // answer costs one relayed message and turns what would be a
+        // handshake timeout into an error naming the cause.
+        PeerTransport? agreed = null;
+        foreach (PeerTransport offered in hello.Transports)
         {
-            await SendHelloAckAsync(relay, peer, hello.SessionId, PeerTransport.Quic, ct).ConfigureAwait(false);
-            _observer.HandshakeFailed(peer, $"asked for transport {(byte)hello.Transport}, which this node does not have");
+            if (_transports.Contains(offered))
+            {
+                agreed = offered;
+                break;
+            }
+        }
+        if (agreed is null)
+        {
+            // Recorded before the answer goes out, not after: the peer acts on
+            // the answer at once, and a caller watching this node would
+            // otherwise see the refusal arrive there before the reason
+            // appears here.
+            _observer.HandshakeFailed(
+                peer,
+                $"no transport in common: the peer offered [{Describe(hello.Transports)}], " +
+                $"this node speaks [{Describe(_transports)}]");
             TailcatMetrics.SessionsFailed.Add(1);
+            await SendHelloAckAsync(relay, peer, hello.SessionId, _transports, ct).ConfigureAwait(false);
             return;
         }
 
@@ -1052,7 +1088,7 @@ public sealed class TailcatNode : IAsyncDisposable
         // retrying because our answer was lost; answer again, do not restart.
         if (_sessions.TryGetValue(peer, out Session? existing) && existing.SessionId == hello.SessionId)
         {
-            await SendHelloAckAsync(relay, peer, hello.SessionId, hello.Transport, ct).ConfigureAwait(false);
+            await SendHelloAckAsync(relay, peer, hello.SessionId, [agreed.Value], ct).ConfigureAwait(false);
             return;
         }
 
@@ -1069,19 +1105,24 @@ public sealed class TailcatNode : IAsyncDisposable
 
         // The bridge points at our QUIC listener, and its address is how the
         // arriving QUIC connection is matched back to this peer.
-        UdpBridge bridge = new(link, (IPEndPoint)_listener.LocalEndPoint);
+        UdpBridge bridge = new(link, (IPEndPoint)_listener!.LocalEndPoint);
         bridge.Start();
         _acceptsByBridge[bridge.LocalEndPoint] = new PendingAccept(
             peer, hello.CertificateFingerprint, link, bridge, _time.GetTimestamp());
 
-        await SendHelloAckAsync(relay, peer, hello.SessionId, hello.Transport, ct).ConfigureAwait(false);
+        await SendHelloAckAsync(relay, peer, hello.SessionId, [agreed.Value], ct).ConfigureAwait(false);
     }
+
+    // Readable in a message an operator has to act on: "[Quic]" says more
+    // than a byte would.
+    private static string Describe(IReadOnlyList<PeerTransport> transports) =>
+        transports.Count == 0 ? "none" : string.Join(", ", transports);
 
     private async Task SendHelloAckAsync(
         DerpConnection relay,
         NodePublic peer,
         ulong sessionId,
-        PeerTransport transport,
+        IReadOnlyList<PeerTransport> transports,
         CancellationToken ct)
     {
         PeerHello ack = new(
@@ -1089,7 +1130,7 @@ public sealed class TailcatNode : IAsyncDisposable
             _identity.Fingerprint,
             await LocalEndpointsAsync(ct).ConfigureAwait(false),
             HomeRegionId,
-            transport);
+            transports);
         byte[] msg = PeerMessage.Seal(PeerMessageType.HelloAck, ack.Encode(), _identity.PrivateKey, peer);
         await relay.SendAsync(peer, msg, ct).ConfigureAwait(false);
     }
@@ -1115,7 +1156,7 @@ public sealed class TailcatNode : IAsyncDisposable
         {
             try
             {
-                QuicConnection quic = await _listener.AcceptConnectionAsync(ct).ConfigureAwait(false);
+                QuicConnection quic = await _listener!.AcceptConnectionAsync(ct).ConfigureAwait(false);
                 if (quic.RemoteEndPoint is not IPEndPoint ep || !_acceptsByBridge.TryRemove(ep, out PendingAccept pending))
                 {
                     await quic.DisposeAsync().ConfigureAwait(false);
@@ -1399,7 +1440,10 @@ public sealed class TailcatNode : IAsyncDisposable
         _acceptsByBridge.Clear();
         _linksByEndpoint.Clear();
 
-        await _listener.DisposeAsync().ConfigureAwait(false);
+        if (_listener is not null)
+        {
+            await _listener.DisposeAsync().ConfigureAwait(false);
+        }
         await _relays.DisposeAsync().ConfigureAwait(false);
         _udp.Dispose();
 

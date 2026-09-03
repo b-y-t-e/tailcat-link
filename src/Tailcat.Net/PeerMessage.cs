@@ -196,22 +196,37 @@ public enum PeerTransport : byte
 /// whichever region the answerer happens to be in, which is only the right
 /// one when both nodes are near each other.
 /// </param>
-/// <param name="Transport">
-/// In a hello, the transport the dialling node is asking for; in the answer,
-/// the one the other node will actually use. It is last on the wire and
-/// defaults to <see cref="PeerTransport.Quic"/>, so a node built before
-/// there was anything to negotiate is read as asking for the only transport
-/// it has.
+/// <param name="Transports">
+/// In a hello, every transport the dialling node can speak, best first; in
+/// the answer, the single one the other node has chosen. Sending the whole
+/// set rather than one wish is what lets a pair settle on the best they
+/// share in one round trip, instead of the dialler guessing and retrying.
+/// It is last on the wire, and an empty list — which is what a node built
+/// before there was anything to negotiate sends — reads as
+/// <see cref="PeerTransport.Quic"/>, the only transport such a node has.
 /// </param>
 public sealed record PeerHello(
     ulong SessionId,
     byte[] CertificateFingerprint,
     IReadOnlyList<IPEndPoint> Endpoints,
     int HomeRegionId = 0,
-    PeerTransport Transport = PeerTransport.Quic)
+    IReadOnlyList<PeerTransport>? Transports = null)
 {
+    /// <summary>What an empty list on the wire means.</summary>
+    public static readonly IReadOnlyList<PeerTransport> DefaultTransports = [PeerTransport.Quic];
+
     /// <summary>The length of a certificate fingerprint (SHA-256).</summary>
     public const int FingerprintLen = 32;
+
+    // A peer offering more than this is not negotiating, it is asking us to
+    // read a list for its own sake.
+    private const int MaxTransports = 16;
+
+    /// <summary>
+    /// Every transport the sender offers, best first, never empty.
+    /// </summary>
+    public IReadOnlyList<PeerTransport> Transports { get; init; } =
+        Transports is { Count: > 0 } offered ? offered : DefaultTransports;
 
     // The most endpoints we will encode or accept. A peer listing hundreds of
     // candidates would just be asking us to probe on its behalf.
@@ -248,7 +263,12 @@ public sealed record PeerHello(
             buf.AddRange(port);
         }
 
-        buf.Add((byte)Transport);
+        int transports = Math.Min(Transports.Count, MaxTransports);
+        buf.Add((byte)transports);
+        for (int i = 0; i < transports; i++)
+        {
+            buf.Add((byte)Transports[i]);
+        }
         return [.. buf];
     }
 
@@ -292,9 +312,21 @@ public sealed record PeerHello(
 
         // Absent from a peer that predates the negotiation, and the default is
         // what such a peer means.
-        PeerTransport transport = rest.Length >= 1 ? (PeerTransport)rest[0] : PeerTransport.Quic;
+        List<PeerTransport> transports = [];
+        if (rest.Length >= 1)
+        {
+            int offered = rest[0];
+            if (offered > MaxTransports || rest.Length < 1 + offered)
+            {
+                return false;
+            }
+            for (int i = 0; i < offered; i++)
+            {
+                transports.Add((PeerTransport)rest[1 + i]);
+            }
+        }
 
-        hello = new PeerHello(sessionId, fingerprint, endpoints, homeRegionId, transport);
+        hello = new PeerHello(sessionId, fingerprint, endpoints, homeRegionId, transports);
         return true;
     }
 }

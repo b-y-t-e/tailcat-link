@@ -38,18 +38,26 @@ choice of transport is made below them, per session, and never surfaces.
 
 The transport is chosen in the sealed hello, so a relay cannot influence it.
 
-`PeerHello` ends with one byte naming the transport (`PeerTransport`).
-Absent, it reads as `Quic = 0`, which is what a node built before the byte
-existed means. `relay1` is **`1`**.
+`PeerHello` ends with a count byte and that many transport bytes
+(`PeerTransport`). An empty list — which is what a node built before the
+negotiation existed sends — reads as `[Quic]`, the only transport such a node
+has. `relay1` is **`1`**.
 
-- The dialling node puts the transport it wants in its `Hello`.
-- The answering node puts the transport it will actually use in its
-  `HelloAck`. When it cannot do what was asked, it names what it does have
-  and creates no session; the dialler sees the mismatch and fails with a
-  reason instead of waiting out its handshake timeout.
+- The dialling node lists **every** transport it can speak, best first.
+  Sending the whole set rather than one wish is what lets a pair settle on
+  the best they share in a single round trip.
+- The answering node picks the first entry it also has and names that one,
+  alone, in its `HelloAck`. Sharing none, it answers with its own set instead
+  and creates no session; the dialler then fails with a message naming both
+  sides' sets rather than waiting out its handshake timeout.
 
-When `Transport = Relay1`, the hello carries **32 more bytes** after the
-transport byte: the sender's ephemeral X25519 public key (below). The
+What a node offers follows from the platform: `Quic` when
+`QuicListener.IsSupported`, and — once this document is implemented —
+`relay1` always. A node left with an empty set is refused at startup, which
+today is what Windows 10 gets.
+
+When the agreed transport is `Relay1`, the hello carries **32 more bytes**
+after the transport list: the sender's ephemeral X25519 public key (below). The
 `CertificateFingerprint` field has no meaning without TLS; it is sent as 32
 zero bytes and ignored.
 
