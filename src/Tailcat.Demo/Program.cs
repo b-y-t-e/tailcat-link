@@ -37,6 +37,11 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
               Prints this machine's public address, waits for the peer's,
               then sends and reports. Run it on both ends at once.
 
+          --relay-only
+              Offers only the relayed transport, whatever this machine can
+              do. What a browser and a Windows 10 machine get, on a machine
+              that could have used QUIC.
+
         An address carries the peer public key and the relay region it
         listens in, so two machines far apart still find each other.
 
@@ -44,6 +49,11 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
         """);
     return 0;
 }
+
+// Anywhere in the arguments: it changes how the node is built, not what the
+// command does with it.
+bool relayOnly = args.Contains("--relay-only");
+args = [.. args.Where(a => a != "--relay-only")];
 
 using CancellationTokenSource cts = new();
 Console.CancelKeyPress += (_, e) =>
@@ -57,15 +67,15 @@ try
     switch (args[0])
     {
         case "listen":
-            await ListenAsync(cts.Token);
+            await ListenAsync(relayOnly, cts.Token);
             return 0;
 
         case "connect" when args.Length >= 2:
-            await ConnectAsync(args[1], interactive: true, cts.Token);
+            await ConnectAsync(args[1], interactive: true, relayOnly, cts.Token);
             return 0;
 
         case "ping" when args.Length >= 2:
-            await ConnectAsync(args[1], interactive: false, cts.Token);
+            await ConnectAsync(args[1], interactive: false, relayOnly, cts.Token);
             return 0;
 
         case "natcheck":
@@ -90,7 +100,7 @@ catch (Exception ex)
     return 1;
 }
 
-static async Task<TailcatNode> StartNodeAsync(CancellationToken ct)
+static async Task<TailcatNode> StartNodeAsync(bool relayOnly, CancellationToken ct)
 {
     Console.WriteLine("measuring relay regions and connecting ...");
     Stopwatch sw = Stopwatch.StartNew();
@@ -99,6 +109,10 @@ static async Task<TailcatNode> StartNodeAsync(CancellationToken ct)
     TailcatNode node = await TailcatNode.CreateAsync(
         new TailcatNodeOptions
         {
+            // Holding the node to relay1 is how a machine with QUIC behaves
+            // like one without: the same thing Windows 10 and a browser get,
+            // reproducible on a machine that has QUIC.
+            Transports = relayOnly ? [PeerTransport.Relay1] : null,
             Observer = new TextTailcatObserver(line => Console.WriteLine($"  [{line}]")),
         },
         ct);
@@ -110,9 +124,9 @@ static async Task<TailcatNode> StartNodeAsync(CancellationToken ct)
     return node;
 }
 
-static async Task ListenAsync(CancellationToken ct)
+static async Task ListenAsync(bool relayOnly, CancellationToken ct)
 {
-    await using TailcatNode node = await StartNodeAsync(ct);
+    await using TailcatNode node = await StartNodeAsync(relayOnly, ct);
 
     Console.WriteLine();
     Console.WriteLine("Run this on the other machine:");
@@ -164,7 +178,7 @@ static async Task ServeAsync(ITailcatConnection conn, CancellationToken ct)
     }
 }
 
-static async Task ConnectAsync(string peerAddress, bool interactive, CancellationToken ct)
+static async Task ConnectAsync(string peerAddress, bool interactive, bool relayOnly, CancellationToken ct)
 {
     ConnBlob address = new(peerAddress.Trim());
     if (!address.TryParse(out ConnInfo? info))
@@ -173,7 +187,7 @@ static async Task ConnectAsync(string peerAddress, bool interactive, Cancellatio
         throw new InvalidOperationException("expected an address like tcomFwWC... as printed by \"tailcat-demo listen\"");
     }
 
-    await using TailcatNode node = await StartNodeAsync(ct);
+    await using TailcatNode node = await StartNodeAsync(relayOnly, ct);
     Console.WriteLine($"  this node: {node.Address}");
     Console.WriteLine();
     Console.WriteLine($"dialing {info.ServerPublic} in region {info.RegionID} ...");
