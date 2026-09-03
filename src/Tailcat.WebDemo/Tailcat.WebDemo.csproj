@@ -2,8 +2,6 @@
 
   <PropertyGroup>
     <RootNamespace>Tailcat.WebDemo</RootNamespace>
-    <IsPackable>true</IsPackable>
-    <PackageId>Tailcat.WebDemo</PackageId>
   </PropertyGroup>
 
   <ItemGroup>

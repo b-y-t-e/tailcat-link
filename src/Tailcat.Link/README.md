@@ -66,4 +66,19 @@ read.
 
 Requires .NET 10 and a platform with QUIC (Windows, Linux, macOS).
 
-Licensed BSD-3-Clause.
+`Tailcat.Net` and the two layers under it are not published separately; their
+assemblies ship inside this package, so one reference is the whole thing.
+
+## Known limits
+
+Hole punching between two *different* NATs has never been verified — every
+direct-path test so far ran between processes on one machine. When it fails
+the session simply stays on the relay, which works but is slower. The
+authentication design has not been reviewed by anyone outside this project.
+
+## Licence
+
+BSD-3-Clause. Parts are ported from
+[tailscale/tailcat](https://github.com/tailscale/tailcat) and carry
+Tailscale's copyright; see the LICENSE file in the package. Not affiliated
+with or endorsed by Tailscale Inc.

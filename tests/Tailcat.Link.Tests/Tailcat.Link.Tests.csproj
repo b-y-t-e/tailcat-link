@@ -9,13 +9,18 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="xunit.v3" Version="3.1.0" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.0" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Tailcat.Link\Tailcat.Link.csproj" />
+    <!-- Tailcat.Link marks this reference PrivateAssets="all" so it does
+         not become a package dependency, which also stops it flowing
+         through to here. The end-to-end tests build nodes directly, so
+         they name it themselves. -->
+    <ProjectReference Include="..\..\src\Tailcat.Net\Tailcat.Net.csproj" />
     <ProjectReference Include="..\Tailcat.TestSupport\Tailcat.TestSupport.csproj" />
   </ItemGroup>
 

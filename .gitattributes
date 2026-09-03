@@ -1,0 +1,5 @@
+# Normalise line endings in the repository, so a checkout on Windows and one
+# on Linux produce the same file and neither shows the other's diff as a
+# whole-file rewrite. Without this the result depends on each contributor's
+# core.autocrlf.
+* text=auto

@@ -5,3 +5,6 @@ TestResults/
 
 # mTiles workspace state
 .mtiles/
+
+# dotnet pack output
+artifacts/

@@ -1,4 +1,4 @@
-# tailcat-dotnet-lib
+# tailcat-link
 
 A .NET 10 port of the parts of [tailscale/tailcat](https://github.com/tailscale/tailcat)
 that tailcat implements itself: the `ConnBlob` wire format, the meow
@@ -14,6 +14,12 @@ Everything below this section is the transport. If what you want is two
 machines that stay in touch — a laptop that moves between Wi-Fi networks, and
 a machine somewhere you cannot reach except by pairing it once — use
 `Tailcat.Link` and skip the rest.
+
+Install it:
+
+```
+dotnet add package Tailcat.Link
+```
 
 On the machine to be reached, once:
 
@@ -391,7 +397,7 @@ Run this on the other machine:
 $ tailcat-demo ping tcomFwWCDySVPcC3gLpPLOP5n40rrAJluCcfm1A0a9RvWb0af-DmFpGQEt
 session up in 1476 ms over relay (mtu 65024)
 #1     126.6 ms  relay (mtu 65024)
-path changed -> direct 100.84.18.10:55862 (2 ms, mtu 1200)
+path changed -> direct 100.84.18.10:55862 (2 ms, mtu 1400)
 #2       2.2 ms  direct 100.84.18.10:55862 (2 ms, mtu 1400)
 ```
 
@@ -447,5 +453,29 @@ TAILCAT_LIVE_TESTS=1 dotnet test # also the end-to-end tests over a public relay
 ```
 
 CI runs the unit tests on Linux, macOS and Windows (`.github/workflows/ci.yml`).
-The live tests stay opt-in there, so the build depends on nobody public
+The live tests stay opt-in there, so the build depends on no public
 service and adds no load to it.
+
+## What is published
+
+One package, `Tailcat.Link`. The layers below it — `Tailcat`, `Tailcat.Derp`
+and `Tailcat.Net` — are named after someone else's project and exist to serve
+it, so their assemblies ship *inside* that package rather than beside it on
+nuget.org. `Tailcat.Cli`, `Tailcat.WebDemo` and `tailcat-demo` are here as
+source and are not published at all.
+
+That is a deliberate trade: a consumer of `Tailcat.Link` gets everything with
+one reference, and nobody else's project name gets claimed on a public feed.
+Anyone who wants the transport on its own can reference `src/Tailcat.Net`
+from a checkout.
+
+## Licence
+
+BSD-3-Clause — see [LICENSE](LICENSE).
+
+The parts ported from [tailscale/tailcat](https://github.com/tailscale/tailcat)
+(`src/Tailcat`, `src/Tailcat.Cli`, `src/Tailcat.WebDemo` and their tests) carry
+Tailscale's copyright alongside this repository's; everything else is original
+work released under the same licence. Each file says which it is in its header.
+
+This project is not affiliated with or endorsed by Tailscale Inc.

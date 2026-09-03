@@ -2,8 +2,6 @@
 
   <PropertyGroup>
     <RootNamespace>Tailcat.Cli</RootNamespace>
-    <IsPackable>true</IsPackable>
-    <PackageId>Tailcat.Cli</PackageId>
   </PropertyGroup>
 
   <ItemGroup>

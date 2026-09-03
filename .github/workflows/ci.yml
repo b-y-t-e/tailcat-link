@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -32,3 +35,47 @@ jobs:
       # runs on every push.
       - name: Test
         run: dotnet test --no-build --configuration Release
+
+  # Tailcat.Link bundles the assemblies of four projects that are not packages
+  # of their own. That is easy to break without noticing, because the build
+  # stays green either way — so the package is built and then actually
+  # consumed on every push.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Pack
+        run: dotnet pack --configuration Release -o artifacts
+
+      - name: Consume the package
+        run: |
+          set -euo pipefail
+          # Read the version off the package that was just built, so a bump to
+          # VersionPrefix does not silently turn this check into a no-op.
+          pkg=$(ls artifacts/Tailcat.Link.*.nupkg | head -1)
+          version=${pkg#artifacts/Tailcat.Link.}
+          version=${version%.nupkg}
+          mkdir -p /tmp/consume && cd /tmp/consume
+          dotnet new console -o app --force
+          cd app
+          # Touches a type from the bundled Tailcat.dll as well as one from
+          # Tailcat.Link, so a package missing its bundled assemblies fails
+          # here rather than on a consumer's machine.
+          cat > Program.cs <<'CSHARP'
+          using Tailcat.Link;
+          Console.WriteLine(InvitationCode.TryParse("nonsense", out _));
+          Console.WriteLine(typeof(Tailcat.ConnBlob).Assembly.GetName().Name);
+          CSHARP
+          dotnet nuget add source "$GITHUB_WORKSPACE/artifacts" --name local
+          dotnet add package Tailcat.Link --version "$version"
+          dotnet run
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: artifacts/*.*nupkg

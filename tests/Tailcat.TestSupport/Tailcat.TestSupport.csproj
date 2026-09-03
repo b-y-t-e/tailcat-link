@@ -8,7 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Sodium.Core" Version="1.4.1" />
+    <PackageReference Include="Sodium.Core" />
   </ItemGroup>
 
   <ItemGroup>

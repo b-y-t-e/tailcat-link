@@ -19,15 +19,24 @@ dotnet build
 dotnet test                       # unit tests only
 TAILCAT_LIVE_TESTS=1 dotnet test  # also end-to-end tests over public DERP relays
 
-# The two-machine demo (see README):
+# The two-machine demo (see README). "connect" runs the interactive side,
+# "ping" the one that only measures:
 dotnet run --project src/Tailcat.Demo -- listen
+dotnet run --project src/Tailcat.Demo -- connect <address>
 dotnet run --project src/Tailcat.Demo -- ping <address>
+
+dotnet pack -c Release -o artifacts   # builds the one published package
 ```
 
 The build must stay at **zero warnings**. Analyzers are on via
 `Directory.Build.props`; when one fires, fix it or suppress it *locally* with
 a written justification — never blanket-disable a rule. CI builds with
 `-warnaserror`, so a warning is a failed build, not a note in the log.
+
+Package versions are central (`Directory.Packages.props`): a `PackageReference`
+here carries no `Version`. Restore is pinned to nuget.org by `NuGet.config`,
+which central package management requires and which keeps the build from
+depending on whatever feeds a machine happens to have.
 
 ## Layers
 
@@ -40,6 +49,26 @@ Tailcat.Cli    the pure logic from cmd/tailcat
 Tailcat.WebDemo  the webdemo package
 Tailcat.Demo   tailcat-demo, for verifying a link between two machines
 ```
+
+## Publishing
+
+**Only `Tailcat.Link` is a package.** Everything else has `IsPackable=false`
+(the default, set in `Directory.Build.props`) and the assemblies of `Tailcat`,
+`Tailcat.Derp` and `Tailcat.Net` ship *inside* the `Tailcat.Link` package,
+bundled by the `IncludeReferencedProjectsInPackage` target in its csproj. Two
+consequences worth remembering:
+
+- The `ProjectReference` to `Tailcat.Net` is `PrivateAssets="all"`, so it does
+  not become a nuspec dependency. That also stops it flowing transitively, so
+  a test project that needs `Tailcat.Net` must reference it by name.
+- Anything those projects pull from NuGet must be declared again as a
+  `PackageReference` in `Tailcat.Link`, or a consumer restores a package whose
+  bundled assemblies cannot load. CI packs and then actually consumes the
+  package on every push, which is what catches this.
+
+Copyright headers are not decoration: files ported from Go (`src/Tailcat`,
+`src/Tailcat.Cli`, `src/Tailcat.WebDemo` and their tests) carry Tailscale's
+line, new files do not. `LICENSE` explains the split and ships in the package.
 
 ## Things that will bite you
 

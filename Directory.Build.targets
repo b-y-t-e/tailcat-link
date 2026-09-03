@@ -1,0 +1,13 @@
+<Project>
+
+  <!-- Imported after each project file, so IsPackable already has its final
+       value here; the same condition in Directory.Build.props would be
+       evaluated before the project had a chance to opt in. -->
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <!-- PackageLicenseFile names the file; this is what puts it in the
+         package. A package redistributes binaries, so BSD-3-Clause requires
+         the notice to travel with them. -->
+    <None Include="$(MSBuildThisFileDirectory)LICENSE" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+</Project>
