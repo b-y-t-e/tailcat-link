@@ -20,7 +20,7 @@ namespace Tailcat.Net.Tests;
 /// <remarks>
 /// <para>
 /// A node reconnects to its <em>relay</em> by itself, but a session is not
-/// resurrected: once a <see cref="TailcatConnection"/> is dead it stays dead.
+/// resurrected: once a <see cref="ITailcatConnection"/> is dead it stays dead.
 /// Staying connected for days is therefore the application's job, and this is
 /// what that job looks like — <see cref="RemoteAgent"/> accepts sessions
 /// forever, <see cref="ControlClient"/> re-dials whenever a command fails.
@@ -102,7 +102,7 @@ public class UnattendedLinkTests
         private readonly CancellationTokenSource _cts = new();
         private readonly Task _acceptLoop;
         private readonly Lock _mu = new();
-        private TailcatConnection? _current;
+        private ITailcatConnection? _current;
         private int _commandsServed;
         private bool _disposed;
 
@@ -125,7 +125,7 @@ public class UnattendedLinkTests
         /// <summary>Pushes an unsolicited signal to whoever is connected.</summary>
         public async Task PushSignalAsync(string signal, CancellationToken ct)
         {
-            TailcatConnection? conn;
+            ITailcatConnection? conn;
             lock (_mu)
             {
                 conn = _current;
@@ -146,9 +146,9 @@ public class UnattendedLinkTests
         {
             try
             {
-                await foreach (TailcatConnection conn in _node.AcceptConnectionsAsync(ct))
+                await foreach (ITailcatConnection conn in _node.AcceptConnectionsAsync(ct))
                 {
-                    TailcatConnection? previous;
+                    ITailcatConnection? previous;
                     lock (_mu)
                     {
                         previous = _current;
@@ -170,7 +170,7 @@ public class UnattendedLinkTests
             }
         }
 
-        private async Task ServeAsync(TailcatConnection conn, CancellationToken ct)
+        private async Task ServeAsync(ITailcatConnection conn, CancellationToken ct)
         {
             try
             {
@@ -223,7 +223,7 @@ public class UnattendedLinkTests
             _disposed = true;
 
             await _cts.CancelAsync();
-            TailcatConnection? conn;
+            ITailcatConnection? conn;
             lock (_mu)
             {
                 conn = _current;
@@ -261,7 +261,7 @@ public class UnattendedLinkTests
         private readonly ConnBlob _address;
         private readonly SemaphoreSlim _mu = new(1, 1);
         private TailcatNode? _node;
-        private TailcatConnection? _connection;
+        private ITailcatConnection? _connection;
         private int _sessionsOpened;
         private bool _disposed;
 
@@ -288,7 +288,7 @@ public class UnattendedLinkTests
             Exception? last = null;
             while (!deadline.IsCancellationRequested)
             {
-                TailcatConnection? conn = null;
+                ITailcatConnection? conn = null;
                 try
                 {
                     conn = await EnsureConnectedAsync(deadline.Token);
@@ -348,7 +348,7 @@ public class UnattendedLinkTests
             }
         }
 
-        private async Task<TailcatConnection> EnsureConnectedAsync(CancellationToken ct)
+        private async Task<ITailcatConnection> EnsureConnectedAsync(CancellationToken ct)
         {
             await _mu.WaitAsync(ct);
             try
@@ -365,7 +365,7 @@ public class UnattendedLinkTests
                     try
                     {
                         _node ??= await _newNode(ct);
-                        TailcatConnection conn = await _node.ConnectAsync(_address, ct);
+                        ITailcatConnection conn = await _node.ConnectAsync(_address, ct);
                         _connection = conn;
                         Interlocked.Increment(ref _sessionsOpened);
                         _ = Task.Run(() => SignalLoopAsync(conn, ct), CancellationToken.None);
@@ -393,7 +393,7 @@ public class UnattendedLinkTests
             }
         }
 
-        private async Task SignalLoopAsync(TailcatConnection conn, CancellationToken ct)
+        private async Task SignalLoopAsync(ITailcatConnection conn, CancellationToken ct)
         {
             try
             {
@@ -413,7 +413,7 @@ public class UnattendedLinkTests
             }
         }
 
-        private async Task DropAsync(TailcatConnection dead)
+        private async Task DropAsync(ITailcatConnection dead)
         {
             await _mu.WaitAsync(CancellationToken.None);
             try

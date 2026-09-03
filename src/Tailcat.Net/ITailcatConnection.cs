@@ -19,9 +19,10 @@ namespace Tailcat.Net;
 /// <see cref="TailcatConnection"/>'s QUIC.
 /// </para>
 /// <para>
-/// What is missing from it is as deliberate: which path traffic takes, and
-/// whether it moved, belong to a session built on <see cref="PeerLink"/> and
-/// have no meaning for one that is relayed for its whole life.
+/// Where traffic is flowing belongs here too, because "the relay" is an
+/// answer as real as a punched-open address: a caller deciding whether a
+/// session is fast enough, or an operator asking why it is not, needs the
+/// same question answered whatever is carrying it.
 /// </para>
 /// </remarks>
 public interface ITailcatConnection : IAsyncDisposable
@@ -34,4 +35,44 @@ public interface ITailcatConnection : IAsyncDisposable
 
     /// <summary>Waits for the peer to open a stream.</summary>
     Task<Stream> AcceptStreamAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>How traffic is currently reaching the peer.</summary>
+    PeerPath CurrentPath { get; }
+
+    /// <summary>Every path known to this session, and what is known about it.</summary>
+    IReadOnlyList<PeerPath> Paths { get; }
+
+    /// <summary>
+    /// Raised when traffic moves to a different path. A session that can only
+    /// ever be relayed never raises it.
+    /// </summary>
+    event Action<PeerPath>? PathChanged;
+
+    /// <summary>
+    /// Waits until traffic is flowing over a direct path, or the timeout
+    /// passes.
+    /// </summary>
+    /// <remarks>
+    /// Hole punching may simply fail — between two sufficiently hostile NATs
+    /// there is no direct path — and a relayed transport has none by
+    /// definition. Both answer false and keep working.
+    /// </remarks>
+    /// <returns>True if a direct path is in use.</returns>
+    async Task<bool> WaitForDirectPathAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(timeout);
+        try
+        {
+            while (CurrentPath.Kind != PeerPathKind.Direct)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(100), cts.Token).ConfigureAwait(false);
+            }
+            return true;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return false;
+        }
+    }
 }

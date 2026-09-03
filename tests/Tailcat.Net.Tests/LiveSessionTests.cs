@@ -48,7 +48,7 @@ public class LiveSessionTests
 
         Task<string> served = Task.Run(async () =>
         {
-            await using TailcatConnection conn = await listener.AcceptConnectionAsync(ct);
+            await using ITailcatConnection conn = await listener.AcceptConnectionAsync(ct);
             await using Stream stream = await conn.AcceptStreamAsync(ct);
             byte[] buf = new byte[256];
             int n = await stream.ReadAsync(buf, ct);
@@ -58,7 +58,7 @@ public class LiveSessionTests
             return got;
         }, ct);
 
-        await using TailcatConnection client = await dialer.ConnectAsync(listener.PublicKey, ct);
+        await using ITailcatConnection client = await dialer.ConnectAsync(listener.PublicKey, ct);
         await using Stream s = await client.OpenStreamAsync(ct);
         await s.WriteAsync("hello peer"u8.ToArray(), ct);
         await s.FlushAsync(ct);
@@ -91,7 +91,7 @@ public class LiveSessionTests
 
         Task serve = Task.Run(async () =>
         {
-            await using TailcatConnection conn = await listener.AcceptConnectionAsync(ct);
+            await using ITailcatConnection conn = await listener.AcceptConnectionAsync(ct);
             await using Stream stream = await conn.AcceptStreamAsync(ct);
             byte[] hello = new byte[4];
             await stream.ReadExactlyAsync(hello, ct);
@@ -100,7 +100,7 @@ public class LiveSessionTests
             await Task.Delay(TimeSpan.FromSeconds(5), ct);
         }, ct);
 
-        await using TailcatConnection client = await dialer.ConnectAsync(listener.PublicKey, ct);
+        await using ITailcatConnection client = await dialer.ConnectAsync(listener.PublicKey, ct);
         await using Stream s = await client.OpenStreamAsync(ct);
 
         // QUIC opens a stream lazily: until the opener writes, the peer never

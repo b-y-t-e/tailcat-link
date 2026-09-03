@@ -121,7 +121,7 @@ static async Task ListenAsync(CancellationToken ct)
     Console.WriteLine();
     Console.WriteLine("waiting for a peer ...");
 
-    await foreach (TailcatConnection conn in node.AcceptConnectionsAsync(ct))
+    await foreach (ITailcatConnection conn in node.AcceptConnectionsAsync(ct))
     {
         Console.WriteLine($"peer connected: {conn.Peer}");
         Console.WriteLine($"  path: {conn.CurrentPath}");
@@ -130,7 +130,7 @@ static async Task ListenAsync(CancellationToken ct)
     }
 }
 
-static async Task ServeAsync(TailcatConnection conn, CancellationToken ct)
+static async Task ServeAsync(ITailcatConnection conn, CancellationToken ct)
 {
     try
     {
@@ -179,7 +179,7 @@ static async Task ConnectAsync(string peerAddress, bool interactive, Cancellatio
     Console.WriteLine($"dialing {info.ServerPublic} in region {info.RegionID} ...");
 
     Stopwatch sw = Stopwatch.StartNew();
-    await using TailcatConnection conn = await node.ConnectAsync(address, ct);
+    await using ITailcatConnection conn = await node.ConnectAsync(address, ct);
     Console.WriteLine($"session up in {sw.ElapsedMilliseconds} ms over {conn.CurrentPath}");
     conn.PathChanged += p => Console.WriteLine($"path changed -> {p}");
 

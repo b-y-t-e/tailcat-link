@@ -14,7 +14,9 @@ namespace Tailcat.Link.Tests;
 /// in-memory relay, so the link can be taken apart and put back together in a
 /// test without a public relay or a second machine.
 /// </summary>
-internal sealed class FakeRelayGatewayFactory(FakeDerpRelay relay) : INodeGatewayFactory
+internal sealed class FakeRelayGatewayFactory(
+    FakeDerpRelay relay,
+    IReadOnlyList<PeerTransport>? transports = null) : INodeGatewayFactory
 {
     /// <summary>The one region the fake relay serves.</summary>
     public const int RegionId = 950;
@@ -34,6 +36,10 @@ internal sealed class FakeRelayGatewayFactory(FakeDerpRelay relay) : INodeGatewa
             new TailcatNodeOptions
             {
                 PrivateKey = privateKey,
+                // Null lets the node work it out; a test that means to
+                // exercise the relayed transport names it, because a pair
+                // that can do QUIC always does.
+                Transports = transports,
                 DerpMap = new DerpMap
                 {
                     Regions =

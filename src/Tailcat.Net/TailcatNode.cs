@@ -12,6 +12,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Threading.Channels;
 using Tailcat.Derp;
 using Tailcat.Keys;
+using Tailcat.Net.Relay1;
 using Tailcat.Tailcfg;
 
 namespace Tailcat.Net;
@@ -74,6 +75,19 @@ public sealed class TailcatNodeOptions
     /// </remarks>
     public IReadOnlyList<string> StunFallbackHosts { get; init; } =
         ["stun.cloudflare.com:3478", "stun.l.google.com:19302"];
+
+    /// <summary>
+    /// What this node offers a peer, best first. Null works it out from the
+    /// platform: QUIC when there is any, then <see cref="PeerTransport.Relay1"/>,
+    /// which always works.
+    /// </summary>
+    /// <remarks>
+    /// Setting it is how a node is held to one transport — a test that means
+    /// to exercise the relayed one, or an operator who would rather a link
+    /// never tried to leave the relay at all. Asking for QUIC on a platform
+    /// without it is refused rather than quietly dropped.
+    /// </remarks>
+    public IReadOnlyList<PeerTransport>? Transports { get; init; }
 
     /// <summary>How long to wait for a peer to answer a session handshake.</summary>
     public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(20);
@@ -184,8 +198,8 @@ public sealed class TailcatNode : IAsyncDisposable
     // Bounded: a caller that never accepts must not be able to grow this
     // without limit. Refusing the newest is the honest failure - the peer
     // sees no session rather than one that is never served.
-    private readonly Channel<TailcatConnection> _incoming =
-        Channel.CreateBounded<TailcatConnection>(new BoundedChannelOptions(256)
+    private readonly Channel<ITailcatConnection> _incoming =
+        Channel.CreateBounded<ITailcatConnection>(new BoundedChannelOptions(256)
         {
             FullMode = BoundedChannelFullMode.DropWrite,
         });
@@ -291,16 +305,29 @@ public sealed class TailcatNode : IAsyncDisposable
         // it simply has one transport fewer to offer — so what it can speak
         // is worked out here rather than being assumed, and only a node left
         // with nothing at all is refused.
-        List<PeerTransport> transports = [];
-        if (QuicListener.IsSupported)
+        // Order is preference: QUIC first because it recovers from a dropped
+        // packet and can leave the relay for a direct path, relay1 second
+        // because it always works. A pair that can do QUIC therefore still
+        // does, and still punches its way off the relay.
+        List<PeerTransport> transports;
+        if (options.Transports is { Count: > 0 } chosen)
         {
-            transports.Add(PeerTransport.Quic);
+            if (chosen.Contains(PeerTransport.Quic) && !QuicListener.IsSupported)
+            {
+                throw new PlatformNotSupportedException(
+                    "QUIC was asked for but this platform has none (Windows 10 has none; " +
+                    "Linux needs libmsquic installed)");
+            }
+            transports = [.. chosen];
         }
-        if (transports.Count == 0)
+        else
         {
-            throw new PlatformNotSupportedException(
-                "this platform has no QUIC (Windows 10 has none; Linux needs libmsquic installed), " +
-                "and no other transport is implemented yet — see docs/relay1.md");
+            transports = [];
+            if (QuicListener.IsSupported)
+            {
+                transports.Add(PeerTransport.Quic);
+            }
+            transports.Add(PeerTransport.Relay1);
         }
 
         NodeIdentity identity = NodeIdentity.Create(options.PrivateKey);
@@ -342,8 +369,9 @@ public sealed class TailcatNode : IAsyncDisposable
             // The listener accepts from the moment ListenAsync returns, which
             // is before the node it must ask for options exists. Waiting on the
             // promise makes that window a short delay rather than a
-            // NullReferenceException raised inside MsQuic.
-            listener = await QuicListener.ListenAsync(
+            // NullReferenceException raised inside MsQuic. A node that offers
+            // no QUIC opens none: nothing would ever arrive on it.
+            listener = !transports.Contains(PeerTransport.Quic) ? null : await QuicListener.ListenAsync(
                 new QuicListenerOptions
                 {
                     ListenEndPoint = new IPEndPoint(IPAddress.Loopback, 0),
@@ -389,7 +417,7 @@ public sealed class TailcatNode : IAsyncDisposable
     /// </param>
     /// <param name="cancellationToken">Cancels the attempt.</param>
     /// <exception cref="TailcatException">If the peer does not answer in time.</exception>
-    public async Task<TailcatConnection> ConnectAsync(ConnBlob address, CancellationToken cancellationToken = default)
+    public async Task<ITailcatConnection> ConnectAsync(ConnBlob address, CancellationToken cancellationToken = default)
     {
         ConnInfo info = address.Parse();
         int peerRegion = info.RegionID != 0
@@ -407,14 +435,14 @@ public sealed class TailcatNode : IAsyncDisposable
     /// far apart will not. Prefer <see cref="ConnectAsync(ConnBlob, CancellationToken)"/>,
     /// whose address says where the peer is listening.
     /// </remarks>
-    public Task<TailcatConnection> ConnectAsync(NodePublic peer, CancellationToken cancellationToken = default) =>
+    public Task<ITailcatConnection> ConnectAsync(NodePublic peer, CancellationToken cancellationToken = default) =>
         ConnectAsync(peer, HomeRegionId, cancellationToken);
 
     /// <summary>
     /// Opens a session to <paramref name="peer"/> in relay region
     /// <paramref name="peerRegionId"/>.
     /// </summary>
-    public async Task<TailcatConnection> ConnectAsync(
+    public async Task<ITailcatConnection> ConnectAsync(
         NodePublic peer,
         int peerRegionId,
         CancellationToken cancellationToken = default)
@@ -424,7 +452,7 @@ public sealed class TailcatNode : IAsyncDisposable
 
         ulong sessionId = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         PeerLink link = new(_identity.PrivateKey, peer, sessionId, relay, _udp);
-        Session session = new(link) { SessionId = sessionId, RegionId = peerRegionId };
+        Session session = new(link) { Peer = peer, SessionId = sessionId, RegionId = peerRegionId };
         await ReplaceSessionAsync(peer, session).ConfigureAwait(false);
         link.PathChanged += path => OnPathChanged(peer, path);
         link.DirectProbeSent += to => _observer.DirectProbeSent(peer, to);
@@ -439,12 +467,15 @@ public sealed class TailcatNode : IAsyncDisposable
 
         // Tell the peer our certificate fingerprint, where it might reach us,
         // and which region to answer in; then wait for the same in return.
+        Relay1Ephemeral? ephemeral = _transports.Contains(PeerTransport.Relay1) ? new Relay1Ephemeral() : null;
+        session.Ephemeral = ephemeral;
         PeerHello hello = new(
             sessionId,
             _identity.Fingerprint,
             await LocalEndpointsAsync(cts.Token).ConfigureAwait(false),
             HomeRegionId,
-            _transports);
+            _transports,
+            ephemeral?.PublicKey);
         byte[] msg = PeerMessage.Seal(PeerMessageType.Hello, hello.Encode(), _identity.PrivateKey, peer);
 
         PeerHello ack;
@@ -475,6 +506,13 @@ public sealed class TailcatNode : IAsyncDisposable
             _observer.HandshakeFailed(peer, reason);
             TailcatMetrics.SessionsFailed.Add(1);
             throw new TailcatException($"peer {peer} in region {peerRegionId} refused the session: {reason}");
+        }
+
+        if (ack.Transports[0] == PeerTransport.Relay1)
+        {
+            return await StartRelayedAsync(
+                    peer, peerRegionId, session, relay, ack, isDialer: true, startedAt, cts.Token)
+                .ConfigureAwait(false);
         }
 
         link.AddCandidates(ack.Endpoints);
@@ -542,11 +580,11 @@ public sealed class TailcatNode : IAsyncDisposable
     /// Yields sessions other nodes open to this one, until the node is
     /// disposed or <paramref name="cancellationToken"/> fires.
     /// </summary>
-    public IAsyncEnumerable<TailcatConnection> AcceptConnectionsAsync(CancellationToken cancellationToken = default) =>
+    public IAsyncEnumerable<ITailcatConnection> AcceptConnectionsAsync(CancellationToken cancellationToken = default) =>
         _incoming.Reader.ReadAllAsync(cancellationToken);
 
     /// <summary>Accepts the next session another node opens to this one.</summary>
-    public async Task<TailcatConnection> AcceptConnectionAsync(CancellationToken cancellationToken = default) =>
+    public async Task<ITailcatConnection> AcceptConnectionAsync(CancellationToken cancellationToken = default) =>
         await _incoming.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
@@ -577,11 +615,11 @@ public sealed class TailcatNode : IAsyncDisposable
         {
             PeerHello update = new(session.SessionId, _identity.Fingerprint, endpoints, HomeRegionId);
             byte[] msg = PeerMessage.Seal(
-                PeerMessageType.EndpointUpdate, update.Encode(), _identity.PrivateKey, session.Link.Peer);
+                PeerMessageType.EndpointUpdate, update.Encode(), _identity.PrivateKey, session.Peer);
             try
             {
                 DerpConnection relay = await _relays.ForRegionAsync(session.RegionId, cancellationToken).ConfigureAwait(false);
-                await relay.SendAsync(session.Link.Peer, msg, cancellationToken).ConfigureAwait(false);
+                await relay.SendAsync(session.Peer, msg, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is TailcatException or IOException or ObjectDisposedException)
             {
@@ -964,10 +1002,11 @@ public sealed class TailcatNode : IAsyncDisposable
 
                 foreach (Session session in _sessions.Values)
                 {
-                    if (PeerMessage.TryOpen(packet.Span, _identity.PrivateKey, session.Link.Peer, out _, out _))
+                    if (session.Link is not null &&
+                        PeerMessage.TryOpen(packet.Span, _identity.PrivateKey, session.Peer, out _, out _))
                     {
-                        _linksByEndpoint[from] = session.Link;
-                        await session.Link.HandlePacketAsync(packet, from, ct).ConfigureAwait(false);
+                        _linksByEndpoint[from] = session.Link!;
+                        await session.Link!.HandlePacketAsync(packet, from, ct).ConfigureAwait(false);
                         break;
                     }
                 }
@@ -1042,7 +1081,25 @@ public sealed class TailcatNode : IAsyncDisposable
             return;
         }
 
-        if (_sessions.TryGetValue(source, out Session? session))
+        if (!_sessions.TryGetValue(source, out Session? session))
+        {
+            return;
+        }
+
+        // A relay1 session has no link and no paths; its records go straight
+        // to it, and one that will not open ends it — there is no
+        // retransmission here to paper over a record the relay dropped.
+        if (PeerMessage.TypeOf(packet.Span) == PeerMessageType.Relay1Record)
+        {
+            if (session.Relayed is not null && !session.Relayed.HandleRecord(packet.Span))
+            {
+                _observer.HandshakeFailed(source, "a relay1 record was lost or forged; the session cannot continue");
+                await CloseSessionAsync(source).ConfigureAwait(false);
+            }
+            return;
+        }
+
+        if (session.Link is not null)
         {
             await session.Link.HandlePacketAsync(packet, from, ct).ConfigureAwait(false);
         }
@@ -1093,7 +1150,7 @@ public sealed class TailcatNode : IAsyncDisposable
         }
 
         PeerLink link = new(_identity.PrivateKey, peer, hello.SessionId, relay, _udp);
-        Session session = new(link) { SessionId = hello.SessionId, RegionId = peerRegion };
+        Session session = new(link) { Peer = peer, SessionId = hello.SessionId, RegionId = peerRegion };
         await ReplaceSessionAsync(peer, session).ConfigureAwait(false);
         link.PathChanged += path => OnPathChanged(peer, path);
         link.DirectProbeSent += to => _observer.DirectProbeSent(peer, to);
@@ -1102,6 +1159,24 @@ public sealed class TailcatNode : IAsyncDisposable
         _observer.HandshakeStarted(peer, peerRegion);
         TailcatMetrics.SessionsStarted.Add(1);
         link.AddCandidates(hello.Endpoints);
+
+        if (agreed.Value == PeerTransport.Relay1)
+        {
+            Relay1Ephemeral mine = new();
+            session.Ephemeral = mine;
+            ITailcatConnection relayed = await StartRelayedAsync(
+                    peer, peerRegion, session, relay, hello, isDialer: false, _time.GetTimestamp(), ct)
+                .ConfigureAwait(false);
+
+            if (!_incoming.Writer.TryWrite(relayed))
+            {
+                _observer.HandshakeFailed(peer, "the inbound session queue is full");
+                TailcatMetrics.SessionsFailed.Add(1);
+                await relayed.DisposeAsync().ConfigureAwait(false);
+                await CloseSessionAsync(peer).ConfigureAwait(false);
+            }
+            return;
+        }
 
         // The bridge points at our QUIC listener, and its address is how the
         // arriving QUIC connection is matched back to this peer.
@@ -1118,11 +1193,101 @@ public sealed class TailcatNode : IAsyncDisposable
     private static string Describe(IReadOnlyList<PeerTransport> transports) =>
         transports.Count == 0 ? "none" : string.Join(", ", transports);
 
+    /// <summary>
+    /// Brings up a session the relay carries, once both ends have agreed to
+    /// one and exchanged ephemeral keys inside their sealed hellos.
+    /// </summary>
+    /// <remarks>
+    /// The host answers here rather than through the ordinary ack path,
+    /// because its answer has to carry the ephemeral key it just generated —
+    /// and it must be generated before the answer goes out, or the dialler
+    /// has nothing to derive from.
+    /// </remarks>
+    private async Task<ITailcatConnection> StartRelayedAsync(
+        NodePublic peer,
+        int peerRegionId,
+        Session session,
+        DerpConnection relay,
+        PeerHello peerHello,
+        bool isDialer,
+        long startedAt,
+        CancellationToken ct)
+    {
+        if (peerHello.Ephemeral is null)
+        {
+            await CloseSessionAsync(peer).ConfigureAwait(false);
+            const string Reason = "the peer agreed to relay1 without sending an ephemeral key";
+            _observer.HandshakeFailed(peer, Reason);
+            TailcatMetrics.SessionsFailed.Add(1);
+            throw new TailcatException($"peer {peer}: {Reason}");
+        }
+
+        Relay1Ephemeral ephemeral = session.Ephemeral
+            ?? throw new TailcatException("this node agreed to relay1 without an ephemeral key of its own");
+
+        // Which side is which decides who uses which direction's key, and it
+        // is not negotiable: the dialler is whoever sent the Hello.
+        (NodePublic dialerKey, NodePublic hostKey) = isDialer
+            ? (_identity.PublicKey, peer)
+            : (peer, _identity.PublicKey);
+        Relay1Keys keys = ephemeral.Derive(peerHello.Ephemeral, session.SessionId, dialerKey, hostKey);
+
+        // The link was built before the answer named a transport, and a
+        // relayed session has no use for one: probing addresses a peer cannot
+        // answer from — a browser has no UDP socket at all — is traffic spent
+        // on a path that cannot exist.
+        PeerLink? link = session.Link;
+        session.Link = null;
+        if (link is not null)
+        {
+            ForgetEndpointsOf(link);
+            await link.DisposeAsync().ConfigureAwait(false);
+        }
+
+        Relay1Connection connection = new(
+            peer,
+            keys,
+            isDialer,
+            (record, token) => relay.SendAsync(peer, record, token),
+            c => OnRelayedClosedAsync(peer, c));
+        session.Relayed = connection;
+
+        if (!isDialer)
+        {
+            await SendHelloAckAsync(
+                    relay, peer, session.SessionId, [PeerTransport.Relay1], ephemeral.PublicKey, ct)
+                .ConfigureAwait(false);
+        }
+
+        _observer.HandshakeCompleted(peer, _time.GetElapsedTime(startedAt));
+        TailcatMetrics.SessionsEstablished.Add(1);
+        return connection;
+    }
+
+    private async ValueTask OnRelayedClosedAsync(NodePublic peer, Relay1Connection connection)
+    {
+        if (_sessions.TryGetValue(peer, out Session? session) &&
+            ReferenceEquals(session.Relayed, connection) &&
+            _sessions.TryRemove(new KeyValuePair<NodePublic, Session>(peer, session)))
+        {
+            await Task.CompletedTask.ConfigureAwait(false);
+        }
+    }
+
+    private Task SendHelloAckAsync(
+        DerpConnection relay,
+        NodePublic peer,
+        ulong sessionId,
+        IReadOnlyList<PeerTransport> transports,
+        CancellationToken ct) =>
+        SendHelloAckAsync(relay, peer, sessionId, transports, ephemeral: null, ct);
+
     private async Task SendHelloAckAsync(
         DerpConnection relay,
         NodePublic peer,
         ulong sessionId,
         IReadOnlyList<PeerTransport> transports,
+        byte[]? ephemeral,
         CancellationToken ct)
     {
         PeerHello ack = new(
@@ -1130,7 +1295,8 @@ public sealed class TailcatNode : IAsyncDisposable
             _identity.Fingerprint,
             await LocalEndpointsAsync(ct).ConfigureAwait(false),
             HomeRegionId,
-            transports);
+            transports,
+            ephemeral);
         byte[] msg = PeerMessage.Seal(PeerMessageType.HelloAck, ack.Encode(), _identity.PrivateKey, peer);
         await relay.SendAsync(peer, msg, ct).ConfigureAwait(false);
     }
@@ -1269,18 +1435,28 @@ public sealed class TailcatNode : IAsyncDisposable
             ReferenceEquals(session.Connection, connection) &&
             _sessions.TryRemove(new KeyValuePair<NodePublic, Session>(peer, session)))
         {
-            await session.Link.DisposeAsync().ConfigureAwait(false);
+            await session.Link!.DisposeAsync().ConfigureAwait(false);
         }
     }
 
     private async Task ReleaseSessionAsync(Session session)
     {
-        ForgetEndpointsOf(session.Link);
+        if (session.Link is not null)
+        {
+            ForgetEndpointsOf(session.Link);
+        }
         if (session.Connection is not null)
         {
             await session.Connection.DisposeAsync().ConfigureAwait(false);
         }
-        await session.Link.DisposeAsync().ConfigureAwait(false);
+        if (session.Relayed is not null)
+        {
+            await session.Relayed.DisposeAsync().ConfigureAwait(false);
+        }
+        if (session.Link is not null)
+        {
+            await session.Link.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     // ForgetEndpointsOf drops the addresses that route to a link. That map is
@@ -1461,9 +1637,17 @@ public sealed class TailcatNode : IAsyncDisposable
         _identity.Dispose();
     }
 
-    private sealed class Session(PeerLink link)
+    private sealed class Session(PeerLink? link)
     {
-        public PeerLink Link { get; } = link;
+        /// <summary>
+        /// Null for a relay1 session: there are no direct paths to probe, so
+        /// there is nothing for a link to do. It is cleared once the two ends
+        /// agree on the relayed transport, which is after the link was built
+        /// — the transport is not known until the answer comes back.
+        /// </summary>
+        public PeerLink? Link { get; set; } = link;
+
+        public required NodePublic Peer { get; init; }
 
         public required ulong SessionId { get; init; }
 
@@ -1474,6 +1658,12 @@ public sealed class TailcatNode : IAsyncDisposable
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public TailcatConnection? Connection { get; set; }
+
+        /// <summary>The session itself, when it is carried by the relay.</summary>
+        public Relay1Connection? Relayed { get; set; }
+
+        /// <summary>The half of a relay1 handshake this node contributed.</summary>
+        public Relay1Ephemeral? Ephemeral { get; set; }
     }
 
     private readonly record struct PendingAccept(

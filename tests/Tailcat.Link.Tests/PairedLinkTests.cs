@@ -50,6 +50,47 @@ public class PairedLinkTests
     }
 
     /// <summary>
+    /// The host does not care what carries the session. Nothing above
+    /// <c>Tailcat.Net</c> mentions a transport, so a peer that cannot have
+    /// QUIC — a browser, or Windows 10 — pairs and asks with exactly the same
+    /// code, and the machine being reached is written the same way whichever
+    /// arrives.
+    /// </summary>
+    [Fact]
+    public async Task ALinkWorksTheSameOverTheRelayedTransport()
+    {
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(2));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        FakeRelayGatewayFactory gateways = new(relay, [PeerTransport.Relay1]);
+
+        await using ILink host = await TailcatLink.HostAsync(
+            "demo", OptionsFor(gateways, new InMemoryLinkStore()), ct);
+        host.OnRequest(command => $"host got: {command}");
+
+        // A notification reaches the peer's handler like a request whose
+        // answer is thrown away, so the same handler serves both.
+        TaskCompletionSource<string> noticed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using ILink operatorSide = await TailcatLink.JoinAsync(
+            "demo", host.InvitationCode.Value, OptionsFor(gateways, new InMemoryLinkStore()), ct);
+        operatorSide.OnRequest(command =>
+        {
+            if (command == "something happened")
+            {
+                noticed.TrySetResult(command);
+            }
+            return $"operator got: {command}";
+        });
+
+        Assert.Equal("host got: status", await operatorSide.RequestAsync("status", ct));
+        Assert.Equal("operator got: hello", await host.RequestAsync("hello", ct));
+
+        await host.NotifyAsync("something happened", ct);
+        Assert.Equal("something happened", await noticed.Task.WaitAsync(ct));
+    }
+
+    /// <summary>
     /// The whole of the intended usage: one machine shows a code, the other is
     /// given it, and both can ask the other for things.
     /// </summary>

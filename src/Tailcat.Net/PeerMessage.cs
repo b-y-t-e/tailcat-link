@@ -33,6 +33,17 @@ public enum PeerMessageType : byte
     /// changed underneath it.
     /// </summary>
     EndpointUpdate = 0x06,
+
+    /// <summary>
+    /// One encrypted record of a <c>relay1</c> session.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="Data"/> on purpose: that one means "an opaque
+    /// datagram that is already encrypted", which the link forwards into the
+    /// UDP bridge for QUIC to read. These carry their own encryption and
+    /// belong to a session that has no bridge.
+    /// </remarks>
+    Relay1Record = 0x07,
 }
 
 /// <summary>
@@ -176,6 +187,14 @@ public enum PeerTransport : byte
     /// UDP socket uses.
     /// </summary>
     Quic = 0,
+
+    /// <summary>
+    /// Streams carried by the relay itself, encrypted end to end and never
+    /// leaving it. What a node uses when it cannot have QUIC — a browser,
+    /// which has no UDP socket, or Windows 10, which has no QUIC at all.
+    /// Slower and more fragile than QUIC, so it is never the first choice.
+    /// </summary>
+    Relay1 = 1,
 }
 
 /// <summary>
@@ -196,6 +215,13 @@ public enum PeerTransport : byte
 /// whichever region the answerer happens to be in, which is only the right
 /// one when both nodes are near each other.
 /// </param>
+/// <param name="Ephemeral">
+/// A one-session X25519 public key, present when the sender offers
+/// <see cref="PeerTransport.Relay1"/>. It rides inside the sealed hello, so
+/// the peer's static key vouches for it, and the traffic keys come from the
+/// two ephemeral halves rather than the static ones — which is what stops a
+/// static key stolen tomorrow opening a session recorded today.
+/// </param>
 /// <param name="Transports">
 /// In a hello, every transport the dialling node can speak, best first; in
 /// the answer, the single one the other node has chosen. Sending the whole
@@ -210,13 +236,17 @@ public sealed record PeerHello(
     byte[] CertificateFingerprint,
     IReadOnlyList<IPEndPoint> Endpoints,
     int HomeRegionId = 0,
-    IReadOnlyList<PeerTransport>? Transports = null)
+    IReadOnlyList<PeerTransport>? Transports = null,
+    byte[]? Ephemeral = null)
 {
     /// <summary>What an empty list on the wire means.</summary>
     public static readonly IReadOnlyList<PeerTransport> DefaultTransports = [PeerTransport.Quic];
 
     /// <summary>The length of a certificate fingerprint (SHA-256).</summary>
     public const int FingerprintLen = 32;
+
+    /// <summary>The length of the ephemeral key a relay1 hello carries.</summary>
+    public const int EphemeralLen = 32;
 
     // A peer offering more than this is not negotiating, it is asking us to
     // read a list for its own sake.
@@ -268,6 +298,13 @@ public sealed record PeerHello(
         for (int i = 0; i < transports; i++)
         {
             buf.Add((byte)Transports[i]);
+        }
+
+        // Last, and only when it means something: a hello that offers no
+        // relay1 has no session keys to agree on.
+        if (Ephemeral is { Length: EphemeralLen })
+        {
+            buf.AddRange(Ephemeral);
         }
         return [.. buf];
     }
@@ -326,7 +363,14 @@ public sealed record PeerHello(
             }
         }
 
-        hello = new PeerHello(sessionId, fingerprint, endpoints, homeRegionId, transports);
+        byte[]? ephemeral = null;
+        int consumed = transports.Count == 0 ? 0 : 1 + transports.Count;
+        if (rest.Length >= consumed + EphemeralLen)
+        {
+            ephemeral = rest.Slice(consumed, EphemeralLen).ToArray();
+        }
+
+        hello = new PeerHello(sessionId, fingerprint, endpoints, homeRegionId, transports, ephemeral);
         return true;
     }
 }

@@ -3,15 +3,16 @@
 A second way to carry a tailcat session's streams, for ends that cannot open
 a UDP socket — which in practice means a web browser.
 
-Status: **specification only.** Nothing here is implemented. The negotiation
-that will select it exists (`PeerTransport` in `PeerMessage.cs`); the
-transport itself does not.
+Status: **implemented** in `src/Tailcat.Net/Relay1`, and covered by
+`Relay1SessionTests` plus one test that runs the whole of `Tailcat.Link` over
+it. What is not built is the browser client this was designed for; the .NET
+side of the contract it will speak is finished.
 
 ## Why
 
 There is a second audience beyond browsers, found while testing: **Windows 10
-has no QUIC at all**, so a node there does not start. Whatever `relay1` is
-built for, it is also the only way those machines get a session.
+has no QUIC at all**. Whatever `relay1` was built for, it is also what those
+machines now get instead of a node that refuses to start.
 
 `Tailcat.Net` carries every session over QUIC, including the ones that never
 leave the relay: `UdpBridge` hands the platform QUIC stack a loopback UDP
@@ -52,9 +53,9 @@ has. `relay1` is **`1`**.
   sides' sets rather than waiting out its handshake timeout.
 
 What a node offers follows from the platform: `Quic` when
-`QuicListener.IsSupported`, and — once this document is implemented —
-`relay1` always. A node left with an empty set is refused at startup, which
-today is what Windows 10 gets.
+`QuicListener.IsSupported`, then `relay1`, which always works.
+`TailcatNodeOptions.Transports` overrides that — how a test exercises the
+relayed path, and how an operator holds a node to it.
 
 When the agreed transport is `Relay1`, the hello carries **32 more bytes**
 after the transport list: the sender's ephemeral X25519 public key (below). The

@@ -160,9 +160,9 @@ public class NodeSessionTests
         Assert.Equal(PeerMessageType.HelloAck, type);
         Assert.True(PeerHello.TryDecode(payload, out PeerHello? ack));
 
-        // The answer names what this node does have, so the caller can say why
-        // it is giving up rather than only that it did.
-        Assert.Equal([PeerTransport.Quic], ack.Transports);
+        // The answer names everything this node does have, so the caller can
+        // say why it is giving up rather than only that it did.
+        Assert.Equal([PeerTransport.Quic, PeerTransport.Relay1], ack.Transports);
         Assert.Equal(0, listener.SessionCount);
         Assert.Contains(observer.Failures, f => f.Reason.Contains("200", StringComparison.Ordinal));
     }
@@ -236,9 +236,9 @@ public class NodeSessionTests
         await using TailcatNode listener = await NodeAsync(relay, ct);
         await using TailcatNode dialer = await NodeAsync(relay, ct);
 
-        Task<TailcatConnection> accepted = listener.AcceptConnectionAsync(ct);
-        TailcatConnection client = await dialer.ConnectAsync(listener.Address, ct);
-        TailcatConnection server = await accepted;
+        Task<ITailcatConnection> accepted = listener.AcceptConnectionAsync(ct);
+        ITailcatConnection client = await dialer.ConnectAsync(listener.Address, ct);
+        ITailcatConnection server = await accepted;
 
         Assert.Equal(1, dialer.SessionCount);
         Assert.Equal(1, listener.SessionCount);
@@ -271,9 +271,9 @@ public class NodeSessionTests
 
         for (int attempt = 1; attempt <= 2; attempt++)
         {
-            Task<TailcatConnection> accepted = listener.AcceptConnectionAsync(ct);
-            await using TailcatConnection client = await dialer.ConnectAsync(listener.Address, ct);
-            await using TailcatConnection server = await accepted;
+            Task<ITailcatConnection> accepted = listener.AcceptConnectionAsync(ct);
+            await using ITailcatConnection client = await dialer.ConnectAsync(listener.Address, ct);
+            await using ITailcatConnection server = await accepted;
 
             // The dialer speaks first: QUIC opens a stream lazily, so a
             // listener that waited here would wait forever.

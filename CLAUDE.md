@@ -118,11 +118,8 @@ Interop with the Go implementation (this uses QUIC, not WireGuard), the SSH
 server, the js/wasm build, and a userspace TCP/IP stack. The README's "What
 was not ported, and why" is the authority; keep it honest when scope changes.
 
-A browser cannot be one end of a session: no UDP socket, so no QUIC. The
-transport that would let it — relay-only, negotiated in `PeerHello` — is
-specified in `docs/relay1.md` and **not implemented**. Only the negotiation
-is: `PeerTransport`, and a node that refuses an unknown transport by name
-rather than by timing out.
+A **browser client** — the reason `relay1` exists. The .NET half is built
+(`src/Tailcat.Net/Relay1`, `docs/relay1.md`); the JavaScript half is not.
 
 **Hole punching between two different NATs is verified** — a home connection
 to an LTE carrier NAT, 69 ms relayed down to 30 ms direct, using
@@ -137,5 +134,7 @@ README tells the whole story. `ITailcatObserver.DirectProbeSent` and
 path will not form, because a failed punch looks exactly like a peer that is
 switched off.
 
-**QUIC is narrower than "Windows, Linux, macOS"**: Windows 10 has none, so a
-node there cannot start at all, and Linux needs `libmsquic` from the distro.
+**QUIC is narrower than "Windows, Linux, macOS"**: Windows 10 has none and
+Linux needs `libmsquic` from the distro. That is no longer fatal — such a
+node offers only `relay1` and works, relayed. A pair that can do QUIC still
+does, because the transport list is in preference order.

@@ -64,12 +64,12 @@ messages, punches a direct UDP path when it can, and carries QUIC over
 whichever path is better. The relay only ever sees QUIC packets it cannot
 read.
 
-Requires .NET 10 and a platform with QUIC, which is narrower than it sounds:
-**Windows 11 or Server 2022 and later** (Windows 10 has no QUIC in Schannel,
-and a node there fails to start), macOS, or Linux **with `libmsquic`
-installed** — .NET does not carry its own copy. Where QUIC is missing there is
-currently no fallback; `docs/relay1.md` specifies the relay-only transport
-that would provide one.
+Requires .NET 10. QUIC — which is what carries a session onto a direct path —
+needs Windows 11 or Server 2022 and later, macOS, or Linux with `libmsquic`
+installed; .NET does not carry its own copy. Where it is missing, including
+on Windows 10, the link still works: the two ends negotiate `relay1` instead
+and the session stays on the relay, slower but no different to use. See
+`docs/relay1.md`.
 
 `Tailcat.Net` and the two layers under it are not published separately; their
 assemblies ship inside this package, so one reference is the whole thing.

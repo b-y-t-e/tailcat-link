@@ -73,7 +73,7 @@ public class MultiRegionTests
 
         Task<string> served = Task.Run(async () =>
         {
-            await using TailcatConnection conn = await listener.AcceptConnectionAsync(ct);
+            await using ITailcatConnection conn = await listener.AcceptConnectionAsync(ct);
             await using Stream stream = await conn.AcceptStreamAsync(ct);
             byte[] buf = new byte[256];
             int n = await stream.ReadAsync(buf, ct);
@@ -84,7 +84,7 @@ public class MultiRegionTests
         }, ct);
 
         // The address says where the listener listens; that is what makes this work.
-        await using TailcatConnection client = await dialer.ConnectAsync(listener.Address, ct);
+        await using ITailcatConnection client = await dialer.ConnectAsync(listener.Address, ct);
         await using Stream s = await client.OpenStreamAsync(ct);
         await s.WriteAsync("across regions"u8.ToArray(), ct);
         await s.FlushAsync(ct);
@@ -125,13 +125,13 @@ public class MultiRegionTests
 
         Task accept = Task.Run(async () =>
         {
-            await using TailcatConnection conn = await listener.AcceptConnectionAsync(ct);
+            await using ITailcatConnection conn = await listener.AcceptConnectionAsync(ct);
             await using Stream stream = await conn.AcceptStreamAsync(ct);
             byte[] buf = new byte[2];
             await stream.ReadExactlyAsync(buf, ct);
         }, ct);
 
-        await using TailcatConnection client = await dialer.ConnectAsync(listener.Address, ct);
+        await using ITailcatConnection client = await dialer.ConnectAsync(listener.Address, ct);
         await using Stream s = await client.OpenStreamAsync(ct);
         await s.WriteAsync("hi"u8.ToArray(), ct);
         await s.FlushAsync(ct);

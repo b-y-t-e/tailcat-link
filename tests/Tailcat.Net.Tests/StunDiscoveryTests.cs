@@ -258,7 +258,7 @@ public class StunDiscoveryTests
         await using TailcatNode dialer = await TailcatNode.CreateAsync(
             OptionsWithTime(relay, dialerKey, [stun.EndPoint], time), ct);
 
-        await using TailcatConnection server = await AcceptWhileConnectingAsync(listener, dialer, ct);
+        await using ITailcatConnection server = await AcceptWhileConnectingAsync(listener, dialer, ct);
 
         while (!server.Paths.Any(p => Equals(p.Remote, before)))
         {
@@ -304,12 +304,12 @@ public class StunDiscoveryTests
 
     // QUIC opens streams lazily and the accepting side must already be
     // accepting when the dialler arrives, so the two are started together.
-    private static async Task<TailcatConnection> AcceptWhileConnectingAsync(
+    private static async Task<ITailcatConnection> AcceptWhileConnectingAsync(
         TailcatNode listener,
         TailcatNode dialer,
         CancellationToken ct)
     {
-        Task<TailcatConnection> accepted = listener.AcceptConnectionAsync(ct);
+        Task<ITailcatConnection> accepted = listener.AcceptConnectionAsync(ct);
         await dialer.ConnectAsync(listener.Address, ct);
         return await accepted;
     }
