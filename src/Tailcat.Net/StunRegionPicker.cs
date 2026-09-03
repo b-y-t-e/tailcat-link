@@ -25,6 +25,15 @@ namespace Tailcat.Net;
 /// measurement happens at startup and a region that is slow to answer is one
 /// we did not want anyway.
 /// </para>
+/// <para>
+/// When no region answers a STUN probe the ranking falls back to timing a TCP
+/// connection to each relay instead. That is not a nicety: a relay is not
+/// obliged to run STUN, and none of the four in tailcat's own DERP map do, so
+/// without the fallback every node everywhere measures nothing and takes the
+/// lowest-numbered region — New York, whether it is in Warsaw or Tokyo. A TCP
+/// handshake is a worse clock than a STUN round trip, but it reaches the port
+/// the relay is certain to be listening on.
+/// </para>
 /// </remarks>
 public sealed class StunRegionPicker : IRegionPicker
 {
@@ -64,34 +73,99 @@ public sealed class StunRegionPicker : IRegionPicker
                 probes[region.RegionID] = MeasureAsync(stun, cancellationToken);
             }
         }
-        if (probes.Count == 0)
+
+        Dictionary<int, TimeSpan> latencies = ProbesToLatencies(
+            await GatherAsync(probes).ConfigureAwait(false));
+
+        if (latencies.Count == 0)
         {
-            return 0;
+            Dictionary<int, Task<TimeSpan?>> tcp = [];
+            foreach (DerpRegion region in derpMap.Regions.Values)
+            {
+                if (RelayEndpointOf(region) is IPEndPoint relay)
+                {
+                    tcp[region.RegionID] = MeasureTcpAsync(relay, cancellationToken);
+                }
+            }
+            latencies = ProbesToLatencies(await GatherAsync(tcp).ConfigureAwait(false));
         }
 
-        await Task.WhenAll(probes.Values).ConfigureAwait(false);
+        LastLatencies = latencies;
 
-        Dictionary<int, TimeSpan> latencies = [];
         int best = 0;
         TimeSpan bestLatency = TimeSpan.MaxValue;
-        foreach ((int regionId, Task<TimeSpan?> probe) in probes)
+        foreach ((int regionId, TimeSpan rtt) in latencies)
         {
-            TimeSpan? rtt = await probe.ConfigureAwait(false);
-            if (rtt is null)
+            if (rtt < bestLatency)
             {
-                continue;
-            }
-            latencies[regionId] = rtt.Value;
-            if (rtt.Value < bestLatency)
-            {
-                (best, bestLatency) = (regionId, rtt.Value);
+                (best, bestLatency) = (regionId, rtt);
             }
         }
-        LastLatencies = latencies;
 
         // Zero means "no usable measurement", which tells the caller to fall
         // back to picking a region some other way, exactly as Go does.
         return best;
+    }
+
+    private static async Task<Dictionary<int, TimeSpan?>> GatherAsync(Dictionary<int, Task<TimeSpan?>> probes)
+    {
+        Dictionary<int, TimeSpan?> done = [];
+        if (probes.Count == 0)
+        {
+            return done;
+        }
+        await Task.WhenAll(probes.Values).ConfigureAwait(false);
+        foreach ((int regionId, Task<TimeSpan?> probe) in probes)
+        {
+            done[regionId] = await probe.ConfigureAwait(false);
+        }
+        return done;
+    }
+
+    private static Dictionary<int, TimeSpan> ProbesToLatencies(Dictionary<int, TimeSpan?> probes)
+    {
+        Dictionary<int, TimeSpan> latencies = [];
+        foreach ((int regionId, TimeSpan? rtt) in probes)
+        {
+            if (rtt is not null)
+            {
+                latencies[regionId] = rtt.Value;
+            }
+        }
+        return latencies;
+    }
+
+    /// <summary>The address to open a TCP connection to, for a region.</summary>
+    private static IPEndPoint? RelayEndpointOf(DerpRegion region)
+    {
+        foreach (DerpNode node in region.Nodes)
+        {
+            if (!node.STUNOnly && IPAddress.TryParse(node.IPv4, out IPAddress? ip))
+            {
+                return new IPEndPoint(ip, node.DERPPort == 0 ? 443 : node.DERPPort);
+            }
+        }
+        return null;
+    }
+
+    // Times the TCP handshake only: the connection is closed the moment it is
+    // established, without TLS, which would measure the relay's CPU as much as
+    // the distance to it.
+    private async Task<TimeSpan?> MeasureTcpAsync(IPEndPoint relay, CancellationToken cancellationToken)
+    {
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(_timeout);
+        using Socket socket = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        long start = Stopwatch.GetTimestamp();
+        try
+        {
+            await socket.ConnectAsync(relay, timeout.Token).ConfigureAwait(false);
+            return Stopwatch.GetElapsedTime(start);
+        }
+        catch (Exception ex) when (ex is SocketException or OperationCanceledException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

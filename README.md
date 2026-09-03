@@ -406,9 +406,52 @@ relay, a direct path is punched open, traffic moves to it, and MTU discovery
 then raises the packet size. Both sides only ever dial out.
 
 The run above was two processes on one machine, so its direct path was a
-certainty. Between two machines on different networks the outcome depends on
-the NATs involved — if hole punching fails, the `path changed` line simply
-never appears and the session keeps running on the relay.
+certainty. The interesting case is two machines on different networks, and
+that has now been measured: between a home connection and an LTE carrier
+NAT, `77.236.30.248` to `83.238.131.70`, the session came up over a Frankfurt
+relay at 69 ms and moved onto a direct path at 30 ms, with MTU discovery then
+raising packets from 1200 to 1400 bytes.
+
+Getting there took four fixes, each of which had made the outcome impossible
+rather than unlikely, and each of which was invisible because a relayed
+session works — it is only slow:
+
+- **No node ever learned its public address.** The STUN servers a node asks
+  default to the ones named in the DERP map, and none of the four relays in
+  tailcat's map answer on 3478. So `PeerHello` advertised nothing but LAN
+  addresses and a peer on another network had nothing to aim at.
+  `StunFallbackHosts` now supplies public servers when the map's own answer
+  nothing, and all of them are asked at once rather than one after another.
+- **Every node in the world chose New York.** Same cause: with no STUN answer
+  `StunRegionPicker` measured nothing, and the caller then fell back to the
+  lowest-numbered region. Ranking now falls back to timing a TCP handshake to
+  each relay, which is a worse clock but reaches a port the relay is certain
+  to be listening on.
+- **Punching was attempted for five seconds, once, ever.** After that window
+  a dead candidate was skipped and after a minute forgotten, and nothing
+  reopened it — so a pair whose first burst overlapped the tail of the relay
+  handshake stayed relayed for the life of the session. It is now retried
+  every 30 seconds for as long as nothing direct is working.
+- **On Windows, one bounced probe broke the next receive.** Windows reports
+  the ICMP rejection of a datagram we sent as a connection reset on the
+  socket's *next* receive; for a socket whose job is probing addresses that
+  may be dead, every probe to a candidate that had gone away aborted the
+  receive a peer's answer was about to arrive on. `SIO_UDP_CONNRESET` is now
+  turned off, and a candidate that fails to send no longer costs the rest of
+  the sweep their turn.
+
+The trace that found them is still there: `ITailcatObserver.DirectProbeSent`
+and `DatagramArrived` report which candidates were probed and what arrived
+from where. Without them the first three attempts at this were guesswork —
+a failed punch otherwise looks exactly like a peer that is switched off.
+
+What is still true: between two sufficiently hostile NATs there is no direct
+path, and then the `path changed` line simply never appears and the session
+keeps running on the relay. Note also that the address a peer advertises need
+not be the one its packets arrive from — the carrier NAT above preserved the
+port toward STUN servers and used a different one toward its peer, so the
+punch succeeded on the address learned from an arriving probe rather than on
+the one that was announced.
 
 ### Not done yet
 

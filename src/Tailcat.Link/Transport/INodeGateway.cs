@@ -26,10 +26,10 @@ public interface INodeGateway : IAsyncDisposable
     int HomeRegionId { get; }
 
     /// <summary>Opens a session to <paramref name="peer"/>.</summary>
-    Task<TailcatConnection> ConnectAsync(ConnBlob peer, CancellationToken cancellationToken = default);
+    Task<ITailcatConnection> ConnectAsync(ConnBlob peer, CancellationToken cancellationToken = default);
 
     /// <summary>Waits for a peer to open a session to this machine.</summary>
-    Task<TailcatConnection> AcceptAsync(CancellationToken cancellationToken = default);
+    Task<ITailcatConnection> AcceptAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>Builds gateways from a stored identity.</summary>

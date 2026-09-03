@@ -30,7 +30,7 @@ namespace Tailcat.Link.Protocol;
 /// </remarks>
 internal sealed class LinkSession : IAsyncDisposable
 {
-    private readonly TailcatConnection _connection;
+    private readonly ITailcatConnection _connection;
     private readonly Func<LinkRequestHandler?> _handler;
     private readonly CancellationToken _handlerLifetime;
     private readonly ExchangeLedger _ledger;
@@ -65,7 +65,7 @@ internal sealed class LinkSession : IAsyncDisposable
     /// time. So it keeps going to its answer, which the retry then collects.
     /// </param>
     public LinkSession(
-        TailcatConnection connection,
+        ITailcatConnection connection,
         Func<LinkRequestHandler?> handler,
         ExchangeLedger ledger,
         TimeSpan requestTimeout,

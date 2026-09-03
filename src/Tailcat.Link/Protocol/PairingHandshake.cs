@@ -33,7 +33,7 @@ internal static class PairingHandshake
     /// </summary>
     /// <exception cref="LinkException">If the other machine will not have this one.</exception>
     public static async Task OfferAsync(
-        TailcatConnection connection,
+        ITailcatConnection connection,
         string pairingToken,
         IdleTimeout idle,
         CancellationToken cancellationToken)
@@ -65,7 +65,7 @@ internal static class PairingHandshake
     /// </summary>
     /// <returns>Whether it may stay.</returns>
     public static async Task<bool> AcceptAsync(
-        TailcatConnection connection,
+        ITailcatConnection connection,
         IPairingPolicy policy,
         IdleTimeout idle,
         CancellationToken cancellationToken)

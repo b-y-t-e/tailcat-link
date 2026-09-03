@@ -16,7 +16,7 @@ namespace Tailcat.Net;
 /// interrupting any stream; <see cref="CurrentPath"/> says where it is now,
 /// and <see cref="PathChanged"/> fires when it moves.
 /// </remarks>
-public sealed class TailcatConnection : IAsyncDisposable
+public sealed class TailcatConnection : ITailcatConnection
 {
     private readonly QuicConnection _quic;
     private readonly PeerLink _link;

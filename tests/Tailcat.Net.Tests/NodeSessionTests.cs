@@ -117,6 +117,57 @@ public class NodeSessionTests
     }
 
     /// <summary>
+    /// A peer asking for a transport this node does not have is told so, and
+    /// leaves nothing behind. Dropping its hello instead would spend the
+    /// dialler's whole handshake timeout and report only silence — the one
+    /// failure that looks identical to a peer that is switched off.
+    /// </summary>
+    [Fact]
+    public async Task AHelloAskingForAnUnknownTransportIsRefusedRatherThanIgnored()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        RecordingObserver observer = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct, observer: observer);
+        await relay.WaitForClientAsync(listener.PublicKey, ct);
+
+        // Not a node: just a key on the relay, speaking the peer protocol by
+        // hand, which is what a client built against a transport this node
+        // does not have looks like from here.
+        NodePrivate stranger = NodePrivate.NewKey();
+        await using DerpClient client = await DerpClient.ConnectOverStreamAsync(
+            await relay.DialAsync(ct), stranger, relay.PublicKey, ct);
+
+        PeerHello hello = new(
+            SessionId: 1,
+            new byte[PeerHello.FingerprintLen],
+            [],
+            HomeRegionId: RegionId,
+            Transport: (PeerTransport)200);
+        await client.SendAsync(
+            listener.PublicKey,
+            PeerMessage.Seal(PeerMessageType.Hello, hello.Encode(), stranger, listener.PublicKey),
+            ct);
+
+        DerpReceivedPacket answer = await client.ReceiveAsync(ct);
+        Assert.Equal(listener.PublicKey, answer.Source);
+        Assert.True(PeerMessage.TryOpen(
+            answer.Payload.Span, stranger, listener.PublicKey, out PeerMessageType type, out byte[]? payload));
+        Assert.Equal(PeerMessageType.HelloAck, type);
+        Assert.True(PeerHello.TryDecode(payload, out PeerHello? ack));
+
+        // The answer names what this node does have, so the caller can say why
+        // it is giving up rather than only that it did.
+        Assert.Equal(PeerTransport.Quic, ack.Transport);
+        Assert.Equal(0, listener.SessionCount);
+        Assert.Contains(observer.Failures, f => f.Reason.Contains("200", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// Closing a connection ends its session on both sides. The session used
     /// to survive its connection, leaving a disposed link in the maps that
     /// every receive loop kept searching for the rest of the node's life.

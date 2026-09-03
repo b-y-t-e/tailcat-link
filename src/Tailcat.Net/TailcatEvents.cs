@@ -44,6 +44,25 @@ public interface ITailcatObserver
 
     /// <summary>This node learned the addresses peers can reach it at.</summary>
     void EndpointsDiscovered(IReadOnlyList<IPEndPoint> endpoints);
+
+    /// <summary>A probe went out on a candidate direct path.</summary>
+    /// <remarks>
+    /// Default-implemented, so an observer written before these existed keeps
+    /// compiling. The pair is what makes a failed hole punch diagnosable:
+    /// between two NATs the useful question is never whether a session came
+    /// up but which probes were sent, which arrived, and from what address —
+    /// a NAT that answers STUN on one port while sending from another makes
+    /// the peer's advertised address differ from its real one, and nothing
+    /// else here would show it.
+    /// </remarks>
+    void DirectProbeSent(NodePublic peer, IPEndPoint candidate)
+    {
+    }
+
+    /// <summary>A datagram arrived on the node's UDP socket.</summary>
+    void DatagramArrived(IPEndPoint from, int bytes, string kind)
+    {
+    }
 }
 
 /// <summary>An observer that ignores everything, the default.</summary>
@@ -126,6 +145,13 @@ public sealed class TextTailcatObserver(Action<string> write) : ITailcatObserver
     // A key is 64 hex characters; the first few identify it in a log well
     // enough, and the whole thing drowns the line.
     private static string Short(NodePublic key) => Convert.ToHexStringLower(key.Raw32())[..12];
+    /// <inheritdoc/>
+    public void DirectProbeSent(NodePublic peer, IPEndPoint candidate) => _write($"probe -> {candidate}");
+
+    /// <inheritdoc/>
+    public void DatagramArrived(IPEndPoint from, int bytes, string kind) =>
+        _write($"udp <- {from} {bytes} B {kind}");
+
 }
 
 /// <summary>

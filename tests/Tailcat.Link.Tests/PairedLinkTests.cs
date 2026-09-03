@@ -446,9 +446,9 @@ public class PairedLinkTests
             NodePrivate.NewKey(), FakeRelayGatewayFactory.RegionId, ct);
         await using INodeGateway secondStranger = await gateways.CreateAsync(
             NodePrivate.NewKey(), FakeRelayGatewayFactory.RegionId, ct);
-        await using TailcatConnection firstKnock =
+        await using ITailcatConnection firstKnock =
             await firstStranger.ConnectAsync(host.InvitationCode.Address, ct);
-        await using TailcatConnection secondKnock =
+        await using ITailcatConnection secondKnock =
             await secondStranger.ConnectAsync(host.InvitationCode.Address, ct);
 
         LinkOptions impatient = OptionsFor(gateways, new InMemoryLinkStore()) with

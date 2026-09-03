@@ -163,6 +163,37 @@ public class PeerMessageTests
     }
 
     [Fact]
+    public void HelloCarriesTheTransportItAsksFor()
+    {
+        PeerHello hello = new(
+            1,
+            new byte[PeerHello.FingerprintLen],
+            [new IPEndPoint(IPAddress.Loopback, 1234)],
+            HomeRegionId: 7,
+            Transport: (PeerTransport)200);
+
+        Assert.True(PeerHello.TryDecode(hello.Encode(), out PeerHello? got));
+        Assert.Equal((PeerTransport)200, got.Transport);
+        Assert.Equal(7, got.HomeRegionId);
+    }
+
+    /// <summary>
+    /// A node built before there was a transport to negotiate encodes nothing
+    /// where the byte now goes. Reading its hello as anything but QUIC would
+    /// refuse every peer that has not been rebuilt.
+    /// </summary>
+    [Fact]
+    public void HelloWithoutATransportByteIsReadAsQuic()
+    {
+        byte[] encoded = new PeerHello(1, new byte[PeerHello.FingerprintLen],
+            [new IPEndPoint(IPAddress.Loopback, 1234)]).Encode();
+
+        Assert.True(PeerHello.TryDecode(encoded.AsSpan(0, encoded.Length - 1), out PeerHello? got));
+        Assert.Equal(PeerTransport.Quic, got.Transport);
+        Assert.Equal(1234, Assert.Single(got.Endpoints).Port);
+    }
+
+    [Fact]
     public void PingRoundTrips()
     {
         PeerPing ping = new(Id: 0x0102030405060708, SessionId: 0x1122334455667788);

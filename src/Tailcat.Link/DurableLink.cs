@@ -255,7 +255,7 @@ internal sealed class DurableLink : ILink
             try
             {
                 INodeGateway gateway = await EnsureGatewayAsync(ct).ConfigureAwait(false);
-                TailcatConnection connection =
+                ITailcatConnection connection =
                     await _source.NextSessionAsync(gateway, ct).ConfigureAwait(false);
 
                 session = new LinkSession(

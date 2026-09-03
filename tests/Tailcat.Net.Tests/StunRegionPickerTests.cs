@@ -194,6 +194,41 @@ public class StunRegionPickerTests
         Assert.Equal(expected, ep.Port);
     }
 
+    /// <summary>
+    /// When no relay runs STUN — the real state of tailcat's DERP map — the
+    /// ranking must still tell regions apart. Without this the picker measures
+    /// nothing, the caller takes the lowest-numbered region, and every node in
+    /// the world lands on the same relay however far away it is.
+    /// </summary>
+    [Fact]
+    public async Task RanksByTcpWhenNoRegionAnswersStun()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Listening, so its TCP handshake completes at once.
+        using Socket reachable = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        reachable.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        reachable.Listen(4);
+        IPEndPoint open = (IPEndPoint)reachable.LocalEndPoint!;
+
+        // Documentation-reserved, so the connection attempt goes nowhere.
+        DerpRegion unreachable = new()
+        {
+            RegionID = 1,
+            Nodes = [new DerpNode { Name = "1a", HostName = "derp1.example", IPv4 = "192.0.2.1", STUNPort = -1, DERPPort = 443 }],
+        };
+        DerpRegion answering = new()
+        {
+            RegionID = 2,
+            Nodes = [new DerpNode { Name = "2a", HostName = "derp2.example", IPv4 = open.Address.ToString(), STUNPort = -1, DERPPort = open.Port }],
+        };
+
+        StunRegionPicker picker = new(timeout: TimeSpan.FromMilliseconds(700));
+        int best = await picker.PickBestRegionAsync(MapOf(unreachable, answering), ct);
+
+        Assert.Equal(2, best);
+    }
+
     /// <summary>A node marked as having no STUN (-1) can't be probed.</summary>
     [Fact]
     public void NodesWithoutStunAreSkipped()

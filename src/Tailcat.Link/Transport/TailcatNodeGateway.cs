@@ -52,11 +52,11 @@ internal sealed class TailcatNodeGateway(TailcatNode node) : INodeGateway
 
     public int HomeRegionId => _node.HomeRegionId;
 
-    public Task<TailcatConnection> ConnectAsync(ConnBlob peer, CancellationToken cancellationToken = default) =>
-        _node.ConnectAsync(peer, cancellationToken);
+    public async Task<ITailcatConnection> ConnectAsync(ConnBlob peer, CancellationToken cancellationToken = default) =>
+        await _node.ConnectAsync(peer, cancellationToken).ConfigureAwait(false);
 
-    public Task<TailcatConnection> AcceptAsync(CancellationToken cancellationToken = default) =>
-        _node.AcceptConnectionAsync(cancellationToken);
+    public async Task<ITailcatConnection> AcceptAsync(CancellationToken cancellationToken = default) =>
+        await _node.AcceptConnectionAsync(cancellationToken).ConfigureAwait(false);
 
     public async ValueTask DisposeAsync()
     {

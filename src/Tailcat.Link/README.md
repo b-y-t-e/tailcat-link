@@ -64,17 +64,26 @@ messages, punches a direct UDP path when it can, and carries QUIC over
 whichever path is better. The relay only ever sees QUIC packets it cannot
 read.
 
-Requires .NET 10 and a platform with QUIC (Windows, Linux, macOS).
+Requires .NET 10 and a platform with QUIC, which is narrower than it sounds:
+**Windows 11 or Server 2022 and later** (Windows 10 has no QUIC in Schannel,
+and a node there fails to start), macOS, or Linux **with `libmsquic`
+installed** — .NET does not carry its own copy. Where QUIC is missing there is
+currently no fallback; `docs/relay1.md` specifies the relay-only transport
+that would provide one.
 
 `Tailcat.Net` and the two layers under it are not published separately; their
 assemblies ship inside this package, so one reference is the whole thing.
 
 ## Known limits
 
-Hole punching between two *different* NATs has never been verified — every
-direct-path test so far ran between processes on one machine. When it fails
-the session simply stays on the relay, which works but is slower. The
-authentication design has not been reviewed by anyone outside this project.
+Hole punching between two different NATs is verified: a home connection and
+an LTE carrier NAT moved off the relay onto a direct path, 69 ms down to
+30 ms. Between two sufficiently hostile NATs there is no direct path at all,
+and then the session stays on the relay — which works, but is slower and
+carries every byte past somebody else's server.
+
+The authentication design has not been reviewed by anyone outside this
+project.
 
 ## Licence
 

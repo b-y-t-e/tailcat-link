@@ -54,6 +54,7 @@ public static class DerpTlsConnector
     /// Skips certificate validation. Only for tests against a local relay
     /// with a self-signed cert; never set it against a public relay.
     /// </param>
+    /// <param name="cancellationToken">Cancels the handshake.</param>
     /// <exception cref="DerpProtocolException">If the handshake or validation fails.</exception>
     public static async Task<TlsSession> ConnectAsync(
         Stream transport,

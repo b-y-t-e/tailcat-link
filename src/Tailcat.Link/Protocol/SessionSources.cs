@@ -18,7 +18,7 @@ namespace Tailcat.Link.Protocol;
 internal interface ISessionSource
 {
     /// <summary>Produces the next session, waiting as long as it takes.</summary>
-    Task<TailcatConnection> NextSessionAsync(INodeGateway gateway, CancellationToken cancellationToken);
+    Task<ITailcatConnection> NextSessionAsync(INodeGateway gateway, CancellationToken cancellationToken);
 }
 
 /// <summary>The joining end: it knows where the host is and dials it.</summary>
@@ -40,11 +40,11 @@ internal sealed class DialingSessionSource(
     TimeSpan handshakeTimeout,
     TimeProvider time) : ISessionSource
 {
-    public async Task<TailcatConnection> NextSessionAsync(
+    public async Task<ITailcatConnection> NextSessionAsync(
         INodeGateway gateway,
         CancellationToken cancellationToken)
     {
-        TailcatConnection connection = await gateway.ConnectAsync(peerAddress, cancellationToken)
+        ITailcatConnection connection = await gateway.ConnectAsync(peerAddress, cancellationToken)
             .ConfigureAwait(false);
         try
         {
@@ -106,11 +106,11 @@ internal sealed class AcceptingSessionSource(
     // number is a cap rather than none so that a flood costs bounded memory.
     private const int MaxCandidatesAtOnce = 8;
 
-    public async Task<TailcatConnection> NextSessionAsync(INodeGateway gateway, CancellationToken cancellationToken)
+    public async Task<ITailcatConnection> NextSessionAsync(INodeGateway gateway, CancellationToken cancellationToken)
     {
         using CancellationTokenSource abandon = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        List<Task<TailcatConnection?>> candidates = [];
-        Task<TailcatConnection>? accepting = null;
+        List<Task<ITailcatConnection?>> candidates = [];
+        Task<ITailcatConnection>? accepting = null;
         try
         {
             while (true)
@@ -126,13 +126,13 @@ internal sealed class AcceptingSessionSource(
                 {
                     // Awaiting it is what turns silence into the LinkException
                     // that has the node rebuilt.
-                    TailcatConnection knocked = await accepting.ConfigureAwait(false);
+                    ITailcatConnection knocked = await accepting.ConfigureAwait(false);
                     accepting = null;
                     candidates.Add(AdmitOrDropAsync(knocked, abandon.Token));
                     continue;
                 }
 
-                Task<TailcatConnection?> settled = (Task<TailcatConnection?>)finished;
+                Task<ITailcatConnection?> settled = (Task<ITailcatConnection?>)finished;
                 candidates.Remove(settled);
                 if (await settled.ConfigureAwait(false) is { } admitted)
                 {
@@ -148,8 +148,8 @@ internal sealed class AcceptingSessionSource(
     }
 
     private static Task<Task> FirstToFinishAsync(
-        Task<TailcatConnection>? accepting,
-        IEnumerable<Task<TailcatConnection?>> candidates)
+        Task<ITailcatConnection>? accepting,
+        IEnumerable<Task<ITailcatConnection?>> candidates)
     {
         List<Task> running = [.. candidates];
         if (accepting is not null)
@@ -161,7 +161,7 @@ internal sealed class AcceptingSessionSource(
 
     // The silence is measured per wait, so a stranger knocking, or a peer
     // that connects and is refused, counts as the node still working.
-    private async Task<TailcatConnection> AcceptBeforeGivingUpOnTheNodeAsync(
+    private async Task<ITailcatConnection> AcceptBeforeGivingUpOnTheNodeAsync(
         INodeGateway gateway,
         CancellationToken cancellationToken)
     {
@@ -180,8 +180,8 @@ internal sealed class AcceptingSessionSource(
 
     // A candidate owns its connection until it is admitted: whoever is turned
     // away is dropped here, because nothing else holds a reference to it.
-    private async Task<TailcatConnection?> AdmitOrDropAsync(
-        TailcatConnection connection,
+    private async Task<ITailcatConnection?> AdmitOrDropAsync(
+        ITailcatConnection connection,
         CancellationToken cancellationToken)
     {
         NodePublic wasPairedWith = policy.Peer;
@@ -196,7 +196,7 @@ internal sealed class AcceptingSessionSource(
         return null;
     }
 
-    private async Task<bool> TryAdmitAsync(TailcatConnection connection, CancellationToken cancellationToken)
+    private async Task<bool> TryAdmitAsync(ITailcatConnection connection, CancellationToken cancellationToken)
     {
         try
         {
@@ -226,10 +226,10 @@ internal sealed class AcceptingSessionSource(
     // shut down, is closed: a peer holding a session nobody reads waits for
     // an answer that is never coming, while a closed one has it reconnect.
     private static async Task DiscardAsync(
-        Task<TailcatConnection>? accepting,
-        IEnumerable<Task<TailcatConnection?>> candidates)
+        Task<ITailcatConnection>? accepting,
+        IEnumerable<Task<ITailcatConnection?>> candidates)
     {
-        foreach (Task<TailcatConnection?> candidate in candidates)
+        foreach (Task<ITailcatConnection?> candidate in candidates)
         {
             await CloseCandidateAsync(candidate).ConfigureAwait(false);
         }
@@ -239,7 +239,7 @@ internal sealed class AcceptingSessionSource(
         }
     }
 
-    private static async Task CloseCandidateAsync(Task<TailcatConnection?> candidate)
+    private static async Task CloseCandidateAsync(Task<ITailcatConnection?> candidate)
     {
         try
         {
@@ -255,7 +255,7 @@ internal sealed class AcceptingSessionSource(
         }
     }
 
-    private static async Task CloseAcceptedAsync(Task<TailcatConnection> accepting)
+    private static async Task CloseAcceptedAsync(Task<ITailcatConnection> accepting)
     {
         try
         {

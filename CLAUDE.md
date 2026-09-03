@@ -118,6 +118,24 @@ Interop with the Go implementation (this uses QUIC, not WireGuard), the SSH
 server, the js/wasm build, and a userspace TCP/IP stack. The README's "What
 was not ported, and why" is the authority; keep it honest when scope changes.
 
-The one thing never verified: **hole punching between two different NATs**.
-Every direct-path test so far ran between processes on one machine, where
-success was a foregone conclusion. `tailcat-demo` exists to close that gap.
+A browser cannot be one end of a session: no UDP socket, so no QUIC. The
+transport that would let it — relay-only, negotiated in `PeerHello` — is
+specified in `docs/relay1.md` and **not implemented**. Only the negotiation
+is: `PeerTransport`, and a node that refuses an unknown transport by name
+rather than by timing out.
+
+**Hole punching between two different NATs is verified** — a home connection
+to an LTE carrier NAT, 69 ms relayed down to 30 ms direct, using
+`tailcat-demo`. Four defects had made it impossible rather than unlikely, all
+of them silent because a relayed session still works: the DERP map's relays
+answer no STUN so no node learned its public address; region ranking
+therefore measured nothing and every node chose New York; punching ran for
+five seconds once and was never retried; and on Windows `SIO_UDP_CONNRESET`
+let one bounced probe abort the receive a peer's answer was arriving on. The
+README tells the whole story. `ITailcatObserver.DirectProbeSent` and
+`DatagramArrived` are what made it diagnosable — reach for them first when a
+path will not form, because a failed punch looks exactly like a peer that is
+switched off.
+
+**QUIC is narrower than "Windows, Linux, macOS"**: Windows 10 has none, so a
+node there cannot start at all, and Linux needs `libmsquic` from the distro.

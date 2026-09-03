@@ -152,8 +152,35 @@ public static class PeerMessage
 }
 
 /// <summary>
-/// What a peer tells the other side when opening a session: how to
-/// authenticate its QUIC connection, and where it might be reachable.
+/// How the two nodes carry a session's streams once they have found each
+/// other.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Which one is used is the dialling node's to ask for and the answering
+/// node's to agree to, inside the sealed hello — so a relay cannot talk
+/// either end down to something weaker, and a node that speaks only one of
+/// them is refused rather than left waiting.
+/// </para>
+/// <para>
+/// Values other than those named here belong to transports this build does
+/// not have. They are decoded rather than rejected, because the peer asking
+/// for one deserves an answer saying so.
+/// </para>
+/// </remarks>
+public enum PeerTransport : byte
+{
+    /// <summary>
+    /// QUIC over whichever path the link prefers, authenticated by the
+    /// certificate fingerprint in the hello. What every node that can open a
+    /// UDP socket uses.
+    /// </summary>
+    Quic = 0,
+}
+
+/// <summary>
+/// What a peer tells the other side when opening a session: how it wants the
+/// session carried, how to authenticate it, and where it might be reachable.
 /// </summary>
 /// <param name="SessionId">Distinguishes one session from a later one between the same nodes.</param>
 /// <param name="CertificateFingerprint">
@@ -169,11 +196,19 @@ public static class PeerMessage
 /// whichever region the answerer happens to be in, which is only the right
 /// one when both nodes are near each other.
 /// </param>
+/// <param name="Transport">
+/// In a hello, the transport the dialling node is asking for; in the answer,
+/// the one the other node will actually use. It is last on the wire and
+/// defaults to <see cref="PeerTransport.Quic"/>, so a node built before
+/// there was anything to negotiate is read as asking for the only transport
+/// it has.
+/// </param>
 public sealed record PeerHello(
     ulong SessionId,
     byte[] CertificateFingerprint,
     IReadOnlyList<IPEndPoint> Endpoints,
-    int HomeRegionId = 0)
+    int HomeRegionId = 0,
+    PeerTransport Transport = PeerTransport.Quic)
 {
     /// <summary>The length of a certificate fingerprint (SHA-256).</summary>
     public const int FingerprintLen = 32;
@@ -212,6 +247,8 @@ public sealed record PeerHello(
             BinaryPrimitives.WriteUInt16BigEndian(port, (ushort)ep.Port);
             buf.AddRange(port);
         }
+
+        buf.Add((byte)Transport);
         return [.. buf];
     }
 
@@ -253,7 +290,11 @@ public sealed record PeerHello(
             rest = rest[(1 + addrLen + 2)..];
         }
 
-        hello = new PeerHello(sessionId, fingerprint, endpoints, homeRegionId);
+        // Absent from a peer that predates the negotiation, and the default is
+        // what such a peer means.
+        PeerTransport transport = rest.Length >= 1 ? (PeerTransport)rest[0] : PeerTransport.Quic;
+
+        hello = new PeerHello(sessionId, fingerprint, endpoints, homeRegionId, transport);
         return true;
     }
 }

@@ -284,30 +284,105 @@ public class PeerLinkTests
     }
 
     /// <summary>
-    /// Candidates nobody has heard from are forgotten, so a peer that keeps
-    /// moving networks doesn't leave every address it ever had behind.
+    /// A candidate the peer has stopped claiming is forgotten, so a peer that
+    /// keeps moving networks doesn't leave every address it ever had behind.
     /// </summary>
     [Fact]
-    public async Task CandidatesThatNeverAnswerAreForgotten()
+    public async Task CandidatesThePeerNoLongerClaimsAreForgotten()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         FakeTimeProvider time = new(DateTimeOffset.UnixEpoch);
         await using Harness h = NewLink(time: time);
 
-        h.Link.AddCandidates([new IPEndPoint(IPAddress.Parse("192.0.2.1"), 41641)]);
+        IPEndPoint old = new(IPAddress.Parse("192.0.2.1"), 41641);
+        h.Link.AddCandidates([old]);
         Assert.Equal(2, h.Link.Paths.Count);
 
         h.Link.Start();
+
+        // The peer moved: this is the set it is reachable at now, and the
+        // address it used to claim is not in it.
+        h.Link.AddCandidates([new IPEndPoint(IPAddress.Parse("192.0.2.9"), 41641)]);
         time.Advance(TimeSpan.FromMinutes(5));
 
-        // The probe loop sweeps; the relay path is the only one that stays.
         using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(TimeSpan.FromSeconds(15));
-        while (h.Link.Paths.Count > 1)
+        while (h.Link.Paths.Any(p => Equals(p.Remote, old)))
         {
             await Task.Delay(50, cts.Token);
         }
-        Assert.Equal(PeerPathKind.Relay, Assert.Single(h.Link.Paths).Kind);
+        Assert.DoesNotContain(h.Link.Paths, p => Equals(p.Remote, old));
+    }
+
+    /// <summary>
+    /// While a session is still relayed, the peer's advertised addresses keep
+    /// being tried. One burst at the start is not enough: whether two NATs let
+    /// a hole open depends on mappings that move, and a pair that missed its
+    /// first five seconds used to stay relayed for the life of the session —
+    /// which is what happened on the first test between two real NATs.
+    /// </summary>
+    [Fact]
+    public async Task ARelayedSessionKeepsTryingToPunch()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        FakeTimeProvider time = new(DateTimeOffset.UnixEpoch);
+        await using Harness h = NewLink(time: time);
+
+        IPEndPoint candidate = new(IPAddress.Parse("192.0.2.1"), 41641);
+        h.Link.AddCandidates([candidate]);
+        h.Link.Start();
+
+        // Far past both the first burst and the sweep that forgets a dead
+        // path: the only way this address is still here is a later burst.
+        for (int i = 0; i < 10; i++)
+        {
+            time.Advance(TimeSpan.FromMinutes(1));
+            await Task.Delay(20, ct);
+        }
+
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(15));
+        while (!h.Link.Paths.Any(p => Equals(p.Remote, candidate)))
+        {
+            time.Advance(TimeSpan.FromSeconds(30));
+            await Task.Delay(50, cts.Token);
+        }
+        Assert.Contains(h.Link.Paths, p => Equals(p.Remote, candidate));
+        Assert.Equal(PeerPathKind.Relay, h.Link.CurrentPath.Kind);
+    }
+
+    /// <summary>
+    /// A candidate that cannot be sent to must not cost the others their
+    /// turn. While punching, a dead address is the normal case — and the one
+    /// listed after it may be the only reachable one.
+    /// </summary>
+    [Fact]
+    public async Task AFailingCandidateDoesNotStopTheOthersBeingProbed()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using Harness h = NewLink();
+
+        // Answers whatever reaches it, so being probed is observable.
+        using Socket peer = Bound();
+        IPEndPoint reachable = (IPEndPoint)peer.LocalEndPoint!;
+
+        // An IPv4-mapped multicast address the socket will refuse to send to,
+        // ordered before the reachable one in the probe sweep.
+        h.Link.AddCandidates([new IPEndPoint(IPAddress.Parse("240.0.0.1"), 1), reachable]);
+        h.Link.Start();
+
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(15));
+        byte[] buf = new byte[2048];
+        while (true)
+        {
+            SocketReceiveFromResult got = await peer.ReceiveFromAsync(
+                buf, new IPEndPoint(IPAddress.Any, 0), cts.Token);
+            if (PeerMessage.IsPeerMessage(buf.AsSpan(0, got.ReceivedBytes)))
+            {
+                break;
+            }
+        }
     }
 
     private static Socket Bound()

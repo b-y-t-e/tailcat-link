@@ -89,6 +89,17 @@ public sealed class PeerLink : IAsyncDisposable
     // How long to keep punching at a candidate that never answers.
     private static readonly TimeSpan PunchDuration = TimeSpan.FromSeconds(5);
 
+    // How long to wait before trying to punch again, while a session is still
+    // relayed. One burst is not enough: whether a hole opens depends on both
+    // NATs' mappings lining up, and those move — a mapping expires and is
+    // reassigned, a peer's network changes, a firewall state entry ages out.
+    // Without this, a pair that failed to punch in its first five seconds
+    // stayed on the relay for the life of the session however long that was,
+    // which for a durable link is measured in days. Verified between two real
+    // NATs, where the first burst overlapped the tail of the relay handshake
+    // and there was never a second one.
+    private static readonly TimeSpan RepunchInterval = TimeSpan.FromSeconds(30);
+
     // How long a candidate nobody has heard from is kept. Candidates only ever
     // arrived: a peer roaming between networks announces a fresh set each time
     // it moves, and without an expiry the old ones stay for the life of the
@@ -114,6 +125,7 @@ public sealed class PeerLink : IAsyncDisposable
     private readonly Lock _mu = new();
 
     private Task? _probeLoop;
+    private IReadOnlyList<IPEndPoint> _advertised = [];
     private DateTimeOffset _candidatesAddedAt;
     private PathState? _chosen;
     private PeerPath? _reportedPath;
@@ -158,6 +170,13 @@ public sealed class PeerLink : IAsyncDisposable
     /// <summary>Raised when the link starts using a different path.</summary>
     public event Action<PeerPath>? PathChanged;
 
+    /// <summary>Raised for every probe sent on a candidate direct path.</summary>
+    /// <remarks>
+    /// A failed hole punch is otherwise invisible: what matters is which
+    /// addresses were tried, not that the session stayed relayed.
+    /// </remarks>
+    public event Action<IPEndPoint>? DirectProbeSent;
+
     /// <summary>The path datagrams are currently taking.</summary>
     public PeerPath CurrentPath => Best().Snapshot();
 
@@ -192,6 +211,7 @@ public sealed class PeerLink : IAsyncDisposable
     public void AddCandidates(IEnumerable<IPEndPoint> endpoints)
     {
         ArgumentNullException.ThrowIfNull(endpoints);
+        List<IPEndPoint> accepted = [];
         foreach (IPEndPoint ep in endpoints)
         {
             if (ep.Address.Equals(IPAddress.Any) || ep.Address.Equals(IPAddress.IPv6Any) || ep.Port == 0)
@@ -199,10 +219,18 @@ public sealed class PeerLink : IAsyncDisposable
                 continue;
             }
             IPEndPoint canonical = Normalize(ep);
+            accepted.Add(canonical);
             _direct.TryAdd(canonical, new PathState(PeerPathKind.Direct, canonical, BaseMtu, _time.GetUtcNow()));
         }
         lock (_mu)
         {
+            // Replaced, not merged: this is the set the peer says it is
+            // reachable at now, and a later burst must not keep aiming at
+            // addresses it has stopped claiming.
+            if (accepted.Count > 0)
+            {
+                _advertised = accepted;
+            }
             _candidatesAddedAt = _time.GetUtcNow();
         }
     }
@@ -226,6 +254,7 @@ public sealed class PeerLink : IAsyncDisposable
     /// </summary>
     /// <param name="packet">The raw packet.</param>
     /// <param name="from">The UDP address it came from, or null if it came via the relay.</param>
+    /// <param name="cancellationToken">Cancels handling the packet.</param>
     internal async Task HandlePacketAsync(ReadOnlyMemory<byte> packet, IPEndPoint? from, CancellationToken cancellationToken)
     {
         if (!PeerMessage.IsPeerMessage(packet.Span))
@@ -360,13 +389,25 @@ public sealed class PeerLink : IAsyncDisposable
                         continue;
                     }
 
-                    await ProbeAsync(path, 0, ct).ConfigureAwait(false);
-
-                    // Once a path works, find out whether it carries more than
-                    // the conservative floor, so QUIC can use larger packets.
-                    if (alive && path.Mtu < MaxDirectMtu)
+                    // Each candidate is probed on its own: one that fails to
+                    // send must not cost the others their turn. A dead address
+                    // is the normal case while punching, and letting it break
+                    // out of the loop meant the candidate listed after it —
+                    // which may be the only reachable one — was never tried.
+                    try
                     {
-                        await ProbeAsync(path, MaxDirectMtu, ct).ConfigureAwait(false);
+                        await ProbeAsync(path, 0, ct).ConfigureAwait(false);
+
+                        // Once a path works, find out whether it carries more
+                        // than the conservative floor, so QUIC can use larger
+                        // packets.
+                        if (alive && path.Mtu < MaxDirectMtu)
+                        {
+                            await ProbeAsync(path, MaxDirectMtu, ct).ConfigureAwait(false);
+                        }
+                    }
+                    catch (Exception ex) when (ex is SocketException or IOException)
+                    {
                     }
                 }
 
@@ -387,6 +428,23 @@ public sealed class PeerLink : IAsyncDisposable
                     if (now - probe.SentAt > PathTimeout)
                     {
                         _pending.TryRemove(id, out _);
+                    }
+                }
+
+                // Nothing direct is working and the burst is spent: start
+                // another. Re-adding the peer's advertised set re-creates any
+                // candidate that was swept as dead and reopens the window.
+                if (!haveDirect && now - candidatesAddedAt >= RepunchInterval)
+                {
+                    IReadOnlyList<IPEndPoint> retry;
+                    lock (_mu)
+                    {
+                        retry = _advertised;
+                    }
+                    if (retry.Count > 0)
+                    {
+                        AddCandidates(retry);
+                        candidatesAddedAt = CandidatesAddedAt;
                     }
                 }
 
@@ -432,6 +490,10 @@ public sealed class PeerLink : IAsyncDisposable
 
         byte[] msg = PeerMessage.Seal(PeerMessageType.Ping, payload, _self, Peer);
         _pending[id] = new PendingProbe(_time.GetUtcNow(), probeMtu > 0 ? msg.Length : 0);
+        if (path.Kind == PeerPathKind.Direct && path.Remote is not null)
+        {
+            DirectProbeSent?.Invoke(path.Remote);
+        }
         await SendOverAsync(path, msg, ct).ConfigureAwait(false);
     }
 

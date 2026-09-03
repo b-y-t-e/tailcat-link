@@ -40,7 +40,7 @@
   </Target>
 
   <!-- The XML docs travel with the assemblies: without them a consumer
-       implementing INodeGateway gets no IntelliSense on TailcatConnection,
+       implementing INodeGateway gets no IntelliSense on ITailcatConnection,
        which lives in the bundled Tailcat.Net rather than here. -->
   <Target Name="IncludeReferencedProjectsInPackage" DependsOnTargets="ResolveBundledProjectOutputs">
     <ItemGroup>

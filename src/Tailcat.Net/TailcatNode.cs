@@ -55,6 +55,26 @@ public sealed class TailcatNodeOptions
     /// </summary>
     public IReadOnlyList<IPEndPoint>? StunServers { get; init; }
 
+    /// <summary>
+    /// Servers to ask when the ones above answer nothing, resolved by name at
+    /// the moment they are needed. Empty disables the fallback, and so does
+    /// setting <see cref="StunServers"/>: naming the servers yourself means
+    /// all of them, or the fallback would quietly reach past a node that was
+    /// configured to talk to one network only.
+    /// </summary>
+    /// <remarks>
+    /// The DERP map is the natural place to look for a STUN server and the
+    /// only one Go consults, but it is not a guarantee: as of writing, none
+    /// of the four relays in tailcat's own map answer on 3478. A node that
+    /// never learns its public address advertises only its LAN addresses, so
+    /// no peer on another network has anything to aim at and every session
+    /// stays on the relay for good. That failure is silent — the session
+    /// works, it is merely slow — which is why the fallback is on by default
+    /// rather than something to be discovered and switched on.
+    /// </remarks>
+    public IReadOnlyList<string> StunFallbackHosts { get; init; } =
+        ["stun.cloudflare.com:3478", "stun.l.google.com:19302"];
+
     /// <summary>How long to wait for a peer to answer a session handshake.</summary>
     public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(20);
 
@@ -124,6 +144,16 @@ public sealed class TailcatNode : IAsyncDisposable
     // until some unrelated peer happened to connect.
     private static readonly TimeSpan SweepInterval = TimeSpan.FromSeconds(1);
 
+    // How often to re-ask STUN while a session is up, so a NAT that moved our
+    // mapping is noticed. A local address change raises an event; a mapping
+    // being reassigned behind the same local address raises nothing, and the
+    // peer goes on probing a port that no longer exists — measured between two
+    // real NATs, where the advertised port changed from 65264 to 65204 and the
+    // peer was never told. Shorter than the mapping lifetimes NATs commonly
+    // use, so the announcement arrives while the old port is still the one the
+    // peer holds.
+    private static readonly TimeSpan EndpointRecheckInterval = TimeSpan.FromSeconds(20);
+
     // How long to wait for one STUN server, and how many to try. A node only
     // needs one public address to be punchable.
     private static readonly TimeSpan StunTimeout = TimeSpan.FromSeconds(2);
@@ -135,6 +165,8 @@ public sealed class TailcatNode : IAsyncDisposable
     private readonly Socket _udp;
     private readonly QuicListener _listener;
     private readonly IReadOnlyList<IPEndPoint> _stunServers;
+    private readonly IReadOnlyList<string> _stunFallbackHosts;
+    private IReadOnlyList<IPEndPoint>? _resolvedFallback;
     private readonly TimeSpan _handshakeTimeout;
     private readonly ITailcatObserver _observer;
     private readonly TimeProvider _time;
@@ -161,6 +193,8 @@ public sealed class TailcatNode : IAsyncDisposable
     private readonly Task _udpLoop;
     private readonly Task _acceptLoop;
     private readonly Task _sweepLoop;
+    private readonly Task _endpointLoop;
+    private IReadOnlyList<IPEndPoint>? _announcedEndpoints;
 
     private TailcatNode(
         NodeIdentity identity,
@@ -169,6 +203,7 @@ public sealed class TailcatNode : IAsyncDisposable
         Socket udp,
         QuicListener listener,
         IReadOnlyList<IPEndPoint> stunServers,
+        IReadOnlyList<string> stunFallbackHosts,
         TimeSpan handshakeTimeout,
         ITailcatObserver observer,
         TimeProvider timeProvider)
@@ -179,6 +214,7 @@ public sealed class TailcatNode : IAsyncDisposable
         _udp = udp;
         _listener = listener;
         _stunServers = stunServers;
+        _stunFallbackHosts = stunFallbackHosts;
         _handshakeTimeout = handshakeTimeout;
         _observer = observer;
         _time = timeProvider;
@@ -187,6 +223,7 @@ public sealed class TailcatNode : IAsyncDisposable
         _udpLoop = Task.Run(() => UdpReceiveLoopAsync(_cts.Token));
         _acceptLoop = Task.Run(() => QuicAcceptLoopAsync(_cts.Token));
         _sweepLoop = Task.Run(() => SweepLoopAsync(_cts.Token));
+        _endpointLoop = Task.Run(() => EndpointWatchLoopAsync(_cts.Token));
 
         // Moving between networks changes every address a peer knows us by,
         // so the node re-discovers them and says so rather than going quiet.
@@ -262,7 +299,7 @@ public sealed class TailcatNode : IAsyncDisposable
         TaskCompletionSource<TailcatNode> ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
-            (DerpMap map, int homeRegionId, IReadOnlyList<IPEndPoint> stun) =
+            (DerpMap map, int homeRegionId, IReadOnlyList<IPEndPoint> stun, IReadOnlyList<string> stunFallback) =
                 await ResolveHomeRegionAsync(options, cancellationToken).ConfigureAwait(false);
 
             // A pool, not one connection: this node listens in its home region,
@@ -283,6 +320,7 @@ public sealed class TailcatNode : IAsyncDisposable
             {
                 DualMode = true,
             };
+            DisableConnectionReset(udp);
             udp.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
 
             // The listener accepts from the moment ListenAsync returns, which
@@ -300,7 +338,7 @@ public sealed class TailcatNode : IAsyncDisposable
                 cancellationToken).ConfigureAwait(false);
 
             TailcatNode node = new(
-                identity, relays, map, udp, listener, stun,
+                identity, relays, map, udp, listener, stun, stunFallback,
                 options.HandshakeTimeout, options.Observer, options.TimeProvider);
             ready.SetResult(node);
             options.Observer.RelayConnected(homeRegionId);
@@ -373,6 +411,7 @@ public sealed class TailcatNode : IAsyncDisposable
         Session session = new(link) { SessionId = sessionId, RegionId = peerRegionId };
         await ReplaceSessionAsync(peer, session).ConfigureAwait(false);
         link.PathChanged += path => OnPathChanged(peer, path);
+        link.DirectProbeSent += to => _observer.DirectProbeSent(peer, to);
         link.Start();
 
         _observer.HandshakeStarted(peer, peerRegionId);
@@ -388,7 +427,8 @@ public sealed class TailcatNode : IAsyncDisposable
             sessionId,
             _identity.Fingerprint,
             await LocalEndpointsAsync(cts.Token).ConfigureAwait(false),
-            HomeRegionId);
+            HomeRegionId,
+            PeerTransport.Quic);
         byte[] msg = PeerMessage.Seal(PeerMessageType.Hello, hello.Encode(), _identity.PrivateKey, peer);
 
         PeerHello ack;
@@ -403,6 +443,20 @@ public sealed class TailcatNode : IAsyncDisposable
             _observer.HandshakeFailed(peer, reason);
             TailcatMetrics.SessionsFailed.Add(1);
             throw new TailcatException($"peer {peer} in region {peerRegionId} did not answer: {reason}");
+        }
+
+        // The answer names the transport the peer will actually use. It only
+        // differs from what was asked for when the peer cannot do it, and
+        // going on regardless would leave this end sending QUIC packets to
+        // somebody who is not listening for them — silence, rather than an
+        // error anyone could act on.
+        if (ack.Transport != PeerTransport.Quic)
+        {
+            await CloseSessionAsync(peer).ConfigureAwait(false);
+            string reason = $"peer answered with transport {(byte)ack.Transport}, which this node does not have";
+            _observer.HandshakeFailed(peer, reason);
+            TailcatMetrics.SessionsFailed.Add(1);
+            throw new TailcatException($"peer {peer} in region {peerRegionId} refused the session: {reason}");
         }
 
         link.AddCandidates(ack.Endpoints);
@@ -489,7 +543,18 @@ public sealed class TailcatNode : IAsyncDisposable
             _cachedEndpoints = null;
         }
         IReadOnlyList<IPEndPoint> endpoints = await LocalEndpointsAsync(cancellationToken).ConfigureAwait(false);
+        await AnnounceEndpointsAsync(endpoints, cancellationToken).ConfigureAwait(false);
+        return endpoints;
+    }
 
+    /// <summary>
+    /// Tells every live session which addresses to try, and remembers what was
+    /// said so a later change can be recognised as one.
+    /// </summary>
+    private async Task AnnounceEndpointsAsync(
+        IReadOnlyList<IPEndPoint> endpoints,
+        CancellationToken cancellationToken)
+    {
         foreach (Session session in _sessions.Values)
         {
             PeerHello update = new(session.SessionId, _identity.Fingerprint, endpoints, HomeRegionId);
@@ -505,7 +570,64 @@ public sealed class TailcatNode : IAsyncDisposable
                 // One unreachable peer must not stop the others being told.
             }
         }
-        return endpoints;
+
+        lock (_endpointMu)
+        {
+            _announcedEndpoints = endpoints;
+        }
+    }
+
+    /// <summary>
+    /// Re-asks STUN while sessions are up, and announces the answer if it is
+    /// not what the peers were told.
+    /// </summary>
+    /// <remarks>
+    /// Only a change is announced, and only while there is somebody to
+    /// announce it to: on an idle node this loop is one STUN round trip every
+    /// <see cref="EndpointRecheckInterval"/> and nothing else.
+    /// </remarks>
+    private async Task EndpointWatchLoopAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(EndpointRecheckInterval, _time, ct).ConfigureAwait(false);
+                if (_sessions.IsEmpty)
+                {
+                    continue;
+                }
+
+                IReadOnlyList<IPEndPoint>? announced;
+                lock (_endpointMu)
+                {
+                    // What the peers hold: whatever was last announced, or —
+                    // before any announcement — the set the handshake sent.
+                    announced = _announcedEndpoints ?? _cachedEndpoints;
+                    _cachedEndpoints = null;
+                }
+
+                IReadOnlyList<IPEndPoint> found;
+                try
+                {
+                    found = await LocalEndpointsAsync(ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is SocketException or ObjectDisposedException or TailcatException)
+                {
+                    continue;
+                }
+
+                if (announced is not null && found.Count == announced.Count && !found.Except(announced).Any())
+                {
+                    continue;
+                }
+
+                await AnnounceEndpointsAsync(found, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     private void OnNetworkAddressChanged(object? sender, EventArgs e) =>
@@ -573,32 +695,139 @@ public sealed class TailcatNode : IAsyncDisposable
     /// </remarks>
     private async Task<IPEndPoint?> DiscoverPublicEndpointAsync(CancellationToken cancellationToken)
     {
-        foreach (IPEndPoint server in _stunServers.Take(MaxStunServersToAsk))
-        {
-            byte[] request = Stun.BuildBindingRequest(out byte[] transactionId);
-            string key = Convert.ToHexString(transactionId);
-            TaskCompletionSource<IPEndPoint> answer = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            _stunWaiters[key] = answer;
-            try
-            {
-                await _udp.SendToAsync(request, SocketFlags.None, server, cancellationToken).ConfigureAwait(false);
+        IPEndPoint? mapped = await AskAsync(_stunServers.Take(MaxStunServersToAsk), cancellationToken)
+            .ConfigureAwait(false);
+        return mapped ?? await AskAsync(
+            await ResolveFallbackAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
+            .ConfigureAwait(false);
+    }
 
-                Task delay = Task.Delay(StunTimeout, cancellationToken);
-                if (await Task.WhenAny(answer.Task, delay).ConfigureAwait(false) == answer.Task)
+    /// <summary>
+    /// Asks every server at once and takes the first answer.
+    /// </summary>
+    /// <remarks>
+    /// One at a time would be tidier, but it spends the timeout on each
+    /// server that has gone quiet before reaching one that has not — and the
+    /// servers most likely to be first in the list are the DERP map's, which
+    /// are exactly the ones that may not run STUN at all. Asking together
+    /// bounds the whole discovery by one timeout however many are dead.
+    /// </remarks>
+    private async Task<IPEndPoint?> AskAsync(
+        IEnumerable<IPEndPoint> servers,
+        CancellationToken cancellationToken)
+    {
+        List<string> keys = [];
+        List<Task<IPEndPoint>> answers = [];
+        try
+        {
+            foreach (IPEndPoint server in servers)
+            {
+                byte[] request = Stun.BuildBindingRequest(out byte[] transactionId);
+                string key = Convert.ToHexString(transactionId);
+                TaskCompletionSource<IPEndPoint> answer = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                _stunWaiters[key] = answer;
+                keys.Add(key);
+                answers.Add(answer.Task);
+                try
                 {
-                    return await answer.Task.ConfigureAwait(false);
+                    await _udp.SendToAsync(request, SocketFlags.None, server, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+                {
+                    // Unreachable from here; the others may still answer.
                 }
             }
-            catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+
+            if (answers.Count == 0)
             {
-                // This server is unreachable; try the next one.
+                return null;
             }
-            finally
+
+            Task delay = Task.Delay(StunTimeout, _time, cancellationToken);
+            Task finished = await Task.WhenAny([delay, .. answers]).ConfigureAwait(false);
+            return finished == delay ? null : await ((Task<IPEndPoint>)finished).ConfigureAwait(false);
+        }
+        finally
+        {
+            foreach (string key in keys)
             {
                 _stunWaiters.TryRemove(key, out _);
             }
         }
-        return null;
+    }
+
+    /// <summary>
+    /// Resolves the fallback servers, once per node: a name lookup is a
+    /// network round trip of its own, and these are asked on every cache miss.
+    /// </summary>
+    private async Task<IReadOnlyList<IPEndPoint>> ResolveFallbackAsync(CancellationToken cancellationToken)
+    {
+        if (_resolvedFallback is not null)
+        {
+            return _resolvedFallback;
+        }
+
+        List<IPEndPoint> resolved = [];
+        foreach (string host in _stunFallbackHosts)
+        {
+            int colon = host.LastIndexOf(':');
+            string name = colon < 0 ? host : host[..colon];
+            if (colon < 0 || !int.TryParse(host[(colon + 1)..], out int port))
+            {
+                port = Stun.DefaultPort;
+            }
+
+            try
+            {
+                IPAddress[] addresses = await Dns.GetHostAddressesAsync(name, cancellationToken).ConfigureAwait(false);
+                if (Array.Find(addresses, a => a.AddressFamily == AddressFamily.InterNetwork) is IPAddress ip)
+                {
+                    resolved.Add(new IPEndPoint(ip, port));
+                }
+            }
+            catch (Exception ex) when (ex is SocketException or ArgumentException)
+            {
+                // No DNS, or a name that no longer exists. The node still
+                // works; it just stays on the relay.
+            }
+        }
+
+        _resolvedFallback = resolved;
+        return resolved;
+    }
+
+    /// <summary>
+    /// Stops a bounced datagram from breaking the next receive, on the one
+    /// platform where it does.
+    /// </summary>
+    /// <remarks>
+    /// Windows turns the ICMP "port unreachable" that comes back from a
+    /// datagram nobody was listening for into a connection reset, raised on
+    /// the socket's *next* receive rather than on the send that caused it.
+    /// For a socket whose whole job is probing addresses that may be dead
+    /// that is fatal: every probe to a candidate that has gone away aborts
+    /// the receive a peer's answer was about to arrive on, so the two ends
+    /// probe each other indefinitely and neither ever hears anything. It cost
+    /// a session between two NATs that were both perfectly punchable.
+    /// </remarks>
+    private static void DisableConnectionReset(Socket socket)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        // SIO_UDP_CONNRESET. There is no named constant for it in .NET.
+        const int SioUdpConnReset = -1744830452;
+        try
+        {
+            socket.IOControl(SioUdpConnReset, [0, 0, 0, 0], null);
+        }
+        catch (SocketException)
+        {
+            // Older or unusual stacks may not know the option. Probing still
+            // works; it is just interruptible again.
+        }
     }
 
     private static IEnumerable<IPAddress> LocalAddresses()
@@ -685,6 +914,12 @@ public sealed class TailcatNode : IAsyncDisposable
                     .ReceiveFromAsync(buffer, SocketFlags.None, any, ct).ConfigureAwait(false);
                 IPEndPoint from = PeerLink.Normalize((IPEndPoint)res.RemoteEndPoint);
                 ReadOnlyMemory<byte> packet = buffer.AsMemory(0, res.ReceivedBytes);
+                _observer.DatagramArrived(
+                    from,
+                    res.ReceivedBytes,
+                    Stun.IsStunPacket(packet.Span) ? "stun"
+                        : PeerMessage.IsPeerMessage(packet.Span) ? PeerMessage.TypeOf(packet.Span).ToString()
+                        : "unknown");
 
                 if (Stun.IsStunPacket(packet.Span))
                 {
@@ -802,11 +1037,22 @@ public sealed class TailcatNode : IAsyncDisposable
         int peerRegion = hello.HomeRegionId != 0 ? hello.HomeRegionId : HomeRegionId;
         DerpConnection relay = await _relays.ForRegionAsync(peerRegion, ct).ConfigureAwait(false);
 
+        // A peer built against a transport this node does not have is told so,
+        // rather than dropped: the answer costs one relayed message and turns
+        // what would be a handshake timeout into an error naming the cause.
+        if (hello.Transport != PeerTransport.Quic)
+        {
+            await SendHelloAckAsync(relay, peer, hello.SessionId, PeerTransport.Quic, ct).ConfigureAwait(false);
+            _observer.HandshakeFailed(peer, $"asked for transport {(byte)hello.Transport}, which this node does not have");
+            TailcatMetrics.SessionsFailed.Add(1);
+            return;
+        }
+
         // A repeated Hello for a session we already have is just the peer
         // retrying because our answer was lost; answer again, do not restart.
         if (_sessions.TryGetValue(peer, out Session? existing) && existing.SessionId == hello.SessionId)
         {
-            await SendHelloAckAsync(relay, peer, hello.SessionId, ct).ConfigureAwait(false);
+            await SendHelloAckAsync(relay, peer, hello.SessionId, hello.Transport, ct).ConfigureAwait(false);
             return;
         }
 
@@ -814,6 +1060,7 @@ public sealed class TailcatNode : IAsyncDisposable
         Session session = new(link) { SessionId = hello.SessionId, RegionId = peerRegion };
         await ReplaceSessionAsync(peer, session).ConfigureAwait(false);
         link.PathChanged += path => OnPathChanged(peer, path);
+        link.DirectProbeSent += to => _observer.DirectProbeSent(peer, to);
         link.Start();
 
         _observer.HandshakeStarted(peer, peerRegion);
@@ -827,16 +1074,22 @@ public sealed class TailcatNode : IAsyncDisposable
         _acceptsByBridge[bridge.LocalEndPoint] = new PendingAccept(
             peer, hello.CertificateFingerprint, link, bridge, _time.GetTimestamp());
 
-        await SendHelloAckAsync(relay, peer, hello.SessionId, ct).ConfigureAwait(false);
+        await SendHelloAckAsync(relay, peer, hello.SessionId, hello.Transport, ct).ConfigureAwait(false);
     }
 
-    private async Task SendHelloAckAsync(DerpConnection relay, NodePublic peer, ulong sessionId, CancellationToken ct)
+    private async Task SendHelloAckAsync(
+        DerpConnection relay,
+        NodePublic peer,
+        ulong sessionId,
+        PeerTransport transport,
+        CancellationToken ct)
     {
         PeerHello ack = new(
             sessionId,
             _identity.Fingerprint,
             await LocalEndpointsAsync(ct).ConfigureAwait(false),
-            HomeRegionId);
+            HomeRegionId,
+            transport);
         byte[] msg = PeerMessage.Seal(PeerMessageType.HelloAck, ack.Encode(), _identity.PrivateKey, peer);
         await relay.SendAsync(peer, msg, ct).ConfigureAwait(false);
     }
@@ -1039,10 +1292,12 @@ public sealed class TailcatNode : IAsyncDisposable
         }
     }
 
-    private static async Task<(DerpMap Map, int HomeRegionId, IReadOnlyList<IPEndPoint> Stun)> ResolveHomeRegionAsync(
+    private static async Task<(DerpMap Map, int HomeRegionId, IReadOnlyList<IPEndPoint> Stun,
+        IReadOnlyList<string> StunFallback)> ResolveHomeRegionAsync(
         TailcatNodeOptions options,
         CancellationToken ct)
     {
+        IReadOnlyList<string> fallback = options.StunFallbackHosts;
         DerpMap map;
         if (options.DerpMap is not null)
         {
@@ -1101,6 +1356,7 @@ public sealed class TailcatNode : IAsyncDisposable
         if (options.StunServers is not null)
         {
             stun.AddRange(options.StunServers);
+            fallback = [];
         }
         else
         {
@@ -1112,7 +1368,7 @@ public sealed class TailcatNode : IAsyncDisposable
                 }
             }
         }
-        return (map, home.RegionID, stun);
+        return (map, home.RegionID, stun, fallback);
     }
 
     /// <summary>Closes every session and disconnects from the relay.</summary>
@@ -1147,7 +1403,7 @@ public sealed class TailcatNode : IAsyncDisposable
         await _relays.DisposeAsync().ConfigureAwait(false);
         _udp.Dispose();
 
-        foreach (Task loop in new[] { _derpLoop, _udpLoop, _acceptLoop, _sweepLoop })
+        foreach (Task loop in new[] { _derpLoop, _udpLoop, _acceptLoop, _sweepLoop, _endpointLoop })
         {
             try
             {
