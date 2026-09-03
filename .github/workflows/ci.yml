@@ -63,13 +63,35 @@ jobs:
           mkdir -p /tmp/consume && cd /tmp/consume
           dotnet new console -o app --force
           cd app
-          # Touches a type from the bundled Tailcat.dll as well as one from
-          # Tailcat.Link, so a package missing its bundled assemblies fails
-          # here rather than on a consumer's machine.
+          # Runs code from every bundled layer, not just Tailcat.Link: an
+          # assembly loads lazily, so merely naming a type the compiler can
+          # resolve would still pass with the .dll missing from the package.
+          # Sealing and opening a peer message goes through Tailcat.Net,
+          # Tailcat's keys and libsodium at once, which is also what catches a
+          # Sodium.Core dependency that the nuspec forgot to declare.
           cat > Program.cs <<'CSHARP'
+          using Tailcat;
+          using Tailcat.Derp;
+          using Tailcat.Keys;
           using Tailcat.Link;
+          using Tailcat.Net;
+
           Console.WriteLine(InvitationCode.TryParse("nonsense", out _));
-          Console.WriteLine(typeof(Tailcat.ConnBlob).Assembly.GetName().Name);
+          Console.WriteLine(typeof(ConnBlob).Assembly.GetName().Name);
+
+          var host = NodePrivate.NewKey();
+          var guest = NodePrivate.NewKey();
+          byte[] ping = PeerMessage.Seal(PeerMessageType.Ping, "ping"u8, host, guest.Public());
+          if (!PeerMessage.TryOpen(ping, guest, host.Public(), out _, out byte[]? payload))
+          {
+              throw new InvalidOperationException("the bundled Tailcat.Net could not open its own message");
+          }
+          Console.WriteLine(System.Text.Encoding.UTF8.GetString(payload));
+
+          // A static property rather than a const, which the compiler would
+          // inline and leave Tailcat.Derp.dll unloaded.
+          Console.WriteLine(DerpProtocol.Magic.Length);
+          Console.WriteLine(typeof(DerpClient).Assembly.GetName().Name);
           CSHARP
           dotnet nuget add source "$GITHUB_WORKSPACE/artifacts" --name local
           dotnet add package Tailcat.Link --version "$version"

@@ -2,6 +2,10 @@
 
   <PropertyGroup>
     <RootNamespace>Tailcat.Derp</RootNamespace>
+    <!-- This assembly ships inside the Tailcat.Link package, so its XML docs
+         have to be built for a consumer to get IntelliSense on the types that
+         surface through Tailcat.Link. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
   <ItemGroup>

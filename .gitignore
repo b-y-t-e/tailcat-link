@@ -8,3 +8,6 @@ TestResults/
 
 # dotnet pack output
 artifacts/
+
+# NuGet API key
+Deploy/.env

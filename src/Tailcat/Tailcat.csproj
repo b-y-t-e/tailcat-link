@@ -2,6 +2,15 @@
 
   <PropertyGroup>
     <RootNamespace>Tailcat</RootNamespace>
+    <!-- This assembly ships inside the Tailcat.Link package, so its XML docs
+         have to be built for a consumer to get IntelliSense on the types that
+         surface through Tailcat.Link. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- CS1591 here fires only on the equality members the compiler
+         synthesises for records and for the key structs; documenting a
+         generated Equals/GetHashCode says nothing a reader does not know.
+         Every hand-written public member in this project is documented. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

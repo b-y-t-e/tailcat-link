@@ -26,13 +26,39 @@
   <PropertyGroup Label="Bundled dependencies">
     <!-- The four project references below are not published separately, so
          their assemblies go into this package's lib/ folder. Without this the
-         package would declare dependencies that resolve nowhere. -->
+         package would declare dependencies that resolve nowhere. The symbol
+         hook is the same story for the .pdb files: the failures that are hard
+         to read from a stack trace live in the bundled layers, not here. -->
     <TargetsForTfmSpecificBuildOutput>$(TargetsForTfmSpecificBuildOutput);IncludeReferencedProjectsInPackage</TargetsForTfmSpecificBuildOutput>
+    <TargetsForTfmSpecificDebugSymbolsInPackage>$(TargetsForTfmSpecificDebugSymbolsInPackage);IncludeReferencedProjectSymbolsInPackage</TargetsForTfmSpecificDebugSymbolsInPackage>
   </PropertyGroup>
 
-  <Target Name="IncludeReferencedProjectsInPackage" DependsOnTargets="ResolveReferences">
+  <Target Name="ResolveBundledProjectOutputs" DependsOnTargets="ResolveReferences">
     <ItemGroup>
-      <BuildOutputInPackage Include="@(ReferenceCopyLocalPaths->WithMetadataValue('ReferenceSourceTarget', 'ProjectReference')->WithMetadataValue('Extension', '.dll'))" />
+      <BundledProjectAssembly Include="@(ReferenceCopyLocalPaths->WithMetadataValue('ReferenceSourceTarget', 'ProjectReference')->WithMetadataValue('Extension', '.dll'))" />
+    </ItemGroup>
+  </Target>
+
+  <!-- The XML docs travel with the assemblies: without them a consumer
+       implementing INodeGateway gets no IntelliSense on TailcatConnection,
+       which lives in the bundled Tailcat.Net rather than here. -->
+  <Target Name="IncludeReferencedProjectsInPackage" DependsOnTargets="ResolveBundledProjectOutputs">
+    <ItemGroup>
+      <BuildOutputInPackage Include="@(BundledProjectAssembly)" />
+      <BuildOutputInPackage Include="@(BundledProjectAssembly->'%(RootDir)%(Directory)%(Filename).xml')" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="IncludeReferencedProjectSymbolsInPackage" DependsOnTargets="ResolveBundledProjectOutputs">
+    <ItemGroup>
+      <TfmSpecificDebugSymbolsFile Include="@(BundledProjectAssembly->'%(RootDir)%(Directory)%(Filename).pdb')" />
+      <!-- Metadata is set in a second pass: written on the Include above it
+           would batch over the assembly item and name every symbol file after
+           the .dll it came from. -->
+      <TfmSpecificDebugSymbolsFile>
+        <TargetPath>/lib/$(TargetFramework)/%(Filename)%(Extension)</TargetPath>
+        <TargetFramework>$(TargetFramework)</TargetFramework>
+      </TfmSpecificDebugSymbolsFile>
     </ItemGroup>
   </Target>
 
