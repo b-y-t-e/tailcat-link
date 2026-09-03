@@ -35,6 +35,7 @@ a written justification — never blanket-disable a rule. CI builds with
 Tailcat        wire format (ConnBlob/CBOR), keys, DERP map fetching, proxying
 Tailcat.Derp   DERP relay client: framing, TLS, reconnection, region pool
 Tailcat.Net    sessions: STUN, sealed control messages, path selection, QUIC
+Tailcat.Link   the durable, paired link on top: stored identity, reconnection
 Tailcat.Cli    the pure logic from cmd/tailcat
 Tailcat.WebDemo  the webdemo package
 Tailcat.Demo   tailcat-demo, for verifying a link between two machines
@@ -57,6 +58,11 @@ These were each found the hard way; the README explains them at length.
   the stream. Tests where the listener speaks first will hang.
 - **A node's address is key + home region**, not a bare key. Two nodes far
   apart choose different regions, and a bare key sends into the wrong one.
+  This is why `Tailcat.Link` pins a host's region once and never re-measures:
+  the invitation code already published must keep pointing at the machine.
+- **Writing into a dead session succeeds.** The bytes go to a relay with
+  nobody to hand them to, so a broken link is silent rather than faulty.
+  Anything that must notice needs a heartbeat and a per-request timeout.
 
 ## Conventions
 

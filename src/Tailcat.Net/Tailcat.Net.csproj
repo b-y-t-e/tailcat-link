@@ -14,6 +14,9 @@
     <!-- A PeerLink is created by a node, so its constructor is internal;
          the tests build one directly to exercise path selection. -->
     <InternalsVisibleTo Include="Tailcat.Net.Tests" />
+    <!-- Tailcat.Link's end-to-end tests stand whole nodes up against the
+         in-memory relay, which is what ConnectRelay exists for. -->
+    <InternalsVisibleTo Include="Tailcat.Link.Tests" />
   </ItemGroup>
 
   <ItemGroup>

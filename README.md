@@ -8,6 +8,97 @@ classifier, the web demo handler, and connection proxying.
 Tests are xUnit v3 and were written first, ported case for case from the Go
 tests.
 
+## The short way in: `Tailcat.Link`
+
+Everything below this section is the transport. If what you want is two
+machines that stay in touch — a laptop that moves between Wi-Fi networks, and
+a machine somewhere you cannot reach except by pairing it once — use
+`Tailcat.Link` and skip the rest.
+
+On the machine to be reached, once:
+
+```csharp
+await using ILink link = await TailcatLink.HostAsync("my-app");
+Console.WriteLine(link.InvitationCode);      // show this once, as text or a barcode
+link.OnRequest(command => Run(command));     // answer whatever the operator asks
+```
+
+On the machine doing the reaching, with that code the first time and never
+again:
+
+```csharp
+await using ILink link = await TailcatLink.JoinAsync("my-app", code);
+string answer = await link.RequestAsync("status");
+```
+
+Both ends are equal after pairing: either can ask, either can answer, and
+either can push a message the other did not ask for. There is nothing to call
+when the link drops.
+
+What it adds on top of `Tailcat.Net`, and why each part is needed:
+
+- **A pairing that survives a restart.** The identity key is generated once
+  and stored — DPAPI-encrypted to the user account on Windows, mode 0600
+  inside a 0700 directory on Unix, written through a temporary file so a
+  power cut cannot leave half of one. Without it a restart means a new key,
+  a new address, and a code that no longer points anywhere.
+- **An address that never changes.** A host records the region it first
+  measured and pins it from then on. A node's address is its key *and* its
+  region, so a host that re-measured after moving would quietly retire the
+  code already in circulation — with nobody there to publish the new one.
+- **A supervision loop.** `TailcatConnection` is not resurrected once it
+  dies; `DurableLink` builds the next one. Relay outage, network change,
+  either machine rebooting, and a peer that has been away for a day all look
+  the same from here — a session that stopped answering — and all get the
+  same answer.
+- **A host that cannot be reached repairs itself.** The hosting end spends
+  its life waiting to be connected to, and waiting looks exactly like a relay
+  socket that died without saying so — what a laptop resumed from sleep behind
+  another NAT leaves behind. Nobody is standing next to that machine, so
+  silence longer than `ListenSilenceTimeout` counts as a failure and the node
+  is rebuilt from the stored identity, with the same key and region: the
+  published code still points at it.
+- **Failure detection that works.** Writing into a dead session succeeds:
+  the bytes reach a relay with nobody to hand them to. So a heartbeat asks
+  the peer every 15 seconds, and every exchange is given up on once nothing
+  has moved for `RequestTimeout`; silence, not an error, is what a machine
+  that has gone away looks like. It bounds silence rather than the exchange
+  on purpose — a payload of several megabytes through a shared relay takes
+  longer than any sane deadline, and each retry would resend it from the
+  start and run out in the same place.
+- **Trust on first use, with something to trust.** A code is an address and
+  a random pairing token. The address cannot be kept secret — it is what the
+  host hands to every relay it connects to, and the operator of a public
+  relay sees it — so the token is what a host actually checks: the first
+  machine to arrive with it is pinned as the peer, and everyone after it is
+  refused. Candidates are heard side by side, up to a bounded number, because
+  one at a time means anyone who knows the address can hold the host away from
+  its peer by connecting and saying nothing. The token is good for an hour (`PairingWindow`); after that, or
+  after pairing, the code buys nothing, and a host started again past its
+  window shows a new one. A host that outlived its window while running is
+  not stuck showing a code it would refuse either: `InvitationExpiresAt` says
+  when the code stops working and `RenewInvitationAsync` mints the next one,
+  so an application that can publish a code — printing it, drawing a barcode
+  — does not have to be restarted to do it again.
+- **A request that waits.** Sending while the link happens to be down is not
+  an error: it waits for the next session, up to `RequestDeadline`. Only a
+  handler that threw on the other machine comes back as a failure
+  (`RemoteHandlerException`), because retrying that would only replace a
+  clear error with a timeout.
+- **A retry that is not a second command.** A request carries an id that
+  belongs to the request, not to the attempt, so the machine that already ran
+  it answers the retry from memory instead of running it again. Without that,
+  a session dying between the handler finishing and its answer arriving would
+  restart the service, write the file, or take the payment twice. The one
+  case outside the promise is the other machine's process ending mid-request:
+  nothing here can know how far its handler got.
+
+`tests/Tailcat.Link.Tests` runs all of it offline against the in-memory relay:
+pairing, the code being spent and renewed, a stranger who has the host's
+address but not its token, a relay that drops both machines, a host that
+reboots, a host nobody reaches at all, and both machines losing their network
+stack outright.
+
 ## Layout
 
 | Project | Go counterpart |
@@ -18,11 +109,13 @@ tests.
 | `src/Tailcat.Derp` | `tailscale.com/derp` — a DERP relay client |
 | `src/Tailcat.Net` | the job `magicsock` + `wgengine` + netstack do in Go |
 | `src/Tailcat.Demo` | `tailcat-demo`, a CLI for verifying a link between two machines |
+| `src/Tailcat.Link` | (new) pair two machines once, stay linked — see above |
 | `tests/Tailcat.Tests` | `tailcat_test.go`, `wire_test.go` |
 | `tests/Tailcat.WebDemo.Tests` | `webdemo/webdemo_test.go` |
 | `tests/Tailcat.Cli.Tests` | `cmd/tailcat/socks_test.go` |
 | `tests/Tailcat.Derp.Tests` | (new) framing, handshake, and routing tests |
 | `tests/Tailcat.Net.Tests` | (new) STUN, sealed messages, paths, and live session tests |
+| `tests/Tailcat.Link.Tests` | (new) pairing, stored identities, and self-healing links |
 
 ## What was ported
 

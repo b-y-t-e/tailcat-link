@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Tailcat.Link</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <IsPackable>true</IsPackable>
+    <PackageId>Tailcat.Link</PackageId>
+    <Title>Tailcat.Link — a durable link between two machines</Title>
+    <Description>Pair two machines that cannot see each other with a short code, once, then send and receive for as long as they are switched on. The link re-establishes itself after a network change, a relay outage, or either machine rebooting, and the identity that makes that possible is stored encrypted (DPAPI on Windows, 0600 inside a 0700 directory on Unix).</Description>
+    <PackageTags>tailscale;tailcat;derp;nat-traversal;hole-punching;quic;p2p;remote-control;networking</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- The public surface is fully documented, so consumers get IntelliSense
+         from the package rather than from guessing. The repository as a whole
+         is not there yet, which is why this is set here and not in
+         Directory.Build.props. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Packed at the package root, where nuget.org looks for it. -->
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- DPAPI: on Windows the stored identity key is encrypted to the user
+         account, so a readable file is not a usable key. -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Tailcat.Link.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Becomes a package dependency on Tailcat.Net, which pulls in
+         Tailcat.Derp and Tailcat: all four are published together or none of
+         them resolves. -->
+    <ProjectReference Include="..\Tailcat.Net\Tailcat.Net.csproj" />
+  </ItemGroup>
+
+</Project>

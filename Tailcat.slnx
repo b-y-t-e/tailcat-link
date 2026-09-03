@@ -3,6 +3,7 @@
     <Project Path="src/Tailcat.Cli/Tailcat.Cli.csproj" />
     <Project Path="src/Tailcat.Demo/Tailcat.Demo.csproj" />
     <Project Path="src/Tailcat.Derp/Tailcat.Derp.csproj" />
+    <Project Path="src/Tailcat.Link/Tailcat.Link.csproj" />
     <Project Path="src/Tailcat.Net/Tailcat.Net.csproj" />
     <Project Path="src/Tailcat.WebDemo/Tailcat.WebDemo.csproj" />
     <Project Path="src/Tailcat/Tailcat.csproj" />
@@ -10,6 +11,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Tailcat.Cli.Tests/Tailcat.Cli.Tests.csproj" />
     <Project Path="tests/Tailcat.Derp.Tests/Tailcat.Derp.Tests.csproj" />
+    <Project Path="tests/Tailcat.Link.Tests/Tailcat.Link.Tests.csproj" />
     <Project Path="tests/Tailcat.Net.Tests/Tailcat.Net.Tests.csproj" />
     <Project Path="tests/Tailcat.TestSupport/Tailcat.TestSupport.csproj" />
     <Project Path="tests/Tailcat.Tests/Tailcat.Tests.csproj" />
