@@ -21,8 +21,23 @@
     <Product>Tailcat for .NET</Product>
     <Description>Connect hosts across networks that cannot see each other, over Tailscale's DERP relays.</Description>
     <PackageLicenseExpression>BSD-3-Clause</PackageLicenseExpression>
+    <!-- The Go implementation this was ported from. It is not where these
+         packages live, so repoint it before publishing: nuget.org shows it as
+         the package's source, and sending a consumer to the wrong repository
+         is worse than sending them nowhere. -->
     <RepositoryUrl>https://github.com/tailscale/tailcat</RepositoryUrl>
     <VersionPrefix>0.1.0</VersionPrefix>
+
+    <!-- Packages ship with symbols and with the sources they were built from
+         embedded, so a stack trace from a consumer's machine points at a line
+         rather than at an address. ContinuousIntegrationBuild is what makes
+         the build deterministic; it is set only on CI because it rewrites
+         local source paths, which is unhelpful while debugging here. -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true' OR '$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
 
 </Project>
