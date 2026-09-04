@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Tailcat.Derp;
 using Tailcat.Keys;
+using Tailcat.Net.Relay1;
 using Tailcat.Tailcfg;
 
 namespace Tailcat.Net.Tests;
@@ -269,6 +270,117 @@ public class Relay1SessionTests
             catch (IOException)
             {
             }
+        }
+    }
+
+    /// <summary>
+    /// A FIN for a stream this end has already answered and closed — which is
+    /// every request — must not raise the stream again. The JavaScript half
+    /// retires the ids it has closed for exactly this; before the same
+    /// retirement landed here, the host raised a phantom per request and its
+    /// serving loop parked in <c>LinkFrame.ReadAsync</c> for good, one task
+    /// and one stream leaked per request on a long-lived paired link.
+    /// </summary>
+    [Fact]
+    public async Task AFinThatArrivesAfterThisEndClosedTheStreamDoesNotOpenAnotherOne()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+        await using TailcatNode dialer = await NodeAsync(relay, ct);
+
+        (ITailcatConnection client, ITailcatConnection server) = await PairAsync(relay, listener, dialer, ct);
+        await using (client)
+        await using (server)
+        {
+            Stream request = await client.OpenStreamAsync(ct);
+            await request.WriteAsync("status"u8.ToArray(), ct);
+            await request.FlushAsync(ct);
+
+            Stream served = await server.AcceptStreamAsync(ct);
+            byte[] buf = new byte[16];
+            int asked = await served.ReadAsync(buf, ct);
+            Assert.Equal("status", Encoding.UTF8.GetString(buf, 0, asked));
+            await served.WriteAsync("STATUS"u8.ToArray(), ct);
+            await served.FlushAsync(ct);
+            // Closing the answered stream is what every server does; the
+            // client's own FIN for the same id lands afterwards.
+            await served.DisposeAsync();
+
+            int back = await request.ReadAsync(buf, ct);
+            Assert.Equal("STATUS", Encoding.UTF8.GetString(buf, 0, back));
+            await request.DisposeAsync();
+
+            // What the server accepts next must be the live stream, not a
+            // phantom raised by the late FIN: the phantom would have been
+            // queued first, and nothing would ever read it.
+            Stream again = await client.OpenStreamAsync(ct);
+            await again.WriteAsync("again"u8.ToArray(), ct);
+            await again.FlushAsync(ct);
+
+            Stream next = await server.AcceptStreamAsync(ct);
+            Assert.Equal(3UL, ((Relay1Stream)next).Id);
+            int read = await next.ReadAsync(buf, ct);
+            Assert.Equal("again", Encoding.UTF8.GetString(buf, 0, read));
+        }
+    }
+
+    /// <summary>
+    /// The same when the peer's streams arrive out of turn: the .NET half
+    /// numbers a stream before taking the lock that serialises its sending,
+    /// so two concurrent requests can reach the relay with the higher id
+    /// first. Retiring is per id — the run between them collapses — so a
+    /// late FIN for the older of the two cannot reopen it either. The
+    /// JavaScript half has this test for exactly that case.
+    /// </summary>
+    [Fact]
+    public async Task AFinForTheOlderOfTwoOutOfOrderStreamsDoesNotReopenIt()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+        await using TailcatNode dialer = await NodeAsync(relay, ct);
+
+        (ITailcatConnection client, ITailcatConnection server) = await PairAsync(relay, listener, dialer, ct);
+        await using (client)
+        await using (server)
+        {
+            Stream older = await server.OpenStreamAsync(ct);
+            Stream newer = await server.OpenStreamAsync(ct);
+            await newer.WriteAsync("from 4"u8.ToArray(), ct);
+            await newer.FlushAsync(ct);
+            await older.WriteAsync("from 2"u8.ToArray(), ct);
+            await older.FlushAsync(ct);
+
+            Stream first = await client.AcceptStreamAsync(ct);
+            Stream second = await client.AcceptStreamAsync(ct);
+            Assert.Equal(4UL, ((Relay1Stream)first).Id);
+            Assert.Equal(2UL, ((Relay1Stream)second).Id);
+
+            // Closing both is what a server does; the listener's own FINs
+            // for the same ids land afterwards.
+            await first.DisposeAsync();
+            await second.DisposeAsync();
+            await older.DisposeAsync();
+            await newer.DisposeAsync();
+
+            Stream third = await server.OpenStreamAsync(ct);
+            await third.WriteAsync("from 6"u8.ToArray(), ct);
+            await third.FlushAsync(ct);
+
+            Stream next = await client.AcceptStreamAsync(ct);
+            Assert.Equal(6UL, ((Relay1Stream)next).Id);
+            byte[] buf = new byte[16];
+            int read = await next.ReadAsync(buf, ct);
+            Assert.Equal("from 6", Encoding.UTF8.GetString(buf, 0, read));
         }
     }
 

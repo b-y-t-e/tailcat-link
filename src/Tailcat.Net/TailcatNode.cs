@@ -1002,11 +1002,15 @@ public sealed class TailcatNode : IAsyncDisposable
 
                 foreach (Session session in _sessions.Values)
                 {
-                    if (session.Link is not null &&
+                    // Read once: a session that settles on relay1 clears its
+                    // link, so checking the field and then using it are two
+                    // different answers and the second can be null.
+                    PeerLink? candidate = session.Link;
+                    if (candidate is not null &&
                         PeerMessage.TryOpen(packet.Span, _identity.PrivateKey, session.Peer, out _, out _))
                     {
-                        _linksByEndpoint[from] = session.Link!;
-                        await session.Link!.HandlePacketAsync(packet, from, ct).ConfigureAwait(false);
+                        _linksByEndpoint[from] = candidate;
+                        await candidate.HandlePacketAsync(packet, from, ct).ConfigureAwait(false);
                         break;
                     }
                 }
@@ -1099,9 +1103,9 @@ public sealed class TailcatNode : IAsyncDisposable
             return;
         }
 
-        if (session.Link is not null)
+        if (session.Link is PeerLink link)
         {
-            await session.Link.HandlePacketAsync(packet, from, ct).ConfigureAwait(false);
+            await link.HandlePacketAsync(packet, from, ct).ConfigureAwait(false);
         }
     }
 
@@ -1441,9 +1445,9 @@ public sealed class TailcatNode : IAsyncDisposable
 
     private async Task ReleaseSessionAsync(Session session)
     {
-        if (session.Link is not null)
+        if (session.Link is PeerLink forgetting)
         {
-            ForgetEndpointsOf(session.Link);
+            ForgetEndpointsOf(forgetting);
         }
         if (session.Connection is not null)
         {
@@ -1453,9 +1457,9 @@ public sealed class TailcatNode : IAsyncDisposable
         {
             await session.Relayed.DisposeAsync().ConfigureAwait(false);
         }
-        if (session.Link is not null)
+        if (session.Link is PeerLink link)
         {
-            await session.Link.DisposeAsync().ConfigureAwait(false);
+            await link.DisposeAsync().ConfigureAwait(false);
         }
     }
 
