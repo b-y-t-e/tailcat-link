@@ -63,6 +63,28 @@ internal sealed class Relay1Ephemeral
             throw new TailcatException("the peer's relay1 key is not a usable X25519 key");
         }
 
+        try
+        {
+            return Schedule(shared, sessionId, dialer, host);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(shared);
+        }
+    }
+
+    /// <summary>
+    /// The schedule alone: a shared secret in, one traffic key per direction out.
+    /// </summary>
+    /// <remarks>
+    /// Separate from the exchange above because the two answer to different
+    /// things — the exchange to X25519, this to the salt and the labels the
+    /// other implementation must use as well. It is also the only way to hold
+    /// both implementations to those from a fixed secret, which no test can do
+    /// through an ephemeral key it did not choose.
+    /// </remarks>
+    public static Relay1Keys Schedule(ReadOnlySpan<byte> shared, ulong sessionId, NodePublic dialer, NodePublic host)
+    {
         // The salt names who is talking to whom and which session, so the same
         // pair of ephemeral keys could not produce the same traffic keys twice.
         byte[] salt = new byte[8 + (NodePublic.RawLen * 2)];
@@ -70,8 +92,8 @@ internal sealed class Relay1Ephemeral
         dialer.Raw32().CopyTo(salt.AsSpan(8));
         host.Raw32().CopyTo(salt.AsSpan(8 + NodePublic.RawLen));
 
-        byte[] prk = HKDF.Extract(HashAlgorithmName.SHA256, shared, salt);
-        CryptographicOperations.ZeroMemory(shared);
+        byte[] prk = new byte[SHA256.HashSizeInBytes];
+        HKDF.Extract(HashAlgorithmName.SHA256, shared, salt, prk);
 
         byte[] dialerToHost = HKDF.Expand(HashAlgorithmName.SHA256, prk, Relay1Record.KeyLen, "tailcat relay1 v1 d2h"u8.ToArray());
         byte[] hostToDialer = HKDF.Expand(HashAlgorithmName.SHA256, prk, Relay1Record.KeyLen, "tailcat relay1 v1 h2d"u8.ToArray());
@@ -118,10 +140,19 @@ internal static class Relay1Record
     public const int Overhead = CounterOffset + CounterLen + TagLen;
 
     /// <summary>
-    /// The most plaintext one record may carry, leaving room for everything
-    /// above inside DERP's packet limit.
+    /// The most plaintext one record may carry.
     /// </summary>
-    public const int MaxPlaintext = 64512;
+    /// <remarks>
+    /// Sized against 32 KiB, not DERP's 64 KiB packet limit: a relay reached
+    /// over a WebSocket — which is the only way a browser can reach one —
+    /// closes a client that sends a message larger than 32768 bytes, with
+    /// "read limited at 32769 bytes". The limit is the same on both
+    /// transports because either end of a session may be a browser, and half
+    /// a record's worth of throughput is not worth a second size to reason
+    /// about. What is left over covers the DERP frame header, the destination
+    /// key, this record's own header and counter, and the GCM tag.
+    /// </remarks>
+    public const int MaxPlaintext = 32256;
 
     /// <summary>Seals <paramref name="plaintext"/> as record <paramref name="counter"/>.</summary>
     public static byte[] Seal(ReadOnlySpan<byte> plaintext, byte[] key, ulong counter)
