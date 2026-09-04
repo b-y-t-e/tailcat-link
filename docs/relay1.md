@@ -3,10 +3,10 @@
 A second way to carry a tailcat session's streams, for ends that cannot open
 a UDP socket — which in practice means a web browser.
 
-Status: **implemented** in `src/Tailcat.Net/Relay1`, and covered by
+Status: **implemented twice**. In .NET, `src/Tailcat.Net/Relay1`, covered by
 `Relay1SessionTests` plus one test that runs the whole of `Tailcat.Link` over
-it. What is not built is the browser client this was designed for; the .NET
-side of the contract it will speak is finished.
+it; and in JavaScript, `clients/browser`, which is the browser client this was
+designed for. The two have been run against each other over a live relay.
 
 ## Why
 
@@ -125,8 +125,14 @@ PeerMessageType.Relay1Record = 0x07
 - **The counter must arrive strictly in sequence.** A gap means the relay
   dropped a record, and there is no way to recover the stream it belonged to,
   so the session is closed. See *Cost*.
-- **Size**: at most 64512 bytes of plaintext, which leaves room for the tag,
-  the counter and the peer-message header inside DERP's 64 KiB packet limit.
+- **Size**: at most 32256 bytes of plaintext. Not sized against DERP's 64 KiB
+  packet limit, which is the obvious mistake and was made here first: a relay
+  reached over a WebSocket closes a client that sends a message larger than
+  32768 bytes — `code 1009, read limited at 32769 bytes` — and a WebSocket is
+  the only way a browser reaches one. The limit is the same on both
+  transports because either end may be a browser. The remainder covers the
+  DERP frame header, the destination key, this record's header and counter,
+  and the tag.
 
 ## Streams
 
@@ -186,32 +192,36 @@ browser asks for: nothing that can avoid these should pay for them.
 
 ## The browser side
 
-What a pure-JS client has to implement, in the order it needs them:
+What a pure-JS client has to implement, in the order it needs them. This is
+`clients/browser`, and each item names the module it landed in:
 
-1. **The DERP map**, fetched with `fetch`.
+1. **The DERP map**, fetched with `fetch` (`derp.js`).
    `https://controlplane.tailscale.com/derpmap/default` answers
    `Access-Control-Allow-Origin: *`, so an SPA may read it directly; serving
    a copy from the app's own origin, as the upstream js/wasm demo does
    (`web/app.js` in `tailscale/tailcat`), remains the option that does not
    depend on that header staying.
-2. **The relay connection**, `wss://<hostname>/derp` with the `derp`
+2. **The relay connection** (`derp.js`), `wss://<hostname>/derp` with the `derp`
    subprotocol, then DERP's own login: the server's key from its greeting,
    the client info sealed to it, and the frame loop from `DerpProtocol.cs`.
    No region measuring: a dialler publishes no address, so it connects
    straight to the region named in the invitation code.
-3. **The peer handshake**: `PeerMessage` framing, the NaCl box
+3. **The peer handshake** (`peer.js`, `nacl.js`): `PeerMessage` framing, the NaCl box
    (X25519 + HSalsa20 + XSalsa20-Poly1305 — `tweetnacl` is about 8 KB and
    only ever runs over handshake-sized messages), and `PeerHello` with
    `transport = 1`.
-4. **`relay1`** as specified above: HKDF and AES-GCM through WebCrypto.
-5. **The link layer**, ported as-is: `LinkFrame`, `PairingHandshake`,
+4. **`relay1`** as specified above (`relay1.js`): HKDF and AES-GCM through
+   WebCrypto.
+5. **The link layer**, ported as-is (`link.js`, `link-session.js`,
+   `session-source.js`, `pairing-handshake.js`, `link-frame.js`,
+   `address.js`, `exchange-ledger.js`): `LinkFrame`, `PairingHandshake`,
    `ExchangeLedger`, `InvitationCode` (CBOR for the `ConnBlob`).
-6. **Storage**: the node key in IndexedDB. WebCrypto can hold the X25519
-   private key as non-extractable and still do `deriveBits`, so the key never
-   has to exist as bytes in JS — better than the file on disk that
+6. **Storage** (`store.js`): the node key in IndexedDB. WebCrypto can hold the
+   X25519 private key as non-extractable and still do `deriveBits`, so the key
+   never has to exist as bytes in JS — better than the file on disk that
    `FileLinkStore` writes.
 
-Intended shape, mirroring `JoinAsync`:
+The shape it took, mirroring `JoinAsync`:
 
 ```js
 const link = await TailcatLink.join({
@@ -231,15 +241,41 @@ the README of whatever ships this.
 ## Testing
 
 - **Wire format**, both sides: a hello with and without the transport byte,
-  record counter gaps, stream framing, window accounting.
-- **Interop**, in CI and offline: `tests/Tailcat.TestSupport`'s in-memory
-  relay behind a WebSocket endpoint, with the JS client driven from Node.
-  Node is a *test* dependency only — the library itself must not need it.
-- **One browser test** under Playwright, so the WebCrypto and WebSocket paths
-  are exercised where they will actually run.
+  record counter gaps, stream framing, window accounting. Done — `dotnet test`
+  for the .NET side, `npm --prefix clients/browser test` for the JavaScript
+  one, neither needing a network.
+- **The same bytes on both sides**, offline:
+  `clients/browser/test/vectors/relay1-records.json` holds frames, sealed
+  records, the key schedule and encoded hellos, and the JavaScript unit tests
+  and `Relay1VectorTests` both check against it. Everything a session is
+  agreed on before a byte of application data moves is in there: without the
+  schedule case an HKDF label edited on one side, and without the hello cases
+  a field added to it, would pass both test runs and fail only in somebody's
+  manual interop run. The schedule is checked from a fixed shared secret
+  rather than a real exchange — the ephemeral keys are whatever the two ends
+  chose — which is why both sides expose it as a function of its own.
+- **Interop**, over a live relay against `tailcat-demo host`: `npm --prefix
+  clients/browser run interop`. Not in CI, because it needs a relay and a
+  host. Node is a *test* dependency only — the library itself must not need
+  it.
 - **A .NET dialler must still choose QUIC**, and a `relay1` peer must still
   be refused with a reason by a build that does not have it. Both are cheap,
   and both are failures that would otherwise be silent.
+
+- **The link itself, offline**: the JavaScript client dials through a seam
+  (`dial`) that a test replaces with a session pair carried by a function
+  call, and a host in memory answers it —
+  `clients/browser/test/unit/link.test.mjs` against `loopback.mjs`, which is
+  what `Tailcat.TestSupport` is for the .NET side. Pairing, a refusal, the
+  heartbeat, the reconnect loop, a request re-sent across a session boundary
+  and the drain in `close()` are all in there.
+
+Still missing: an offline run that includes the relay itself —
+`tests/Tailcat.TestSupport`'s in-memory relay behind a WebSocket endpoint,
+which is the one layer the seam above steps over — and **one browser test**
+under Playwright, so the WebCrypto and WebSocket paths are exercised where
+they will actually run. Until those exist, everything that crosses a real
+socket is verified by hand.
 
 ## What has been verified
 
@@ -261,11 +297,19 @@ browser also has (`WebSocket`, `fetch`) plus `tweetnacl` for the box:
   exchanged a packet and its echo in both directions.
 
 So the transport this specification assumes exists, and the two runtimes meet
-on it. What remains unbuilt is everything above the relay: the ephemeral
-handshake, the record layer and the mux.
+on it. Everything above the relay — the ephemeral handshake, the record layer
+and the mux — was then written on top of it in `clients/browser/src`, and the
+whole of it verified end to end: `npm --prefix clients/browser run interop`
+pairs with `tailcat-demo host`, exchanges requests in both directions, and
+carries 300 kB through the record layer and past the credit window.
 
-Scripts used, kept out of the repository: `derp-ws.mjs`, `derp-login.mjs`,
-`derp-send.mjs` and the `derpecho` console peer, in this session's scratchpad.
+That last case is what the second implementation earned: records had been
+sized against DERP's 64 KiB packet limit, and a relay reached over a
+WebSocket closes a client that sends more than 32 KiB. See *Size*, above.
+
+Scripts used before the client existed, kept out of the repository:
+`derp-ws.mjs`, `derp-login.mjs`, `derp-send.mjs` and the `derpecho` console
+peer.
 
 ## Open questions
 

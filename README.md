@@ -5,6 +5,13 @@ that tailcat implements itself: the `ConnBlob` wire format, the meow
 handshake framing, DERP map fetching and caching, the SOCKS5 address
 classifier, the web demo handler, and connection proxying.
 
+On top of that port sit two things Go's tailcat does not have: `Tailcat.Net`,
+which does the *job* of Tailscale's data plane — meet at a relay, punch a
+direct path, carry reliable streams — over QUIC rather than WireGuard, and
+`Tailcat.Link`, which turns that into a pairing two machines keep for as long
+as they are switched on. A browser can hold one too; see
+[clients/browser](clients/browser/README.md).
+
 Tests are xUnit v3 and were written first, ported case for case from the Go
 tests.
 
@@ -122,6 +129,7 @@ stack outright.
 | `tests/Tailcat.Derp.Tests` | (new) framing, handshake, and routing tests |
 | `tests/Tailcat.Net.Tests` | (new) STUN, sealed messages, paths, and live session tests |
 | `tests/Tailcat.Link.Tests` | (new) pairing, stored identities, and self-healing links |
+| `clients/browser` | (new) the same link, in a page — `web/` is the nearest Go relative |
 
 ## What was ported
 
@@ -453,6 +461,46 @@ port toward STUN servers and used a different one toward its peer, so the
 punch succeeded on the address learned from an arriving probe rather than on
 the one that was announced.
 
+## When one end cannot have QUIC
+
+A browser has no UDP socket. It cannot originate a QUIC connection to a peer
+and cannot present a client certificate, so it cannot be one end of the
+session described above. It can open a WebSocket, and that is enough to reach
+a DERP relay.
+
+So there is a second transport, `relay1`, for ends like that: the relay
+carries the streams itself, encrypted end to end, and the session never
+leaves it. A pair that can do QUIC still does — the transports are offered in
+preference order inside the sealed hello, and QUIC is first because it
+recovers from a lost packet and can punch its way onto a direct path.
+`relay1` is the floor, not a replacement.
+
+Writing it turned up a second audience nobody had asked about. **Windows 10
+has no QUIC at all** — `QuicListener.IsSupported` is false, and until this
+existed a node there refused to start. It now offers `relay1`, connects, and
+works; measured between a Windows 11 machine and a Windows 10 one, the two
+agreed on `relay1` with neither configured for it, and the session came up in
+107 ms against QUIC's 3.3 seconds. There is no QUIC handshake to do.
+
+The protocol is specified byte for byte in [docs/relay1.md](docs/relay1.md),
+which is what let the JavaScript client be written against the document
+rather than against the code. It landed on the formats first time — and then
+immediately found a bug in them. Records had been sized against DERP's 64 KiB
+packet limit, but a relay reached over a WebSocket closes a client that sends
+more than 32 KiB: `code 1009, read limited at 32769 bytes`. Small requests
+were fine. A 300 kB one was not. A second implementation is how you find
+that before a user does.
+
+```js
+const link = await TailcatLink.join({ appName: "my-app", invitationCode: code });
+link.onRequest((text) => `the browser says: ${text}`);
+const answer = await link.request("status");
+```
+
+The machine being reached is written exactly as it always was —
+`TailcatLink.HostAsync`, `OnRequest` — and never learns that a browser
+arrived. See [clients/browser](clients/browser/README.md).
+
 ### Not done yet
 
 - **Rekeying.** A session TLS certificate lives as long as the process.
@@ -478,7 +526,9 @@ no .NET equivalent to build on:
   tunnel.
 - `web/`, `internal/wasmbuild`, `cmd/tailcat-webdist` — the Go js/wasm build
   and its toolchain. `Tailcat.WebDemo` serves a dist directory but does not
-  produce one.
+  produce one. The browser reaches the network a different way here: not Go
+  compiled to wasm, but a JavaScript client speaking the same protocol —
+  `clients/browser`, below.
 - `PickBestRegion` — see `IRegionPicker` above. `Tailcat.Derp` does not yet
   do STUN latency probing either.
 

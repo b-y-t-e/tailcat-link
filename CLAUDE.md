@@ -48,7 +48,21 @@ Tailcat.Link   the durable, paired link on top: stored identity, reconnection
 Tailcat.Cli    the pure logic from cmd/tailcat
 Tailcat.WebDemo  the webdemo package
 Tailcat.Demo   tailcat-demo, for verifying a link between two machines
+
+clients/browser  the JavaScript client: the same link, in a page
 ```
+
+`clients/browser` has no place in the solution — it is JavaScript — and CI
+runs its own tests in a job of their own. Its modules mirror the .NET ones one for one
+(`link.js` ↔ `DurableLink.cs`, `relay1.js` ↔ `Relay1*.cs`, and so on), which
+is the only thing keeping two implementations of one protocol in step: a
+change on one side has an obvious place to land on the other. `npm --prefix
+clients/browser test` runs its own unit tests offline; `npm --prefix
+clients/browser run interop` checks the two against each other over a real
+relay, against `tailcat-demo host`. The record vectors in
+`clients/browser/test/vectors/relay1-records.json` are read by both sides —
+`Relay1VectorTests` is the .NET half — so the wire formats cannot drift apart
+without a build failing. Add to that file when you change one.
 
 ## Publishing
 
@@ -89,6 +103,14 @@ These were each found the hard way; the README explains them at length.
   apart choose different regions, and a bare key sends into the wrong one.
   This is why `Tailcat.Link` pins a host's region once and never re-measures:
   the invitation code already published must keep pointing at the machine.
+- **A session is not always QUIC.** `relay1` carries one on the relay when an
+  end cannot have QUIC — a browser has no UDP socket, and Windows 10 has no
+  QUIC at all and used to refuse to start. It is chosen below `Tailcat.Link`,
+  from a preference list in `PeerHello`, so nothing above ever sees it. Two
+  consequences: a record is capped at 32256 bytes rather than DERP's 64 KiB,
+  because a relay reached over a WebSocket closes a client that sends more
+  than 32 KiB; and a dropped record ends the session outright, since there is
+  no retransmission there. `docs/relay1.md` is the specification.
 - **Writing into a dead session succeeds.** The bytes go to a relay with
   nobody to hand them to, so a broken link is silent rather than faulty.
   Anything that must notice needs a heartbeat and a per-request timeout.
@@ -115,11 +137,9 @@ These were each found the hard way; the README explains them at length.
 ## What is deliberately not here
 
 Interop with the Go implementation (this uses QUIC, not WireGuard), the SSH
-server, the js/wasm build, and a userspace TCP/IP stack. The README's "What
+server, Go's js/wasm build (a browser gets `clients/browser` instead), and a
+userspace TCP/IP stack. The README's "What
 was not ported, and why" is the authority; keep it honest when scope changes.
-
-A **browser client** — the reason `relay1` exists. The .NET half is built
-(`src/Tailcat.Net/Relay1`, `docs/relay1.md`); the JavaScript half is not.
 
 **Hole punching between two different NATs is verified** — a home connection
 to an LTE carrier NAT, 69 ms relayed down to 30 ms direct, using
