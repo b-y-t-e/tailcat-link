@@ -543,11 +543,26 @@ the part that doesn't need the tunnel.
 ```
 dotnet test                      # unit tests only
 TAILCAT_LIVE_TESTS=1 dotnet test # also the end-to-end tests over a public relay
+
+npm --prefix clients/browser ci
+npm --prefix clients/browser test   # the browser client, offline
 ```
 
-CI runs the unit tests on Linux, macOS and Windows (`.github/workflows/ci.yml`).
-The live tests stay opt-in there, so the build depends on no public
-service and adds no load to it.
+CI runs both on every push (`.github/workflows/ci.yml`): the .NET tests on
+Linux, macOS and Windows, and the browser client's on Node. The live tests
+stay opt-in there, so the build depends on no public service and adds no load
+to it.
+
+The two implementations of `relay1` are held to one file of record vectors —
+`clients/browser/test/vectors/relay1-records.json`, read by `Relay1VectorTests`
+here and by the client's own tests. That is what catches a wire format
+drifting apart without a relay in the loop. Checking them against each other
+for real needs both ends:
+
+```
+dotnet run --project src/Tailcat.Demo -- host --forget   # prints a code
+npm --prefix clients/browser run interop -- <code>
+```
 
 ## What is published
 
@@ -561,6 +576,9 @@ That is a deliberate trade: a consumer of `Tailcat.Link` gets everything with
 one reference, and nobody else's project name gets claimed on a public feed.
 Anyone who wants the transport on its own can reference `src/Tailcat.Net`
 from a checkout.
+
+`clients/browser` is not published either. It carries a `package.json` and is
+importable from a checkout; putting it on npm is a separate decision.
 
 ## Licence
 

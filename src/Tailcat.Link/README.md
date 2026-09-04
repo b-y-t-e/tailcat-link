@@ -71,6 +71,11 @@ on Windows 10, the link still works: the two ends negotiate `relay1` instead
 and the session stays on the relay, slower but no different to use. See
 `docs/relay1.md`.
 
+A browser can hold one of these links too, over the same `relay1`: the host
+is written exactly as above and never learns which arrived. The JavaScript
+client lives in the repository under `clients/browser` and is not published
+on npm.
+
 `Tailcat.Net` and the two layers under it are not published separately; their
 assemblies ship inside this package, so one reference is the whole thing.
 

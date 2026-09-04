@@ -20,18 +20,37 @@ dotnet test                       # unit tests only
 TAILCAT_LIVE_TESTS=1 dotnet test  # also end-to-end tests over public DERP relays
 
 # The two-machine demo (see README). "connect" runs the interactive side,
-# "ping" the one that only measures:
-dotnet run --project src/Tailcat.Demo -- listen
+# "ping" the one that only measures, "host" runs a Tailcat.Link pairing —
+# which is what the browser client joins:
+dotnet run --project src/Tailcat.Demo -- listen [--relay-only]
 dotnet run --project src/Tailcat.Demo -- connect <address>
 dotnet run --project src/Tailcat.Demo -- ping <address>
+dotnet run --project src/Tailcat.Demo -- host [--forget]
+
+# Diagnosing a direct path that will not form. natcheck classifies this
+# machine's NAT; punch is bare UDP with none of this library involved, which
+# is what separates "the networks cannot" from "the code does not".
+dotnet run --project src/Tailcat.Demo -- natcheck
+dotnet run --project src/Tailcat.Demo -- punch [ip:port]
+
+# The browser client (clients/browser), offline and then against a host:
+npm --prefix clients/browser ci
+npm --prefix clients/browser test
+npm --prefix clients/browser run interop -- <invitation-code>
 
 dotnet pack -c Release -o artifacts   # builds the one published package
+python Deploy/publish.py --dry-run    # everything a release does but the push
 ```
 
 The build must stay at **zero warnings**. Analyzers are on via
 `Directory.Build.props`; when one fires, fix it or suppress it *locally* with
 a written justification — never blanket-disable a rule. CI builds with
 `-warnaserror`, so a warning is a failed build, not a note in the log.
+
+**Check Release, not just Debug.** Some analyzers only run there — CA2022, an
+unchecked `Stream.ReadAsync` result, passed every Debug build and stopped a
+release. `dotnet build -c Release -warnaserror` is what CI and
+`Deploy/publish.py` do.
 
 Package versions are central (`Directory.Packages.props`): a `PackageReference`
 here carries no `Version`. Restore is pinned to nuget.org by `NuGet.config`,
