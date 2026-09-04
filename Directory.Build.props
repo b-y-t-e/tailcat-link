@@ -31,7 +31,7 @@
     <PackageProjectUrl>https://github.com/b-y-t-e/tailcat-link</PackageProjectUrl>
     <RepositoryUrl>https://github.com/b-y-t-e/tailcat-link</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <VersionPrefix>0.1.0</VersionPrefix>
+    <VersionPrefix>0.2.0</VersionPrefix>
 
     <!-- Packages ship with symbols and with the sources they were built from
          embedded, so a stack trace from a consumer's machine points at a line
