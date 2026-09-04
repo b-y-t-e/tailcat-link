@@ -11,3 +11,6 @@ artifacts/
 
 # NuGet API key
 Deploy/.env
+
+# browser client dependencies
+node_modules/

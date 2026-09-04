@@ -1,0 +1,26 @@
+{
+  "name": "@tailcat/link",
+  "version": "0.1.0",
+  "description": "Pair a browser with a machine and stay linked, over a relay",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": ["src"],
+  "sideEffects": false,
+  "scripts": {
+    "test": "node --test \"test/unit/*.test.mjs\"",
+    "example": "node examples/demo/serve.mjs",
+    "interop": "node test/interop.mjs"
+  },
+  "peerDependencies": {
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "tweetnacl": "1.0.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

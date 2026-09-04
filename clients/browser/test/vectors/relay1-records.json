@@ -1,0 +1,91 @@
+{
+  "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "cases": [
+    {
+      "name": "one-byte stream id, data",
+      "streamId": 1,
+      "flags": 0,
+      "payloadHex": "6869",
+      "counter": "0",
+      "frameHex": "01006869",
+      "recordHex": "54434e310700000000000000000fbcddb7f8732382c3ed951895b54da9d1eee688"
+    },
+    {
+      "name": "two-byte stream id, fin",
+      "streamId": 130,
+      "flags": 1,
+      "payloadHex": "",
+      "counter": "1",
+      "frameHex": "820101",
+      "recordHex": "54434e3107000000000000000197d7be6992948159e450bce06b0645d09cb529"
+    },
+    {
+      "name": "three-byte stream id, window credit",
+      "streamId": 16384,
+      "flags": 4,
+      "payloadHex": "00010000",
+      "counter": "4294967296",
+      "frameHex": "8080010400010000",
+      "recordHex": "54434e31070000000100000000b18b6579319cdc925838c279371e1293121dc3beee7cfab1"
+    }
+  ],
+  "keySchedule": {
+    "name": "the salt, the labels and the single Expand block",
+    "sharedHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "sessionId": "81985529216486895",
+    "dialerPublicHex": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "hostPublicHex": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+    "dialerToHostHex": "e8afa61038c99ab4d59bf95525371df830581db999508ce4da77e83a24a5054e",
+    "hostToDialerHex": "7e3f23c03b70868e12cc3a23659e7c8d9f300728fb85ba66801ec6d1fc30031d"
+  },
+  "helloCases": [
+    {
+      "name": "a browser's hello: no endpoints, relay1 only, an ephemeral key last",
+      "helloHex": "0000000000000007000000000000000000000000000000000000000000000000000000000000000000000002000101808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "sessionId": "7",
+      "fingerprintHex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "homeRegionId": 2,
+      "endpoints": [],
+      "transports": [
+        1
+      ],
+      "ephemeralHex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "encodedByBrowser": true,
+      "encodedByDotnet": true
+    },
+    {
+      "name": "a host's hello: one endpoint, quic before relay1",
+      "helloHex": "00000000000000070000000000000000000000000000000000000000000000000000000000000000000000020104cb007109a2a9020001808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "sessionId": "7",
+      "fingerprintHex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "homeRegionId": 2,
+      "endpoints": [
+        {
+          "addressHex": "cb007109",
+          "port": 41641
+        }
+      ],
+      "transports": [
+        0,
+        1
+      ],
+      "ephemeralHex": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "encodedByBrowser": false,
+      "encodedByDotnet": true
+    },
+    {
+      "name": "a hello from before the transport list: quic is what it means",
+      "helloHex": "00000000000000090102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f200000000500",
+      "sessionId": "9",
+      "fingerprintHex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+      "homeRegionId": 5,
+      "endpoints": [],
+      "transports": [
+        0
+      ],
+      "ephemeralHex": null,
+      "encodedByBrowser": false,
+      "encodedByDotnet": false
+    }
+  ]
+}

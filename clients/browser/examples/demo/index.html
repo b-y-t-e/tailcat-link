@@ -1,0 +1,131 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>tailcat-link in a browser</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.6 system-ui, sans-serif; margin: 0 auto; padding: 2rem 1.5rem; max-width: 46rem; }
+  h1 { font-size: 1.4rem; margin: 0 0 .3rem; }
+  p.lede { margin: 0 0 1.6rem; opacity: .75; }
+  label { display: block; margin: 1rem 0 .25rem; font-weight: 600; font-size: .85rem; }
+  input, textarea { width: 100%; padding: .5rem .6rem; font: inherit; box-sizing: border-box; }
+  input, textarea, pre { border: 1px solid color-mix(in oklab, currentColor 25%, transparent); border-radius: 6px; }
+  .row { display: flex; gap: .6rem; align-items: center; margin-top: 1rem; flex-wrap: wrap; }
+  button { padding: .5rem 1rem; font: inherit; border-radius: 6px; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  #state { font-size: .85rem; padding: .2rem .6rem; border-radius: 999px;
+           background: color-mix(in oklab, currentColor 12%, transparent); }
+  pre { padding: .8rem; overflow: auto; max-height: 22rem; font-size: .82rem;
+        background: color-mix(in oklab, currentColor 6%, transparent); }
+</style>
+
+<h1>tailcat-link in a browser</h1>
+<p class="lede">
+  Pairs with a machine running <code>TailcatLink.HostAsync</code> and talks to it
+  over the relay. The host is not configured for this — it offers QUIC first and
+  settles on <code>relay1</code> because that is all a browser can do.
+</p>
+
+<label for="code">invitation code (needed the first time only — after that it is remembered)</label>
+<input id="code" placeholder="tco2FwWC….HefR4jMAw6PxuWFJbSGSBw">
+
+<label for="relay">relay host (blank reads it from the DERP map at <code>/derpmap.json</code>)</label>
+<input id="relay" placeholder="tc303a.ipn.dev">
+
+<div class="row">
+  <button id="connect">connect</button>
+  <button id="forget" title="Drops the stored identity, so the next connect needs a code again">forget</button>
+  <span id="state">not connected</span>
+</div>
+
+<label for="message">ask the host something</label>
+<input id="message" value="status">
+<div class="row">
+  <button id="send" disabled>request</button>
+  <button id="notifyBtn" disabled>notify</button>
+  <button id="big" disabled title="300 kB, past one record and past the initial credit window">send 300 kB</button>
+</div>
+
+<pre id="log"></pre>
+
+<!-- The example has no build step, so it cannot resolve a bare import.
+     tweetnacl's UMD build sets the global that src/nacl.js picks up, and
+     the hash pins exactly what is loaded. An application that bundles
+     installs tweetnacl from npm instead and drops this tag. -->
+<script
+  src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl-fast.min.js"
+  integrity="sha384-05+sicyRJQ56XpL4U9HJ8YbtSzFDvAg7apPKOGV6A0JsAJKFM68jp5oLnUjG5mEp"
+  crossorigin="anonymous"></script>
+<script type="module">
+  import { TailcatLink } from "/src/index.js";
+
+  const el = (id) => document.getElementById(id);
+  const log = (...parts) => {
+    el("log").textContent += parts.join(" ") + "\n";
+    el("log").scrollTop = el("log").scrollHeight;
+  };
+  const setState = (text) => (el("state").textContent = text);
+  const enable = (on) => ["send", "notifyBtn", "big"].forEach((id) => (el(id).disabled = !on));
+
+  const APP = "browser-demo";
+  let link = null;
+
+  el("connect").onclick = async () => {
+    el("connect").disabled = true;
+    try {
+      link = await TailcatLink.join({
+        appName: APP,
+        invitationCode: el("code").value.trim() || null,
+        relayHost: el("relay").value.trim() || undefined,
+      });
+
+      link.events.addEventListener("connected", () => {
+        setState("connected");
+        enable(true);
+        log("· connected");
+      });
+      link.events.addEventListener("disconnected", (e) => {
+        setState("reconnecting…");
+        enable(false);
+        log("· disconnected:", e.detail?.message ?? "");
+      });
+
+      // The host can ask this page things too; the link is symmetric.
+      link.onRequest((text) => {
+        log("· the host asked:", JSON.stringify(text));
+        return `the browser says hello, and it is ${new Date().toLocaleTimeString()} here`;
+      });
+
+      setState("connecting…");
+      log("connecting …");
+      await link.waitUntilConnected();
+      log("paired and connected");
+    } catch (error) {
+      setState("failed");
+      log("FAILED:", error.message);
+      el("connect").disabled = false;
+    }
+  };
+
+  el("forget").onclick = async () => {
+    await TailcatLink.forget(APP);
+    log("· forgotten; the next connect needs a code again");
+  };
+
+  const ask = async (payload, label) => {
+    const started = performance.now();
+    try {
+      const answer = await link.request(payload);
+      const ms = Math.round(performance.now() - started);
+      log(`${label} -> ${JSON.stringify(answer.length > 60 ? answer.slice(0, 60) + "…" : answer)}  (${ms} ms, ${answer.length} B)`);
+    } catch (error) {
+      log(`${label} -> failed: ${error.message}`);
+    }
+  };
+
+  el("send").onclick = () => ask(el("message").value, `request ${JSON.stringify(el("message").value)}`);
+  el("big").onclick = () => ask("x".repeat(300_000), "request 300 kB");
+  el("notifyBtn").onclick = async () => {
+    await link.notify(el("message").value);
+    log(`notify ${JSON.stringify(el("message").value)} -> sent (nothing comes back)`);
+  };
+</script>
