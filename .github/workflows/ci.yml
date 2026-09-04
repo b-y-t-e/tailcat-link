@@ -93,7 +93,29 @@ jobs:
           Console.WriteLine(DerpProtocol.Magic.Length);
           Console.WriteLine(typeof(DerpClient).Assembly.GetName().Name);
           CSHARP
-          dotnet nuget add source "$GITHUB_WORKSPACE/artifacts" --name local
+          # Package source mapping, not just an extra source: with both
+          # sources unmapped NuGet may serve Tailcat.Link from nuget.org, and
+          # since the version here is the one already released, a commit that
+          # breaks the bundling would pass against the published copy.
+          cat > nuget.config <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+              <add key="local" value="LOCAL_ARTIFACTS" />
+            </packageSources>
+            <packageSourceMapping>
+              <packageSource key="local">
+                <package pattern="Tailcat.*" />
+              </packageSource>
+              <packageSource key="nuget.org">
+                <package pattern="*" />
+              </packageSource>
+            </packageSourceMapping>
+          </configuration>
+          XML
+          sed -i "s|LOCAL_ARTIFACTS|$GITHUB_WORKSPACE/artifacts|" nuget.config
           dotnet add package Tailcat.Link --version "$version"
           dotnet run
 
@@ -101,3 +123,23 @@ jobs:
         with:
           name: nupkg
           path: artifacts/*.*nupkg
+
+  # The second implementation of relay1. Its offline tests read the same record
+  # vectors as Relay1VectorTests on the .NET side, so a wire format that drifts
+  # apart fails here rather than waiting for somebody to run the interop by
+  # hand against a live relay.
+  browser-client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/browser
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm ci
+
+      - run: npm test
