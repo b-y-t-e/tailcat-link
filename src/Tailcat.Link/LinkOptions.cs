@@ -43,6 +43,40 @@ public sealed record LinkOptions
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// How long a transfer may move nothing at all before it is given up on.
+    /// </summary>
+    /// <remarks>
+    /// The transfer equivalent of <see cref="RequestTimeout"/>, and the only
+    /// limit on one: a transfer has no deadline, because any deadline would
+    /// be a limit on how large a file this library can send. It is larger
+    /// because more things can legitimately hold a transfer up — a slow disk
+    /// at the far end, an application reading it at its own pace — and
+    /// because it also covers the gap between a session dying and the next
+    /// one carrying the transfer on.
+    /// <para>
+    /// Bounded by how long the receiving machine holds a half-delivered
+    /// transfer, which is fixed by the protocol: a sender that came back
+    /// later would find it forgotten and start again from the beginning.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The timeout is not positive, or is longer than the other machine will
+    /// wait to be resumed.
+    /// </exception>
+    public TimeSpan TransferStallTimeout
+    {
+        get => _transferStallTimeout;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(value, TimeSpan.Zero);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(value, LinkProtocol.LongestTransferStall);
+            _transferStallTimeout = value;
+        }
+    }
+
+    private readonly TimeSpan _transferStallTimeout = TimeSpan.FromMinutes(2);
+
+    /// <summary>
     /// How long a host's invitation code may be used to pair before it is
     /// worthless.
     /// </summary>

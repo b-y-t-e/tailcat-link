@@ -37,6 +37,7 @@ internal sealed class DurableLink : ILink
     private readonly ISessionSource _source;
     private readonly IInvitationSource _invitation;
     private readonly ExchangeLedger _ledger;
+    private readonly TransferRegistry _transfers;
     private readonly Lock _mu = new();
     private readonly CancellationTokenSource _cts = new();
 
@@ -45,6 +46,7 @@ internal sealed class DurableLink : ILink
     private TaskCompletionSource<LinkSession> _ready = NewReady();
     private TaskCompletionSource _sessionEnded = NewSessionEnded();
     private LinkRequestHandler? _handler;
+    private LinkTransferHandler? _receiveTransfer;
     private Task? _supervisor;
     private bool _disposed;
 
@@ -65,6 +67,11 @@ internal sealed class DurableLink : ILink
         // nothing on the wire says. LinkOptions bounds every sender by the
         // same constant so that this is always long enough.
         _ledger = new ExchangeLedger(LinkProtocol.ExchangeRetention, options.TimeProvider);
+        // For the same reason as the ledger, over the window a transfer needs:
+        // what a resumed transfer joins is on this side of the session that
+        // died, so it lives on the link.
+        _transfers = new TransferRegistry(
+            CurrentTransferHandler, LinkProtocol.TransferRetention, options.TimeProvider, _cts.Token);
     }
 
     /// <inheritdoc/>
@@ -189,6 +196,122 @@ internal sealed class DurableLink : ILink
     }
 
     /// <inheritdoc/>
+    public void OnTransfer(LinkTransferHandler handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        lock (_mu)
+        {
+            _receiveTransfer = handler;
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task SendAsync(
+        Stream content,
+        TransferOffer offer,
+        IProgress<TransferProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        ArgumentNullException.ThrowIfNull(offer);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        EnsureLengthMatches(content, offer);
+
+        using CancellationTokenSource deadline =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
+
+        // The id, and where the content has got to, belong to the transfer
+        // rather than to any one attempt at it: that is what lets the next
+        // session carry on from where this one stopped.
+        OutboundTransfer transfer = new(offer, content, progress, _options.TimeProvider);
+        Exception? last = null;
+        while (!deadline.IsCancellationRequested)
+        {
+            Task ended = CurrentSessionEnded();
+            try
+            {
+                LinkSession session = await CurrentSessionAsync(deadline.Token).ConfigureAwait(false);
+                await session.SendTransferAsync(transfer, deadline.Token).ConfigureAwait(false);
+                return;
+            }
+            catch (RemoteHandlerException)
+            {
+                // The other machine has decided about this transfer. Sending
+                // it again would reach the same decision.
+                throw;
+            }
+            catch (LinkException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                last = ex;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (!content.CanSeek && transfer.Sent > 0)
+            {
+                // Nothing can be resumed from a stream that only goes
+                // forwards, and the receiver will ask for an offset that is
+                // now behind this one. Said plainly rather than retried into
+                // the same wall until the stall timeout.
+                throw new LinkException(
+                    $"the transfer stopped after {transfer.Sent} bytes and its content cannot be rewound",
+                    last);
+            }
+
+            // Deliberately not a deadline on the transfer: twenty gigabytes
+            // through a relay is hours, and any total limit would be a limit
+            // on how large a file this library can send. What is bounded is
+            // silence — a transfer that is still moving is never given up on,
+            // and one that has stopped is given up on in bounded time.
+            if (transfer.Stalled >= _options.TransferStallTimeout)
+            {
+                break;
+            }
+
+            // Never straight round again. Usually the session is already
+            // ending — a failed transfer condemns it — and waiting for that
+            // is what stops the next attempt from spinning on a connection
+            // that is still being torn down; the pause bounds the case where
+            // the session survived whatever the attempt ran into.
+            try
+            {
+                await ended.WaitAsync(_options.MinReconnectDelay, _options.TimeProvider, deadline.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        throw new LinkException(
+            $"the transfer moved nothing for {_options.TransferStallTimeout}, "
+            + $"after {transfer.Sent} bytes",
+            last);
+    }
+
+    /// <summary>
+    /// Catches the commonest way to announce a length that is not the one
+    /// being sent, before a byte of it has crossed the network.
+    /// </summary>
+    private static void EnsureLengthMatches(Stream content, TransferOffer offer)
+    {
+        if (offer.Length is long announced && content.CanSeek && content.Length - content.Position != announced)
+        {
+            throw new LinkException(
+                $"the transfer announces {announced} bytes and its content has "
+                + $"{content.Length - content.Position}");
+        }
+    }
+
+    /// <inheritdoc/>
     public async Task NotifyAsync(ReadOnlyMemory<byte> message, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -262,7 +385,9 @@ internal sealed class DurableLink : ILink
                     connection,
                     CurrentHandler,
                     _ledger,
+                    _transfers,
                     _options.RequestTimeout,
+                    _options.TransferStallTimeout,
                     _options.TimeProvider,
                     // Handlers are bound to the link, not to this session, so
                     // one that is running when the session drops finishes and
@@ -439,6 +564,14 @@ internal sealed class DurableLink : ILink
         }
     }
 
+    private LinkTransferHandler? CurrentTransferHandler()
+    {
+        lock (_mu)
+        {
+            return _receiveTransfer;
+        }
+    }
+
     private async Task<INodeGateway> EnsureGatewayAsync(CancellationToken ct)
     {
         INodeGateway? gateway;
@@ -507,6 +640,10 @@ internal sealed class DurableLink : ILink
         _disposed = true;
 
         await _cts.CancelAsync().ConfigureAwait(false);
+        // Before waiting on anything: a handler still reading a half-delivered
+        // transfer is holding the supervisor's shutdown up until it is told
+        // that no more of it is coming.
+        _transfers.ExpireAll();
         if (_supervisor is not null)
         {
             try

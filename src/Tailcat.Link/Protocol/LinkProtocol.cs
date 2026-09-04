@@ -39,4 +39,31 @@ internal static class LinkProtocol
     /// </remarks>
     public static readonly TimeSpan LongestRequestDeadline =
         ExchangeRetention - TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long a machine holds on to a transfer that stopped part-way, and
+    /// to the answer of one it has finished.
+    /// </summary>
+    /// <remarks>
+    /// The same bargain as <see cref="ExchangeRetention"/>, over a longer
+    /// window because what is being kept is worth more: everything already
+    /// received of a file, so that a link which went down for a few minutes
+    /// resumes mid-file instead of sending twenty gigabytes again. It is a
+    /// constant for the same reason too — the sending machine is the one that
+    /// decides when to come back, and nothing on the wire tells the receiver
+    /// how patient that sender was configured to be.
+    /// </remarks>
+    public static readonly TimeSpan TransferRetention = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// The longest <see cref="LinkOptions.TransferStallTimeout"/> that the
+    /// receiving machine will still be holding the transfer for.
+    /// </summary>
+    /// <remarks>
+    /// The margin is what a resumed attempt takes to arrive: a sender that
+    /// waited right up to the retention would find its transfer forgotten and
+    /// start a second one from zero.
+    /// </remarks>
+    public static readonly TimeSpan LongestTransferStall =
+        TransferRetention - TimeSpan.FromMinutes(1);
 }

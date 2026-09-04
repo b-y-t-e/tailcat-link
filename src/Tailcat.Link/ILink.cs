@@ -107,6 +107,60 @@ public interface ILink : IAsyncDisposable
     Task NotifyAsync(ReadOnlyMemory<byte> message, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Sets what takes transfers from the peer. Replaces any previous
+    /// handler; a link without one refuses transfers.
+    /// </summary>
+    /// <seealso cref="SendAsync"/>
+    void OnTransfer(LinkTransferHandler handler);
+
+    /// <summary>
+    /// Sends content of any size, in blocks, resuming through as many
+    /// reconnections as it takes.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is what <see cref="RequestAsync"/> is not for. A request is a
+    /// message: both machines hold all of it at once, and it is capped at
+    /// sixteen megabytes for that reason. A transfer is a stream — twenty
+    /// gigabytes of video is an ordinary use of it — and neither machine ever
+    /// holds more than a few megabytes of it. Nothing here has to be chunked
+    /// by the caller.
+    /// </para>
+    /// <para>
+    /// A transfer survives what the link survives. When a session dies
+    /// mid-file, the next one is asked where the receiving machine got to and
+    /// the content carries on from exactly there, into the same handler,
+    /// which never learns that anything happened. That is what requires
+    /// <paramref name="content"/> to be seekable — a file or an array is; a
+    /// socket or a stream being generated as it is sent is not, and a
+    /// transfer from one of those fails when its session does.
+    /// </para>
+    /// <para>
+    /// Reading is what paces it. The bytes go no faster than the peer's
+    /// handler consumes them, so sending from a fast disk to a slow one
+    /// costs memory on neither machine.
+    /// </para>
+    /// </remarks>
+    /// <param name="content">The bytes to send, read from where it now is.</param>
+    /// <param name="offer">What to tell the other machine about them.</param>
+    /// <param name="progress">Told after each block that reaches the peer.</param>
+    /// <param name="cancellationToken">Gives up on the transfer.</param>
+    /// <exception cref="RemoteHandlerException">
+    /// If the peer is not receiving transfers, or its handler threw. Neither
+    /// is retried.
+    /// </exception>
+    /// <exception cref="LinkException">
+    /// If nothing moved for <see cref="LinkOptions.TransferStallTimeout"/>,
+    /// or if the transfer would have to be resumed and its content cannot be
+    /// rewound.
+    /// </exception>
+    Task SendAsync(
+        Stream content,
+        TransferOffer offer,
+        IProgress<TransferProgress>? progress = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Returns the invitation code worth publishing now, minting a fresh one
     /// if the last has run out.
     /// </summary>

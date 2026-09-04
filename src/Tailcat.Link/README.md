@@ -35,6 +35,52 @@ await using ILink link = await TailcatLink.JoinAsync("my-app");
 Both ends are equal once paired: each can ask, each can answer, and each can
 send a message the other did not ask for (`NotifyAsync`).
 
+## Send a file, whatever its size
+
+Requests are messages: both machines hold all of one at once, so they are
+capped at sixteen megabytes. A file is not a message. `SendAsync` takes a
+stream of any size — a 20 GB video is an ordinary use of it — and neither
+machine ever holds more than a few megabytes of it.
+
+On the machine receiving:
+
+```csharp
+link.OnTransfer(async (transfer, ct) =>
+    await transfer.SaveToAsync(Path.Combine(inbox, transfer.SuggestedFileName), null, ct));
+```
+
+On the machine sending:
+
+```csharp
+await link.SendFileAsync(@"D:\wakacjeilm.mkv",
+    progress: new Progress<TransferProgress>(p => Console.Write($"{p.Fraction:P0}")));
+```
+
+There is nothing to chunk, and nothing to restart. A session that dies
+mid-file is answered by asking the other machine where it got to and carrying
+on from exactly there, into the same handler, which never learns that
+anything happened — so a laptop that changes Wi-Fi network during a
+twenty-gigabyte transfer resumes mid-file rather than starting again.
+
+`SendBytesAsync` is the same thing for an array already in memory, for when
+what you have is two gigabytes rather than a path. `SaveTransfersTo` is the
+whole receiving side for an application that just wants the files in a
+directory.
+
+The three things worth knowing:
+
+- **The reader sets the pace.** Bytes move no faster than the receiving
+  handler consumes them, so sending to a slow disk costs memory on neither
+  machine.
+- **Resuming needs content that can be rewound** — a file or an array can be;
+  a socket, or a stream being generated as it is sent, cannot, and a transfer
+  from one of those fails when its session does rather than delivering
+  something with a hole in it.
+- **The sender's `SendAsync` returns when the receiving handler has
+  returned.** A transfer reported as sent is one the other machine has
+  finished dealing with, and a handler that throws fails the sender's call
+  instead of being retried.
+
 ## What it handles for you
 
 - **A pairing that survives a restart.** The identity key is generated once
@@ -53,6 +99,10 @@ send a message the other did not ask for (`NotifyAsync`).
 - **Requests that survive a reconnection.** A request is re-sent across a
   reconnection but not re-run: it carries an id, and a peer that already
   answered replies from memory.
+- **Transfers that survive one mid-file.** The receiving machine keeps what
+  has arrived, and the handler reading it, for ten minutes: a transfer that
+  comes back on a later session continues into it rather than starting a
+  second one.
 - **Pairing that cannot be stolen.** The code carries a secret that expires,
   and the first machine to use it is pinned — everyone after it is refused.
 

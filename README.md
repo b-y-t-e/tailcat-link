@@ -98,6 +98,16 @@ What it adds on top of `Tailcat.Net`, and why each part is needed:
   handler that threw on the other machine comes back as a failure
   (`RemoteHandlerException`), because retrying that would only replace a
   clear error with a timeout.
+- **A transfer that is not a request.** A request is a message and is capped
+  at sixteen megabytes, because both machines hold all of one at once.
+  `SendAsync` takes a stream instead — a 20 GB file is an ordinary use of it
+  — and cuts it into blocks that neither machine holds more than a few of.
+  What that buys is not size but resumption: a session that dies mid-file is
+  answered by asking the other machine where it got to and carrying on from
+  exactly there, into the same handler, which never learns that anything
+  happened. The receiving end sets the pace, so sending to a slow disk costs
+  memory on neither machine, and `SendAsync` returns only once the receiving
+  handler has finished with the content.
 - **A retry that is not a second command.** A request carries an id that
   belongs to the request, not to the attempt, so the machine that already ran
   it answers the retry from memory instead of running it again. Without that,
@@ -106,11 +116,24 @@ What it adds on top of `Tailcat.Net`, and why each part is needed:
   case outside the promise is the other machine's process ending mid-request:
   nothing here can know how far its handler got.
 
+Sending a file is the whole of it on either side:
+
+```csharp
+// receiving
+link.OnTransfer(async (transfer, ct) =>
+    await transfer.SaveToAsync(Path.Combine(inbox, transfer.SuggestedFileName), null, ct));
+
+// sending
+await link.SendFileAsync(path,
+    progress: new Progress<TransferProgress>(p => Console.Write($"{p.Fraction:P0}")));
+```
+
 `tests/Tailcat.Link.Tests` runs all of it offline against the in-memory relay:
 pairing, the code being spent and renewed, a stranger who has the host's
 address but not its token, a relay that drops both machines, a host that
-reboots, a host nobody reaches at all, and both machines losing their network
-stack outright.
+reboots, a host nobody reaches at all, both machines losing their network
+stack outright, and a transfer larger than a request could ever be that is
+interrupted mid-file and resumes into the handler already reading it.
 
 ## Layout
 

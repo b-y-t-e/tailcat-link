@@ -22,6 +22,13 @@ internal enum LinkFrameKind : byte
     /// holds, which the machine that was dialled either accepts or refuses.
     /// </summary>
     Hello = 4,
+
+    /// <summary>
+    /// The offer that opens a transfer, with the content following it on the
+    /// same stream rather than inside the frame.
+    /// </summary>
+    /// <seealso cref="TransferFrame"/>
+    Transfer = 5,
 }
 
 /// <summary>How a request turned out.</summary>

@@ -130,6 +130,15 @@ These were each found the hard way; the README explains them at length.
   because a relay reached over a WebSocket closes a client that sends more
   than 32 KiB; and a dropped record ends the session outright, since there is
   no retransmission there. `docs/relay1.md` is the specification.
+- **A transfer is not a big request.** `ILink.RequestAsync`/`NotifyAsync` are
+  messages: one frame, held whole at both ends, capped at 16 MiB.
+  `ILink.SendAsync`/`OnTransfer` are the stream API for anything larger — a
+  20 GB file is the case it is designed for — and they resume mid-content
+  when a session dies, into the handler that is already reading it.
+  `docs/transfers.md` is the specification; `clients/browser` does not speak
+  it yet, and refuses a transfer rather than hanging. Everything about a
+  transfer that outlives a session lives in `TransferRegistry` and
+  `IncomingTransfer` on the link, never in `LinkSession`.
 - **Writing into a dead session succeeds.** The bytes go to a relay with
   nobody to hand them to, so a broken link is silent rather than faulty.
   Anything that must notice needs a heartbeat and a per-request timeout.
