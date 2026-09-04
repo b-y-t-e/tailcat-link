@@ -11,7 +11,7 @@
     <PackageVersion Include="BouncyCastle.Cryptography" Version="2.7.0" />
     <PackageVersion Include="Sodium.Core" Version="1.4.1" />
     <PackageVersion Include="System.Formats.Cbor" Version="10.0.0" />
-    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.11" />
   </ItemGroup>
 
   <ItemGroup Label="Test">
