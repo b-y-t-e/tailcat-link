@@ -20,6 +20,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The relay1 vectors live with the JavaScript client, because that is the
+         implementation they exist to hold this one against. -->
+    <None Include="..\..\clients\browser\test\vectors\relay1-records.json" CopyToOutputDirectory="PreserveNewest" Link="relay1-records.json" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- PeerLink's constructor is internal: it is built by a node, not by hand. -->
     <Using Include="Tailcat.Net" />
   </ItemGroup>
