@@ -8,6 +8,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Tailcat.Link\Tailcat.Link.csproj" />
     <ProjectReference Include="..\Tailcat.Net\Tailcat.Net.csproj" />
   </ItemGroup>
 

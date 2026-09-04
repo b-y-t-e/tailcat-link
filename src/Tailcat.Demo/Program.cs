@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using Tailcat;
+using Tailcat.Link;
 using Tailcat.Net;
 
 // tailcat-demo brings up a node and either waits for a peer or dials one, so
@@ -36,6 +37,12 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
               Bare UDP hole punching, with none of this library involved.
               Prints this machine's public address, waits for the peer's,
               then sends and reports. Run it on both ends at once.
+
+          tailcat-demo host [--forget]
+              A Tailcat.Link host: prints an invitation code and echoes what
+              it is asked, uppercased. What clients/browser is tested
+              against. --forget drops the stored pairing first, so a second
+              client can take the place of the first.
 
           --relay-only
               Offers only the relayed transport, whatever this machine can
@@ -84,6 +91,9 @@ try
         case "punch":
             return await PunchAsync(args.Length >= 2 ? args[1] : null, cts.Token);
 
+        case "host":
+            return await HostAsync(args.Contains("--forget"), cts.Token);
+
         default:
             Console.Error.WriteLine($"unknown command: {string.Join(' ', args)}");
             return 2;
@@ -118,6 +128,9 @@ static async Task<TailcatNode> StartNodeAsync(bool relayOnly, CancellationToken 
         ct);
     Console.WriteLine($"node up in {sw.ElapsedMilliseconds} ms");
     Console.WriteLine($"  region:    {node.HomeRegionId}");
+    // The raw key, not just the address: a client that has not implemented
+    // ConnBlob yet still needs something to dial.
+    Console.WriteLine($"  key:       {node.PublicKey}");
 
     IReadOnlyList<IPEndPoint> endpoints = await node.LocalEndpointsAsync(ct);
     Console.WriteLine($"  reachable: {string.Join(", ", endpoints)}");
@@ -454,5 +467,60 @@ static async Task<int> PunchAsync(string? peerAddress, CancellationToken ct)
     }
 
     await Task.WhenAll(sender, receiver);
+    return 0;
+}
+
+// A Tailcat.Link host, written the way the README says to write one. It knows
+// nothing about who will join: a .NET peer settles on QUIC, a browser on
+// relay1, and neither shows up here.
+static async Task<int> HostAsync(bool forget, CancellationToken ct)
+{
+    const string AppName = "tailcat-demo-host";
+
+    if (forget)
+    {
+        // A host pins the first machine that uses a code and refuses everyone
+        // after it, so a second client needs the pairing cleared first.
+        await TailcatLink.ForgetAsync(AppName, cancellationToken: ct);
+        Console.WriteLine("forgot the stored pairing");
+    }
+
+    await using ILink link = await TailcatLink.HostAsync(AppName, cancellationToken: ct);
+    link.OnRequest(command =>
+    {
+        Console.WriteLine($"  <- {(command.Length > 48 ? command[..48] + "..." : command)}  ({command.Length} B)");
+        return command.ToUpperInvariant();
+    });
+
+    Console.WriteLine();
+    Console.WriteLine("Give this to the other end, once:");
+    Console.WriteLine();
+    Console.WriteLine($"    {link.InvitationCode.Value}");
+    Console.WriteLine();
+    Console.WriteLine("waiting for a peer ...");
+
+    // Ask the peer something once it arrives: the direction nobody requested
+    // is the one that breaks first when a transport only half works.
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            await link.WaitUntilConnectedAsync(ct);
+            await Task.Delay(TimeSpan.FromSeconds(3), ct);
+            Console.WriteLine($"  -> the peer answered: {await link.RequestAsync("what time is it there?", ct)}");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Console.WriteLine($"  -> asking the peer failed: {ex.Message}");
+        }
+    }, ct);
+
+    try
+    {
+        await Task.Delay(Timeout.Infinite, ct);
+    }
+    catch (OperationCanceledException)
+    {
+    }
     return 0;
 }
