@@ -256,7 +256,10 @@ public class Relay1SessionTests
             await stream.FlushAsync(ct);
             await using Stream inbound = await server.AcceptStreamAsync(ct);
             byte[] buf = new byte[16];
-            await inbound.ReadAsync(buf, ct);
+
+            // The knock only has to arrive; what it says is not the point, and
+            // one read is allowed to return less than was asked for.
+            Assert.NotEqual(0, await inbound.ReadAsync(buf, ct));
 
             Task<int> waiting = Task.Run(async () => await stream.ReadAsync(buf, ct), ct);
             await client.DisposeAsync();
