@@ -107,7 +107,8 @@ What it adds on top of `Tailcat.Net`, and why each part is needed:
   exactly there, into the same handler, which never learns that anything
   happened. The receiving end sets the pace, so sending to a slow disk costs
   memory on neither machine, and `SendAsync` returns only once the receiving
-  handler has finished with the content.
+  handler has finished with the content. The wire format is
+  [docs/transfers.md](docs/transfers.md).
 - **A retry that is not a second command.** A request carries an id that
   belongs to the request, not to the attempt, so the machine that already ran
   it answers the retry from memory instead of running it again. Without that,
@@ -125,7 +126,7 @@ link.OnTransfer(async (transfer, ct) =>
 
 // sending
 await link.SendFileAsync(path,
-    progress: new Progress<TransferProgress>(p => Console.Write($"{p.Fraction:P0}")));
+    progress: new Progress<TransferProgress>(p => Console.Write($"\r{p.Fraction:P0}")));
 ```
 
 `tests/Tailcat.Link.Tests` runs all of it offline against the in-memory relay:
@@ -529,6 +530,10 @@ arrived. See [clients/browser](clients/browser/README.md).
 - **Rekeying.** A session TLS certificate lives as long as the process.
 - **QUIC session resumption.** The relay reconnects and paths fail over, but
   a QUIC connection that dies must be re-established by the caller.
+- **Transfers in the browser client.** `SendAsync` is .NET on both ends for
+  now; a browser answers a transfer with a refusal rather than a hang, and
+  requests between the two are unaffected. `docs/transfers.md` is the wire
+  format to implement it against.
 - **Throughput measurement.** Nothing here says what the relay path or a
   direct path actually sustains.
 - **A security review.** The primitives are libsodium and TLS 1.3, but the

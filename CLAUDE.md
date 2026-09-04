@@ -63,7 +63,8 @@ depending on whatever feeds a machine happens to have.
 Tailcat        wire format (ConnBlob/CBOR), keys, DERP map fetching, proxying
 Tailcat.Derp   DERP relay client: framing, TLS, reconnection, region pool
 Tailcat.Net    sessions: STUN, sealed control messages, path selection, QUIC
-Tailcat.Link   the durable, paired link on top: stored identity, reconnection
+Tailcat.Link   the durable, paired link on top: stored identity, reconnection,
+               requests, and transfers of content too large to be a request
 Tailcat.Cli    the pure logic from cmd/tailcat
 Tailcat.WebDemo  the webdemo package
 Tailcat.Demo   tailcat-demo, for verifying a link between two machines

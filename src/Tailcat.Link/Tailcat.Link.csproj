@@ -15,7 +15,7 @@
     <Description>Pair two machines that cannot see each other with a short code, once, then send and receive for as long as they are switched on. The link re-establishes itself after a network change, a relay outage, or either machine rebooting, and the identity that makes that possible is stored encrypted (DPAPI on Windows, 0600 inside a 0700 directory on Unix).</Description>
     <PackageTags>tailscale;tailcat;derp;nat-traversal;hole-punching;quic;p2p;remote-control;networking</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageReleaseNotes>First release. Pairing, a durable session over DERP with a direct QUIC path when hole punching succeeds, and a stored identity that survives a reboot. Hole punching between two different NATs is untested; see the repository README.</PackageReleaseNotes>
+    <PackageReleaseNotes>0.3.0 adds transfers: SendAsync and OnTransfer stream content of any size — a 20 GB file is the case they are for — in blocks that neither machine holds more than a few of, and resume mid-content when a session dies. Requests stay what they were, and are still capped at 16 MiB. Hole punching between two different NATs is verified: a home connection to an LTE carrier NAT, 69 ms relayed down to 30 ms direct. Where QUIC is missing, including Windows 10, the session is carried by the relay instead and works.</PackageReleaseNotes>
     <!-- The public surface is fully documented, so consumers get IntelliSense
          from the package rather than from guessing. The repository as a whole
          is not there yet, which is why this is set here and not in

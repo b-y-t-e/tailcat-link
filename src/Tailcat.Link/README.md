@@ -52,8 +52,8 @@ link.OnTransfer(async (transfer, ct) =>
 On the machine sending:
 
 ```csharp
-await link.SendFileAsync(@"D:\wakacjeilm.mkv",
-    progress: new Progress<TransferProgress>(p => Console.Write($"{p.Fraction:P0}")));
+await link.SendFileAsync(@"D:\wakacje\film.mkv",
+    progress: new Progress<TransferProgress>(p => Console.Write($"\r{p.Fraction:P0}")));
 ```
 
 There is nothing to chunk, and nothing to restart. A session that dies
@@ -124,7 +124,9 @@ and the session stays on the relay, slower but no different to use. See
 A browser can hold one of these links too, over the same `relay1`: the host
 is written exactly as above and never learns which arrived. The JavaScript
 client lives in the repository under `clients/browser` and is not published
-on npm.
+on npm. Requests and notifications are the same on either end; transfers are
+.NET to .NET for now, and a browser refuses one rather than leaving the
+sender waiting.
 
 `Tailcat.Net` and the two layers under it are not published separately; their
 assemblies ship inside this package, so one reference is the whole thing.
