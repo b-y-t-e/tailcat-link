@@ -12,10 +12,10 @@
 
 import { Deferred, delay, str, utf8, withTimeout } from "./bytes.js";
 import { parseAddress, parseInvitationCode } from "./address.js";
+import { LinkClosedError, LinkError, LinkTimeoutError, PairingRefusedError, RemoteHandlerError } from "./errors.js";
 import { FrameKind, ensureSendable, newExchange } from "./link-frame.js";
 import { DialingSessionSource, relayDialer } from "./session-source.js";
-import { PairingRefusedError } from "./pairing-handshake.js";
-import { LinkSession, RemoteHandlerError } from "./link-session.js";
+import { LinkSession } from "./link-session.js";
 import { ExchangeLedger } from "./exchange-ledger.js";
 import { IndexedDbStore } from "./store.js";
 import { nacl } from "./nacl.js";
@@ -36,6 +36,7 @@ export class TailcatLink {
   #store;
   #handler = null;
   #notifyHandler = null;
+  #channels = new Map();
   #session = null;
   #connected = new Deferred();
   #stopped = false;
@@ -57,7 +58,11 @@ export class TailcatLink {
   /// Brings up the end that connects to a host. The invitation code is needed
   /// the first time only; afterwards it is stored, and joining again needs
   /// nothing from anybody.
-  static async join({ appName, invitationCode = null, ...rest }) {
+  ///
+  /// @param displayName what the host is to list this browser as, matching
+  ///   `JoinRequest.DisplayName` on the .NET side. It is a hint the host
+  ///   authenticates in no way, so nothing may be keyed off it.
+  static async join({ appName, invitationCode = null, displayName = null, ...rest }) {
     if (!appName) throw new Error("a link needs an appName to store its identity under");
     const options = { ...DEFAULTS, ...rest };
     const store = options.store ?? IndexedDbStore;
@@ -89,6 +94,7 @@ export class TailcatLink {
       // a socket, as TailcatNodeOptions.ConnectRelay does on the .NET side.
       dial: options.dial ?? relayDialer({ options, identity, peer }),
       pairingToken,
+      displayName,
       handshakeTimeout: options.handshakeTimeout,
     });
 
@@ -113,6 +119,31 @@ export class TailcatLink {
     this.#notifyHandler = handler;
   }
 
+  /// Takes the channels the host opens under `name`. The handler is given the
+  /// channel and keeps receiving for as long as it stays inside `read()`;
+  /// when it returns, the channel is over. A name nothing is listening for is
+  /// refused rather than swallowed.
+  onChannel(name, handler) {
+    this.#channels.set(name, handler);
+  }
+
+  /// Opens a channel to the host: ordered within itself, and not durable.
+  /// Unlike a request it is not carried across a reconnection — it ends with
+  /// the session under it, and `channel.closed` says which way it ended.
+  ///
+  /// @throws {RemoteHandlerError} if the host is not listening for that name.
+  async openChannel(name, { timeout } = {}) {
+    let session;
+    try {
+      session = await withTimeout(this.#sessionAsync(), timeout ?? this.#options.requestTimeout, "the host");
+    } catch (error) {
+      // Waiting is all a channel can do about a link that is down: it is not
+      // carried across a reconnection, so there is nothing to retry into.
+      throw asLinkError(error);
+    }
+    return session.openChannel(name);
+  }
+
   get connected() {
     return this.#session !== null && !this.#session.closed;
   }
@@ -121,7 +152,11 @@ export class TailcatLink {
   /// waits by itself — but a page that wants to show a state does.
   async waitUntilConnected(timeout = this.#options.requestDeadline) {
     if (this.connected) return;
-    await withTimeout(this.#connected.promise, timeout, "the host");
+    try {
+      await withTimeout(this.#connected.promise, timeout, "the host");
+    } catch (error) {
+      throw asLinkError(error);
+    }
   }
 
   async request(message, { timeout } = {}) {
@@ -142,11 +177,11 @@ export class TailcatLink {
     // session is assigned only once the source has produced one — so the
     // attempt itself is abandoned rather than left to finish into a link
     // nobody holds.
-    this.#closing.abort(new Error("the link was closed"));
+    this.#closing.abort(new LinkClosedError("the link was closed"));
 
     const session = this.#session;
     await session?.drain(drainTimeout);
-    session?.close(new Error("the link was closed"));
+    session?.close(new LinkClosedError("the link was closed"));
   }
 
   // ---- the exchange, across as many sessions as it takes ---------------
@@ -163,9 +198,11 @@ export class TailcatLink {
 
     let lastError;
     for (;;) {
-      if (this.#stopped) throw this.#fatal ?? new Error("the link is closed");
+      if (this.#stopped) throw this.#fatal ?? new LinkClosedError("the link is closed");
       if (Date.now() > deadline) {
-        throw new Error(`the host did not answer within the deadline${lastError ? `: ${lastError.message}` : ""}`);
+        throw new LinkTimeoutError(
+          `the host did not answer within the deadline${lastError ? `: ${lastError.message}` : ""}`,
+        );
       }
 
       let session;
@@ -189,7 +226,7 @@ export class TailcatLink {
   async #sessionAsync() {
     for (;;) {
       if (this.#session && !this.#session.closed) return this.#session;
-      if (this.#stopped) throw this.#fatal ?? new Error("the link is closed");
+      if (this.#stopped) throw this.#fatal ?? new LinkClosedError("the link is closed");
       await this.#connected.promise;
     }
   }
@@ -205,7 +242,7 @@ export class TailcatLink {
         // nothing; without this check the connection just made would be
         // served forever, holding the relay open for a link nobody holds.
         if (this.#stopped) {
-          connection.close(new Error("the link was closed"));
+          connection.close(new LinkClosedError("the link was closed"));
           return;
         }
 
@@ -241,6 +278,7 @@ export class TailcatLink {
       connection,
       handler: () => this.#handler,
       notifyHandler: () => this.#notifyHandler,
+      channels: (name) => this.#channels.get(name) ?? null,
       ledger: this.#ledger,
       options: this.#options,
       emit: (name, detail) => this.#emit(name, detail),
@@ -269,4 +307,10 @@ export class TailcatLink {
   #emit(name, detail) {
     this.events.dispatchEvent(new CustomEvent(name, { detail }));
   }
+}
+
+// `withTimeout` speaks in plain Errors, because bytes.js knows nothing about
+// links; what an application catches has to be the taxonomy's.
+function asLinkError(error) {
+  return error instanceof LinkError ? error : new LinkTimeoutError(error.message, { cause: error });
 }

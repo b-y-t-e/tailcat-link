@@ -1,6 +1,7 @@
 // Copyright (c) Andrzej Ból and contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
+using System.Buffers;
 using System.Buffers.Binary;
 
 namespace Tailcat.Derp;
@@ -62,6 +63,14 @@ public sealed class DerpFrameStream(Stream stream) : IAsyncDisposable
     }
 
     /// <summary>Writes one frame and flushes it.</summary>
+    /// <remarks>
+    /// A frame that only partly reached the wire leaves the connection
+    /// unreadable for good: the peer takes the next frame's header for the
+    /// missing payload and is five bytes out of step from then on, with every
+    /// packet after it silently misrouted. So the header and the payload go
+    /// out as one write, and a write that fails or is cancelled anyway closes
+    /// the stream rather than letting the next frame follow a torn one.
+    /// </remarks>
     public async Task WriteFrameAsync(
         DerpFrameType type,
         ReadOnlyMemory<byte> payload,
@@ -75,16 +84,37 @@ public sealed class DerpFrameStream(Stream stream) : IAsyncDisposable
         await _writeMu.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            byte[] header = new byte[DerpProtocol.FrameHeaderLen];
-            header[0] = (byte)type;
-            BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(1), (uint)payload.Length);
-
-            await _stream.WriteAsync(header, cancellationToken).ConfigureAwait(false);
-            if (!payload.IsEmpty)
+            // Pooled: every packet a relay carries passes through here, and a
+            // 64 KiB payload would otherwise be a heap allocation and a copy
+            // per packet.
+            int length = DerpProtocol.FrameHeaderLen + payload.Length;
+            byte[] frame = ArrayPool<byte>.Shared.Rent(length);
+            try
             {
-                await _stream.WriteAsync(payload, cancellationToken).ConfigureAwait(false);
+                frame[0] = (byte)type;
+                BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(1), (uint)payload.Length);
+                payload.Span.CopyTo(frame.AsSpan(DerpProtocol.FrameHeaderLen));
+
+                try
+                {
+                    await _stream.WriteAsync(frame.AsMemory(0, length), cancellationToken).ConfigureAwait(false);
+                    await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Closing is what tells the reader on this side too: a caller
+                    // that swallows the send failure would otherwise go on using a
+                    // connection that can no longer carry anything, where a closed
+                    // one is reconnected. Disposing twice is harmless, so the
+                    // ordinary DisposeAsync still runs its course afterwards.
+                    await _stream.DisposeAsync().ConfigureAwait(false);
+                    throw;
+                }
             }
-            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(frame);
+            }
         }
         finally
         {

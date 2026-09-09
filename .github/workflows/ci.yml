@@ -37,9 +37,10 @@ jobs:
         run: dotnet test --no-build --configuration Release
 
   # Tailcat.Link bundles the assemblies of four projects that are not packages
-  # of their own. That is easy to break without noticing, because the build
-  # stays green either way — so the package is built and then actually
-  # consumed on every push.
+  # of their own, and the three packages beside it depend on it as a package.
+  # Both are easy to break without noticing, because the build stays green
+  # either way — so all four are built and then actually consumed on every
+  # push, by an application that uses each of them the way a consumer does.
   package:
     runs-on: ubuntu-latest
     steps:
@@ -57,7 +58,9 @@ jobs:
           set -euo pipefail
           # Read the version off the package that was just built, so a bump to
           # VersionPrefix does not silently turn this check into a no-op.
-          pkg=$(ls artifacts/Tailcat.Link.*.nupkg | head -1)
+          # The digit keeps this off Tailcat.Link.Json and the rest, whose
+          # names also start "Tailcat.Link.".
+          pkg=$(ls artifacts/Tailcat.Link.[0-9]*.nupkg | head -1)
           version=${pkg#artifacts/Tailcat.Link.}
           version=${version%.nupkg}
           mkdir -p /tmp/consume && cd /tmp/consume
@@ -70,15 +73,26 @@ jobs:
           # Tailcat's keys and libsodium at once, which is also what catches a
           # Sodium.Core dependency that the nuspec forgot to declare.
           cat > Program.cs <<'CSHARP'
+          using System.Text.Json.Serialization;
+          using Microsoft.Extensions.DependencyInjection;
           using Tailcat;
           using Tailcat.Derp;
           using Tailcat.Keys;
           using Tailcat.Link;
+          using Tailcat.Link.Extensions.DependencyInjection;
+          using Tailcat.Link.Json;
+          using Tailcat.Link.Storage;
           using Tailcat.Net;
+          using Tailcat.TestSupport;
 
           Console.WriteLine(InvitationCode.TryParse("nonsense", out _));
           Console.WriteLine(typeof(ConnBlob).Assembly.GetName().Name);
 
+          // TAILCAT001: sealing a peer message is exactly what this check is
+          // for — it runs code from Tailcat.Net, Tailcat and libsodium at once
+          // — and the warning is about the design being unreviewed, not about
+          // calling it here.
+          #pragma warning disable TAILCAT001
           var host = NodePrivate.NewKey();
           var guest = NodePrivate.NewKey();
           byte[] ping = PeerMessage.Seal(PeerMessageType.Ping, "ping"u8, host, guest.Public());
@@ -87,11 +101,50 @@ jobs:
               throw new InvalidOperationException("the bundled Tailcat.Net could not open its own message");
           }
           Console.WriteLine(System.Text.Encoding.UTF8.GetString(payload));
+          #pragma warning restore TAILCAT001
 
           // A static property rather than a const, which the compiler would
           // inline and leave Tailcat.Derp.dll unloaded.
           Console.WriteLine(DerpProtocol.Magic.Length);
           Console.WriteLine(typeof(DerpClient).Assembly.GetName().Name);
+
+          // The three packages beside Tailcat.Link, each used the way its own
+          // consumer would: a pair of links stood up on Tailcat.TestSupport's
+          // in-memory relay, asked a question through Tailcat.Link.Json, and a
+          // host registered as Tailcat.Link.Extensions.DependencyInjection
+          // registers one. Registration only for that last: resolving it would
+          // bring a node up, which belongs in the repository's own tests.
+          using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+          await using var relay = new FakeDerpRelay();
+          var gateways = new FakeRelayGatewayFactory(relay);
+
+          await using ILink hosting = await TailcatLink.HostAsync(
+              "consume",
+              new LinkOptions { Gateway = gateways, Store = new InMemoryLinkStore() },
+              deadline.Token);
+          hosting.SetRequestHandler(
+              ConsumeContext.Default.Greeting,
+              ConsumeContext.Default.Greeting,
+              (greeting, _) => Task.FromResult(new Greeting($"hello {greeting.Name}")));
+
+          await using ILink joining = await TailcatLink.JoinAsync(
+              "consume",
+              hosting.InvitationCode.Value,
+              new LinkOptions { Gateway = gateways, Store = new InMemoryLinkStore() },
+              deadline.Token);
+          Greeting answer = await joining.RequestAsync(
+              new Greeting("world"),
+              ConsumeContext.Default.Greeting,
+              ConsumeContext.Default.Greeting,
+              deadline.Token);
+          Console.WriteLine(answer.Name);
+
+          Console.WriteLine(new ServiceCollection().AddTailcatLinkHost("consume").Count);
+
+          internal sealed record Greeting(string Name);
+
+          [JsonSerializable(typeof(Greeting))]
+          internal sealed partial class ConsumeContext : JsonSerializerContext;
           CSHARP
           # Package source mapping, not just an extra source: with both
           # sources unmapped NuGet may serve Tailcat.Link from nuget.org, and
@@ -116,7 +169,9 @@ jobs:
           </configuration>
           XML
           sed -i "s|LOCAL_ARTIFACTS|$GITHUB_WORKSPACE/artifacts|" nuget.config
-          dotnet add package Tailcat.Link --version "$version"
+          for id in Tailcat.Link                     Tailcat.Link.Json                     Tailcat.Link.Extensions.DependencyInjection                     Tailcat.TestSupport; do
+            dotnet add package "$id" --version "$version"
+          done
           dotnet run
 
       - uses: actions/upload-artifact@v4

@@ -7,8 +7,10 @@
 // cut a session, watch the link reconnect, and see what the far end actually
 // received.
 
-import { Deferred, hex, str, utf8 } from "../../src/bytes.js";
+import { Deferred, hex, readU32be, str, utf8 } from "../../src/bytes.js";
 import { FrameKind, FrameStatus, newExchange, readFrame, writeFrame } from "../../src/link-frame.js";
+import { ChannelWriter, decodeChannelName, encodeChannelName } from "../../src/link-channel.js";
+import { decodeLinkHello } from "../../src/link-hello.js";
 import { Relay1Session, deriveKeys } from "../../src/relay1.js";
 import { nacl } from "../../src/nacl.js";
 
@@ -120,6 +122,11 @@ export class LoopbackHost {
     this.#answersPings = answersPings;
     this.requests = [];
     this.pings = 0;
+    /// What the browser said about itself, so a test can check that a name it
+    /// passed to join() crossed the wire.
+    this.hello = null;
+    /// Every channel the browser opened, as `{ name, frames }`.
+    this.channels = [];
     this.paired = new Deferred();
     this.#serve().catch(() => {});
   }
@@ -141,6 +148,18 @@ export class LoopbackHost {
     } finally {
       await stream.close().catch(() => {});
     }
+  }
+
+  /// Opens a channel into the browser, the direction a phone bridge uses.
+  async openChannel(name) {
+    const stream = this.#connection.openStream();
+    await writeFrame(stream, FrameKind.Channel, newExchange(), encodeChannelName(name));
+    const answer = await readFrame(stream);
+    if (answer.tag === FrameStatus.Failed) {
+      await stream.close().catch(() => {});
+      throw new Error(str(answer.payload));
+    }
+    return new ChannelWriter(name, stream);
   }
 
   /// Asks under an id of the test's choosing, so a retry across a session
@@ -170,7 +189,8 @@ export class LoopbackHost {
       const { tag, exchange, payload } = await readFrame(stream);
       switch (tag) {
         case FrameKind.Hello: {
-          const accepted = str(payload) === this.#pairingToken;
+          this.hello = decodeLinkHello(payload);
+          const accepted = this.hello.pairingToken === this.#pairingToken;
           await writeFrame(
             stream,
             accepted ? FrameStatus.Ok : FrameStatus.Failed,
@@ -178,6 +198,18 @@ export class LoopbackHost {
             utf8(accepted ? "" : "this host is paired with another machine"),
           );
           if (accepted && !this.paired.settled) this.paired.resolve();
+          break;
+        }
+        case FrameKind.Channel: {
+          const name = decodeChannelName(payload);
+          await writeFrame(stream, FrameStatus.Ok, exchange, new Uint8Array(0));
+          const opened = { name, frames: [] };
+          this.channels.push(opened);
+          for (;;) {
+            const length = readU32be(await stream.readExactly(4));
+            if (!length) break; // The marker that ends a channel on purpose.
+            opened.frames.push(await stream.readExactly(length));
+          }
           break;
         }
         case FrameKind.Ping:

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 
 namespace Tailcat.Link;
 
@@ -27,7 +28,7 @@ namespace Tailcat.Link;
 /// an unclaimed host first.
 /// </para>
 /// </remarks>
-public readonly record struct InvitationCode
+public readonly record struct InvitationCode : IParsable<InvitationCode>, ISpanFormattable
 {
     // Outside the base64url alphabet a ConnBlob is written in, so the two
     // halves can never run into each other however long either one is.
@@ -75,15 +76,7 @@ public readonly record struct InvitationCode
     /// or a line break around it, possibly pasted out of a chat window.
     /// </summary>
     /// <exception cref="LinkException">If it is not a code at all.</exception>
-    public static InvitationCode Parse(string text)
-    {
-        if (!TryParse(text, out InvitationCode code))
-        {
-            throw new LinkException(
-                "that is not an invitation code; it should start with \"tc\" and carry a pairing token after a \".\"");
-        }
-        return code;
-    }
+    public static InvitationCode Parse(string text) => Parse(text, CultureInfo.InvariantCulture);
 
     /// <summary>Reads a code, returning false rather than throwing.</summary>
     public static bool TryParse([NotNullWhen(true)] string? text, out InvitationCode code)
@@ -113,6 +106,40 @@ public readonly record struct InvitationCode
         return true;
     }
 
+    /// <inheritdoc cref="Parse(string)"/>
+    /// <remarks>
+    /// The <see cref="IParsable{TSelf}"/> half, so a code works in generic
+    /// code and in model binding without an adapter of its own. A code has one
+    /// form, so the format provider is ignored.
+    /// </remarks>
+    public static InvitationCode Parse(string s, IFormatProvider? provider)
+    {
+        if (!TryParse(s, out InvitationCode code))
+        {
+            throw new LinkException(
+                "that is not an invitation code; it should start with \"tc\" and carry a pairing token after a \".\"");
+        }
+        return code;
+    }
+
+    /// <inheritdoc cref="TryParse(string?, out InvitationCode)"/>
+    public static bool TryParse(string? s, IFormatProvider? provider, out InvitationCode result) =>
+        TryParse(s, out result);
+
     /// <inheritdoc/>
     public override string ToString() => Value;
+
+    /// <inheritdoc/>
+    /// <remarks>A code has one form, so neither argument changes it.</remarks>
+    public string ToString(string? format, IFormatProvider? formatProvider) => Value;
+
+    /// <inheritdoc/>
+    public bool TryFormat(
+        Span<char> destination,
+        out int charsWritten,
+        ReadOnlySpan<char> format,
+        IFormatProvider? provider) =>
+        Value.TryCopyTo(destination)
+            ? (charsWritten = Value.Length) >= 0
+            : ((charsWritten = 0) < 0);
 }

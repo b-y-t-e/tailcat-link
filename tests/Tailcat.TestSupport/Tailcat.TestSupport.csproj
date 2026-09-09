@@ -1,18 +1,38 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Doubles shared by more than one test project. It is a plain library, not
-       a test project: it holds no tests and the runner never loads it. -->
+  <!-- Doubles shared by more than one test project, and published so that an
+       application built on Tailcat.Link can test its own handlers without a
+       network or a second machine. It is a plain library, not a test project:
+       it holds no tests and the runner never loads it. -->
   <PropertyGroup>
-    <IsPackable>false</IsPackable>
     <RootNamespace>Tailcat.TestSupport</RootNamespace>
   </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <IsPackable>true</IsPackable>
+    <PackageId>Tailcat.TestSupport</PackageId>
+    <Title>Tailcat.TestSupport — an in-memory relay, and a clock that does not tick</Title>
+    <Description>Test doubles for Tailcat.Link: an in-memory DERP relay, a node gateway factory that builds real nodes against it, and a manually advanced TimeProvider. Together they stand a whole link up in a unit test — pairing, reconnection, transfers and all — with no network, no second machine and no sleeping.</Description>
+    <PackageTags>tailcat;testing;test-doubles;derp;p2p;networking</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Sodium.Core" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Tailcat.Derp\Tailcat.Derp.csproj" />
+    <!-- Tailcat.Link is the package; the two below it ship inside it, so they
+         must not appear here as dependencies that resolve nowhere. Their
+         assemblies arrive with Tailcat.Link. -->
+    <ProjectReference Include="..\..\src\Tailcat.Link\Tailcat.Link.csproj" />
+    <ProjectReference Include="..\..\src\Tailcat.Derp\Tailcat.Derp.csproj" PrivateAssets="all" />
+    <ProjectReference Include="..\..\src\Tailcat.Net\Tailcat.Net.csproj" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>

@@ -17,6 +17,11 @@ using Tailcat.Tailcfg;
 
 namespace Tailcat.Net;
 
+// TAILCAT001: the sealed-message design is what this file implements and
+// tests, so its experimental warning has nothing to tell it. Only a consumer
+// reaching for Seal or TryOpen from outside is meant to hear it.
+#pragma warning disable TAILCAT001
+
 /// <summary>How to bring up a <see cref="TailcatNode"/>.</summary>
 public sealed class TailcatNodeOptions
 {

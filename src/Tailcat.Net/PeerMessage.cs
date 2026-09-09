@@ -111,6 +111,14 @@ public static class PeerMessage
     /// <paramref name="peer"/>'s private key can read it, and only the holder
     /// of ours could have written it.
     /// </summary>
+    /// <remarks>
+    /// Marked experimental (<c>TAILCAT001</c>): the design this is part of —
+    /// pinning a TLS certificate fingerprint announced inside a sealed box —
+    /// uses primitives that have been reviewed, in an arrangement that has
+    /// not. Saying so at the call site is the point; suppress the diagnostic
+    /// where that is understood and accepted.
+    /// </remarks>
+    [Experimental("TAILCAT001")]
     public static byte[] Seal(PeerMessageType type, ReadOnlySpan<byte> payload, NodePrivate self, NodePublic peer)
     {
         byte[] nonce = PublicKeyBox.GenerateNonce();
@@ -128,6 +136,14 @@ public static class PeerMessage
     /// Opens a control message sealed by <paramref name="peer"/>. It fails if
     /// the message was forged, tampered with, or sent by anyone else.
     /// </summary>
+    /// <remarks>
+    /// Marked experimental (<c>TAILCAT001</c>): the design this is part of —
+    /// pinning a TLS certificate fingerprint announced inside a sealed box —
+    /// uses primitives that have been reviewed, in an arrangement that has
+    /// not. Saying so at the call site is the point; suppress the diagnostic
+    /// where that is understood and accepted.
+    /// </remarks>
+    [Experimental("TAILCAT001")]
     public static bool TryOpen(
         ReadOnlySpan<byte> packet,
         NodePrivate self,

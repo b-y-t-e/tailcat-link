@@ -7,14 +7,19 @@ using Tailcat.Link.Transport;
 using Tailcat.Net;
 using Tailcat.Tailcfg;
 
-namespace Tailcat.Link.Tests;
+namespace Tailcat.TestSupport;
 
 /// <summary>
 /// Builds real nodes — the whole handshake, QUIC and all — against an
-/// in-memory relay, so the link can be taken apart and put back together in a
+/// in-memory relay, so a link can be taken apart and put back together in a
 /// test without a public relay or a second machine.
 /// </summary>
-internal sealed class FakeRelayGatewayFactory(
+/// <remarks>
+/// This is what <see cref="Tailcat.Link.LinkOptions.Gateway"/> exists for. An
+/// application testing its own handlers wants neither a network nor a second
+/// machine, and without this it needs both.
+/// </remarks>
+public sealed class FakeRelayGatewayFactory(
     FakeDerpRelay relay,
     IReadOnlyList<PeerTransport>? transports = null) : INodeGatewayFactory
 {
@@ -27,6 +32,7 @@ internal sealed class FakeRelayGatewayFactory(
     /// <summary>How many nodes have been built, so a test can see a rebuild happen.</summary>
     public int NodesCreated { get; private set; }
 
+    /// <inheritdoc/>
     public async Task<INodeGateway> CreateAsync(
         NodePrivate privateKey,
         int? homeRegionId,

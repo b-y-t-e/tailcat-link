@@ -25,6 +25,12 @@ export const concat = (...parts) => {
   return out;
 };
 
+export const u16be = (n) => {
+  const out = new Uint8Array(2);
+  new DataView(out.buffer).setUint16(0, n);
+  return out;
+};
+
 export const u32be = (n) => {
   const out = new Uint8Array(4);
   new DataView(out.buffer).setUint32(0, n >>> 0);

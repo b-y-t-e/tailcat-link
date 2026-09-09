@@ -30,6 +30,7 @@ public sealed class FakeDerpRelay : IAsyncDisposable
     private readonly List<Socket> _sockets = [];
     private readonly Task _acceptLoop;
 
+    /// <summary>Starts a relay on a loopback port of its own.</summary>
     public FakeDerpRelay()
     {
         _listener = new Socket(SocketType.Stream, ProtocolType.Tcp);
@@ -61,6 +62,7 @@ public sealed class FakeDerpRelay : IAsyncDisposable
         return new NetworkStream(socket, ownsSocket: true);
     }
 
+    /// <summary>Stops the relay and drops every client it is holding.</summary>
     public async ValueTask DisposeAsync()
     {
         await _cts.CancelAsync();

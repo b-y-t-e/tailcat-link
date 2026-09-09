@@ -14,6 +14,12 @@ namespace Tailcat.Link.Storage;
 /// fresh key on every start would have a different address every time, and
 /// the code the operator scanned once would point at a machine that no longer
 /// exists.
+/// <para>
+/// A host may hold several peers and offer several invitations at once, so
+/// both are lists. <see cref="PeerKey"/> and <see cref="Pairing"/> remain as
+/// the single-peer view of them, for the machines and the callers that only
+/// ever have one.
+/// </para>
 /// </remarks>
 public sealed record LinkState
 {
@@ -33,25 +39,46 @@ public sealed record LinkState
     public int? HomeRegionId { get; init; }
 
     /// <summary>
-    /// The pairing secret a host is currently offering, or null on a machine
-    /// that has never hosted.
+    /// The pairing secrets a host is currently offering, oldest first.
     /// </summary>
     /// <remarks>
-    /// It is kept after pairing rather than cleared, so that the host can
+    /// They are kept after pairing rather than cleared, so that the host can
     /// still show the code an operator wrote down — it names this machine
-    /// for good, even though it will pair with nobody else now.
+    /// for good, even though it may pair with nobody else now.
     /// </remarks>
-    public PairingOffer? Pairing { get; init; }
+    public IReadOnlyList<PairingOffer> Pairings { get; init; } = [];
+
+    /// <summary>The machines this one is paired with, in the order they joined.</summary>
+    public IReadOnlyList<PairedPeer> Peers { get; init; } = [];
 
     /// <summary>The code this machine joined with, so joining again needs no code.</summary>
     public InvitationCode? PeerCode { get; init; }
 
     /// <summary>
-    /// The machine this one is paired with, or the zero key before the first
-    /// pairing. A host accepts sessions from this key alone once it is set.
+    /// The offer a single-peer host publishes: the newest one it minted, or
+    /// null on a machine that has never hosted.
     /// </summary>
-    public NodePublic PeerKey { get; init; }
+    public PairingOffer? Pairing => Pairings.Count == 0 ? null : Pairings[^1];
 
-    /// <summary>Whether a peer has been pinned yet.</summary>
-    public bool IsPaired => !PeerKey.IsZero;
+    /// <summary>
+    /// The machine this one is paired with, or the zero key before the first
+    /// pairing. Where several are paired this is the first of them.
+    /// </summary>
+    public NodePublic PeerKey => Peers.Count == 0 ? default : Peers[0].Key;
+
+    /// <summary>Whether any peer has been pinned yet.</summary>
+    public bool IsPaired => Peers.Count > 0;
+
+    /// <summary>The remembered peer with <paramref name="key"/>, or null.</summary>
+    public PairedPeer? PeerWith(NodePublic key)
+    {
+        foreach (PairedPeer peer in Peers)
+        {
+            if (peer.Key == key)
+            {
+                return peer;
+            }
+        }
+        return null;
+    }
 }

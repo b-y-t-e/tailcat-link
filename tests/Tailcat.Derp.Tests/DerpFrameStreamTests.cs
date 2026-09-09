@@ -120,6 +120,29 @@ public class DerpFrameStreamTests
                 TestContext.Current.CancellationToken));
     }
 
+    /// <summary>
+    /// A write that fails part way must close the connection rather than let
+    /// the next frame follow a torn one. Found the hard way: a send cancelled
+    /// between the header and the payload left five bytes on the wire that the
+    /// relay took for the next frame's header, and every packet after it was
+    /// misrouted for the life of the connection.
+    /// </summary>
+    [Fact]
+    public async Task AWriteThatFailsPartWayClosesTheConnection()
+    {
+        FailingStream wire = new(failAfter: 3);
+        DerpFrameStream frames = new(wire);
+
+        await Assert.ThrowsAsync<IOException>(
+            () => frames.WriteFrameAsync(
+                DerpFrameType.SendPacket, new byte[10], TestContext.Current.CancellationToken));
+
+        Assert.True(wire.Closed, "the connection was left open behind a torn frame");
+        await Assert.ThrowsAnyAsync<ObjectDisposedException>(
+            () => frames.WriteFrameAsync(
+                DerpFrameType.SendPacket, new byte[10], TestContext.Current.CancellationToken));
+    }
+
     [Fact]
     public async Task DisposingTwiceIsHarmless()
     {
@@ -127,5 +150,26 @@ public class DerpFrameStreamTests
 
         await frames.DisposeAsync();
         await frames.DisposeAsync();
+    }
+
+    /// <summary>A wire that accepts a few bytes and then breaks, as a dropped
+    /// TCP connection does mid-frame.</summary>
+    private sealed class FailingStream(int failAfter) : MemoryStream
+    {
+        public bool Closed { get; private set; }
+
+        public override async ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            ObjectDisposedException.ThrowIf(Closed, this);
+            await base.WriteAsync(buffer[..Math.Min(failAfter, buffer.Length)], cancellationToken);
+            throw new IOException("the connection went away mid-frame");
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Closed = true;
+            base.Dispose(disposing);
+        }
     }
 }

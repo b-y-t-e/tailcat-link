@@ -12,6 +12,8 @@ using Tailcat.Net;
 
 namespace Tailcat.Link.Tests;
 
+using static LinkHarness;
+
 /// <summary>
 /// Covers the promise this library makes: pair two machines once with a code,
 /// and from then on they find each other again after anything short of one of
@@ -26,29 +28,6 @@ namespace Tailcat.Link.Tests;
 /// </remarks>
 public class PairedLinkTests
 {
-    /// <summary>
-    /// Deliberately impatient compared to the defaults: a test should spend
-    /// its time reconnecting, not waiting to notice that it must.
-    /// </summary>
-    private static LinkOptions OptionsFor(FakeRelayGatewayFactory gateways, ILinkStore store) => new()
-    {
-        Store = store,
-        Gateway = gateways,
-        RequestTimeout = TimeSpan.FromSeconds(5),
-        RequestDeadline = TimeSpan.FromSeconds(45),
-        HeartbeatInterval = TimeSpan.FromSeconds(1),
-        MinReconnectDelay = TimeSpan.FromMilliseconds(200),
-        MaxReconnectDelay = TimeSpan.FromSeconds(2),
-    };
-
-    private static CancellationTokenSource Deadline(TimeSpan limit)
-    {
-        CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
-            TestContext.Current.CancellationToken);
-        cts.CancelAfter(limit);
-        return cts;
-    }
-
     /// <summary>
     /// The host does not care what carries the session. Nothing above
     /// <c>Tailcat.Net</c> mentions a transport, so a peer that cannot have
@@ -447,7 +426,7 @@ public class PairedLinkTests
         };
         await using ILink stranger = await TailcatLink.JoinAsync("demo", forged.Value, impatient, ct);
 
-        await Assert.ThrowsAsync<LinkException>(() => stranger.RequestAsync("status", ct));
+        await Assert.ThrowsAsync<LinkTimeoutException>(() => stranger.RequestAsync("status", ct));
         Assert.False(stranger.IsConnected);
 
         // And the machine is still there to be paired by whoever holds the
@@ -664,7 +643,7 @@ public class PairedLinkTests
             OptionsFor(gateways, new InMemoryLinkStore()) with { RequestDeadline = TimeSpan.FromSeconds(8) },
             ct);
 
-        await Assert.ThrowsAsync<LinkException>(() => stranger.RequestAsync("ping", ct));
+        await Assert.ThrowsAsync<LinkTimeoutException>(() => stranger.RequestAsync("ping", ct));
         Assert.Equal("pong", await paired.RequestAsync("ping", ct));
     }
 
@@ -712,6 +691,43 @@ public class PairedLinkTests
     }
 
     /// <summary>
+    /// The silence that means a broken node is silence with nothing else to
+    /// go on. A host whose peers are paired and talking accepts no new
+    /// connection for hours, and rebuilding the node under them would drop
+    /// every session, end every channel and interrupt every transfer for no
+    /// reason at all.
+    /// </summary>
+    [Fact]
+    public async Task AHostWithALivePeerKeepsTheNodeThroughTheSilence()
+    {
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(3));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        FakeRelayGatewayFactory gateways = new(relay);
+        LinkOptions options = OptionsFor(gateways, new InMemoryLinkStore()) with
+        {
+            ListenSilenceTimeout = TimeSpan.FromSeconds(5),
+            RebuildNodeAfterFailures = 1,
+        };
+
+        await using ILink host = await TailcatLink.HostAsync("demo", options, ct);
+        host.OnRequest(_ => "pong");
+
+        await using ILink operatorSide = await TailcatLink.JoinAsync(
+            "demo", host.InvitationCode.Value, OptionsFor(gateways, new InMemoryLinkStore()), ct);
+        Assert.Equal("pong", await operatorSide.RequestAsync("ping", ct));
+
+        int nodesOnceJoined = gateways.NodesCreated;
+        // Several silence windows of a peer that says nothing but is plainly
+        // there, which is what a paired machine between two requests is.
+        await Task.Delay(TimeSpan.FromSeconds(16), ct);
+
+        Assert.Equal(nodesOnceJoined, gateways.NodesCreated);
+        Assert.Equal("pong", await operatorSide.RequestAsync("ping", ct));
+    }
+
+    /// <summary>
     /// A host whose pairing window closed while it was running is not stuck
     /// showing a code it would refuse: it can mint another without the
     /// process being restarted, which is the only thing a machine nobody is
@@ -732,7 +748,7 @@ public class PairedLinkTests
         InMemoryLinkStore hostStore = new();
         PairingOffer expiring = new("written-down-token", DateTimeOffset.UtcNow + TimeSpan.FromSeconds(2));
         await hostStore.SaveAsync(
-            "demo", new LinkState { PrivateKey = NodePrivate.NewKey(), Pairing = expiring }, ct);
+            "demo", new LinkState { PrivateKey = NodePrivate.NewKey(), Pairings = [expiring] }, ct);
 
         await using ILink host = await TailcatLink.HostAsync("demo", OptionsFor(gateways, hostStore), ct);
         host.OnRequest(_ => "pong");
@@ -746,7 +762,7 @@ public class PairedLinkTests
             stale.Value,
             OptionsFor(gateways, new InMemoryLinkStore()) with { RequestDeadline = TimeSpan.FromSeconds(8) },
             ct);
-        await Assert.ThrowsAsync<LinkException>(() => late.RequestAsync("ping", ct));
+        await Assert.ThrowsAsync<LinkTimeoutException>(() => late.RequestAsync("ping", ct));
 
         InvitationCode fresh = await host.RenewInvitationAsync(ct);
         Assert.NotEqual(stale.Value, fresh.Value);
@@ -774,6 +790,50 @@ public class PairedLinkTests
 
         await host.DisposeAsync();
         await host.DisposeAsync();
+    }
+
+    /// <summary>
+    /// The one-peer link says where it stands in the same words the host's
+    /// peers do: a state a user interface can bind to, and a reason worth
+    /// branching on instead of a message worth matching.
+    /// </summary>
+    [Fact]
+    public async Task ALinkSaysWhereItStandsWithoutAnybodyMatchingOnText()
+    {
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(3));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        FakeRelayGatewayFactory gateways = new(relay);
+        InMemoryLinkStore hostStore = new();
+
+        ILink host = await TailcatLink.HostAsync("demo", OptionsFor(gateways, hostStore), ct);
+        host.SetRequestHandler((_, _) => Task.FromResult<ReadOnlyMemory<byte>>("pong"u8.ToArray()));
+
+        await using ILink operatorSide = await TailcatLink.JoinAsync(
+            "demo", host.InvitationCode.Value, OptionsFor(gateways, new InMemoryLinkStore()), ct);
+
+        ConcurrentQueue<LinkConnectionState> states = [];
+        operatorSide.StateChanged += (_, e) => states.Enqueue(e.State);
+        ConcurrentQueue<LinkDisconnectReason> reasons = [];
+        operatorSide.SessionEnded += (_, e) => reasons.Enqueue(e.Reason);
+
+        Assert.Equal("pong", await operatorSide.RequestAsync("ping", ct));
+        Assert.Equal(LinkConnectionState.Connected, operatorSide.State);
+
+        // The machine at the other end goes away and comes back, which is the
+        // one cut nothing underneath can paper over.
+        await host.DisposeAsync();
+        await WaitUntilAsync(() => !reasons.IsEmpty, "the link to notice the session had gone", ct);
+        Assert.Equal(LinkConnectionState.Reconnecting, operatorSide.State);
+        Assert.Contains(LinkDisconnectReason.NetworkLost, reasons);
+
+        await using ILink restarted = await TailcatLink.HostAsync("demo", OptionsFor(gateways, hostStore), ct);
+        restarted.SetRequestHandler((_, _) => Task.FromResult<ReadOnlyMemory<byte>>("pong again"u8.ToArray()));
+
+        Assert.Equal("pong again", await operatorSide.RequestAsync("ping", ct));
+        Assert.Contains(LinkConnectionState.Reconnecting, states);
+        Assert.Contains(LinkConnectionState.Connected, states);
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition, string because, CancellationToken ct)

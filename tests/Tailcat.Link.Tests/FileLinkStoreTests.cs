@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 using Tailcat.Keys;
+using Tailcat.Link.Protocol;
 using Tailcat.Link.Storage;
 
 namespace Tailcat.Link.Tests;
@@ -37,14 +38,15 @@ public class FileLinkStoreTests : IDisposable
         InvitationCode code = InvitationCode.ForAddress(
             new ConnInfo { ServerPublic = peer, RegionID = 4 }.ToConnBlob(), "s3cret-token");
         PairingOffer offer = new("s3cret-token", DateTimeOffset.UtcNow.AddHours(1));
+        PairedPeer remembered = new(peer, "kitchen phone", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
 
         await store.SaveAsync("demo", new LinkState
         {
             PrivateKey = key,
             HomeRegionId = 4,
-            Pairing = offer,
+            Pairings = [offer],
             PeerCode = code,
-            PeerKey = peer,
+            Peers = [remembered],
         }, ct);
         LinkState? loaded = await store.LoadAsync("demo", ct);
 
@@ -57,6 +59,7 @@ public class FileLinkStoreTests : IDisposable
         Assert.Equal(code, loaded.PeerCode);
         Assert.Equal(offer, loaded.Pairing);
         Assert.Equal(peer, loaded.PeerKey);
+        Assert.Equal(remembered, Assert.Single(loaded.Peers));
         Assert.True(loaded.IsPaired);
     }
 
@@ -91,7 +94,14 @@ public class FileLinkStoreTests : IDisposable
 
         await store.SaveAsync("demo", new LinkState { PrivateKey = key }, ct);
         NodePublic peer = NodePrivate.NewKey().Public();
-        await store.SaveAsync("demo", new LinkState { PrivateKey = key, PeerKey = peer }, ct);
+        await store.SaveAsync(
+            "demo",
+            new LinkState
+            {
+                PrivateKey = key,
+                Peers = [new PairedPeer(peer, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow)],
+            },
+            ct);
 
         LinkState? loaded = await store.LoadAsync("demo", ct);
         Assert.Equal(peer, loaded?.PeerKey);
@@ -195,6 +205,96 @@ public class FileLinkStoreTests : IDisposable
 
         Assert.Contains("elsewhere", ex.Message, StringComparison.Ordinal);
         Assert.Contains("here", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A file written by the version that held one peer and one offer reads
+    /// back as a host with one of each, and is written out in the new shape.
+    /// </summary>
+    /// <remarks>
+    /// A machine that upgrades must not lose its pairing, which is the one
+    /// failure nothing here can recover from remotely.
+    /// </remarks>
+    [Fact]
+    public async Task AFileFromTheSinglePeerVersionIsReadAndRewritten()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        FileLinkStore store = Store(new StubProtector("dpapi"));
+        NodePrivate key = NodePrivate.NewKey();
+        NodePublic peer = NodePrivate.NewKey().Public();
+        DateTimeOffset expires = DateTimeOffset.UtcNow.AddHours(1);
+
+        Directory.CreateDirectory(_root);
+        await File.WriteAllTextAsync(
+            store.PathFor("demo"),
+            $$"""
+            {
+              "Version": 1,
+              "Protector": "dpapi",
+              "PrivateKey": "{{Convert.ToBase64String(key.Raw32())}}",
+              "HomeRegionId": 7,
+              "PairingToken": "written-down-token",
+              "PairingExpiresAt": "{{expires:O}}",
+              "PeerKey": "{{Convert.ToHexStringLower(peer.Raw32())}}"
+            }
+            """,
+            ct);
+
+        LinkState? loaded = await store.LoadAsync("demo", ct);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(key.Public(), loaded.PrivateKey.Public());
+        Assert.Equal(7, loaded.HomeRegionId);
+        Assert.Equal(peer, Assert.Single(loaded.Peers).Key);
+        Assert.Equal("written-down-token", Assert.Single(loaded.Pairings).Token);
+
+        await store.SaveAsync("demo", loaded, ct);
+        string rewritten = await File.ReadAllTextAsync(store.PathFor("demo"), ct);
+        Assert.Contains("\"Version\": 2", rewritten, StringComparison.Ordinal);
+        Assert.Equal(peer, Assert.Single((await store.LoadAsync("demo", ct))!.Peers).Key);
+    }
+
+    /// <summary>
+    /// The peer and the offer a version 1 file held are tied to one another on
+    /// the way in, so unpairing the machine withdraws the code it holds.
+    /// </summary>
+    /// <remarks>
+    /// Version 1 kept the offer after the pairing was made and named neither,
+    /// so an untied peer would leave a live token behind: the phone an
+    /// operator has just removed walks straight back in on it, which is the
+    /// one way back unpairing exists to close.
+    /// </remarks>
+    [Fact]
+    public async Task AMigratedPeerLosesItsInvitationWhenItIsForgotten()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        FileLinkStore store = Store(new StubProtector("dpapi"));
+        NodePrivate key = NodePrivate.NewKey();
+        NodePublic phone = NodePrivate.NewKey().Public();
+
+        Directory.CreateDirectory(_root);
+        await File.WriteAllTextAsync(
+            store.PathFor("demo"),
+            $$"""
+            {
+              "Version": 1,
+              "Protector": "dpapi",
+              "PrivateKey": "{{Convert.ToBase64String(key.Raw32())}}",
+              "PairingToken": "written-down-token",
+              "PairingExpiresAt": "{{DateTimeOffset.UtcNow.AddHours(1):O}}",
+              "PeerKey": "{{Convert.ToHexStringLower(phone.Raw32())}}"
+            }
+            """,
+            ct);
+
+        LinkState migrated = (await store.LoadAsync("demo", ct))!;
+        Assert.Equal(Assert.Single(migrated.Pairings).Id, Assert.Single(migrated.Peers).InvitationId);
+
+        PairingRecord host = new("demo", migrated, store, TimeProvider.System);
+        Assert.True(await host.ForgetPeerAsync(phone, ct));
+
+        Assert.Empty(host.State.Pairings);
+        Assert.Null(await host.AdmitAsync(phone, new LinkHello("written-down-token", null), ct));
     }
 
     /// <summary>A file that is not link state says so, instead of failing later and elsewhere.</summary>

@@ -29,6 +29,13 @@ internal enum LinkFrameKind : byte
     /// </summary>
     /// <seealso cref="TransferFrame"/>
     Transfer = 5,
+
+    /// <summary>
+    /// The frame that opens a channel, naming which of the peer's channel
+    /// handlers it is for. The frames follow it on the same stream.
+    /// </summary>
+    /// <seealso cref="ChannelFrame"/>
+    Channel = 6,
 }
 
 /// <summary>How a request turned out.</summary>

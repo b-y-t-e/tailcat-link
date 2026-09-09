@@ -4,6 +4,8 @@
     <Project Path="src/Tailcat.Demo/Tailcat.Demo.csproj" />
     <Project Path="src/Tailcat.Derp/Tailcat.Derp.csproj" />
     <Project Path="src/Tailcat.Link/Tailcat.Link.csproj" />
+    <Project Path="src/Tailcat.Link.Extensions.DependencyInjection/Tailcat.Link.Extensions.DependencyInjection.csproj" />
+    <Project Path="src/Tailcat.Link.Json/Tailcat.Link.Json.csproj" />
     <Project Path="src/Tailcat.Net/Tailcat.Net.csproj" />
     <Project Path="src/Tailcat.WebDemo/Tailcat.WebDemo.csproj" />
     <Project Path="src/Tailcat/Tailcat.csproj" />

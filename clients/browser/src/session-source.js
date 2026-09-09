@@ -92,13 +92,15 @@ export class RelayedConnection {
 /// the session on until the pairing has been accepted.
 export class DialingSessionSource {
   #dial;
-  #pairingToken;
+  #hello;
   #handshakeTimeout;
 
   /// @param dial how a connection is reached; the seam a test replaces.
-  constructor({ dial, pairingToken, handshakeTimeout }) {
+  /// @param displayName what the host is to call this browser. A hint the
+  ///   host authenticates in no way, and it may be left out.
+  constructor({ dial, pairingToken, displayName = null, handshakeTimeout }) {
     this.#dial = dial;
-    this.#pairingToken = pairingToken;
+    this.#hello = { pairingToken, displayName };
     this.#handshakeTimeout = handshakeTimeout;
   }
 
@@ -108,7 +110,7 @@ export class DialingSessionSource {
     try {
       // Before anything else is asked, because until it has run the host will
       // refuse everything anyway.
-      await withTimeout(offerPairing(connection, this.#pairingToken), this.#handshakeTimeout, "the host");
+      await withTimeout(offerPairing(connection, this.#hello), this.#handshakeTimeout, "the host");
       return connection;
     } catch (error) {
       connection.close(error);

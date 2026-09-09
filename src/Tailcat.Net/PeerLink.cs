@@ -10,6 +10,11 @@ using Tailcat.Keys;
 
 namespace Tailcat.Net;
 
+// TAILCAT001: the sealed-message design is what this file implements and
+// tests, so its experimental warning has nothing to tell it. Only a consumer
+// reaching for Seal or TryOpen from outside is meant to hear it.
+#pragma warning disable TAILCAT001
+
 /// <summary>How datagrams to a peer are currently travelling.</summary>
 public enum PeerPathKind
 {

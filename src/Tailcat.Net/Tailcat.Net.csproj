@@ -19,6 +19,10 @@
     <!-- Tailcat.Link's end-to-end tests stand whole nodes up against the
          in-memory relay, which is what ConnectRelay exists for. -->
     <InternalsVisibleTo Include="Tailcat.Link.Tests" />
+    <!-- ConnectRelay is the seam a whole node is stood up against an in-memory
+         relay through, and Tailcat.TestSupport is what ships that to
+         consumers. It stays internal: what they use is the gateway factory. -->
+    <InternalsVisibleTo Include="Tailcat.TestSupport" />
   </ItemGroup>
 
   <ItemGroup>

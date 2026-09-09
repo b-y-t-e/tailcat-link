@@ -1,6 +1,7 @@
 // Copyright (c) Andrzej Ból and contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
+using System.Globalization;
 using Tailcat.Keys;
 
 namespace Tailcat.Link.Tests;
@@ -42,7 +43,8 @@ public class InvitationCodeTests
         InvitationCode original = InvitationCode.ForAddress(SomeAddress(), "s3cret-token");
 
         InvitationCode parsed = InvitationCode.Parse(
-            string.Format(System.Globalization.CultureInfo.InvariantCulture, wrapper, original.Value));
+            string.Format(CultureInfo.InvariantCulture, wrapper, original.Value),
+            CultureInfo.InvariantCulture);
 
         Assert.Equal(original, parsed);
     }
@@ -58,7 +60,7 @@ public class InvitationCodeTests
     public void SomethingThatIsNotACodeIsRefused(string text)
     {
         Assert.False(InvitationCode.TryParse(text, out _));
-        Assert.Throws<LinkException>(() => InvitationCode.Parse(text));
+        Assert.Throws<LinkException>(() => InvitationCode.Parse(text, CultureInfo.InvariantCulture));
     }
 
     /// <summary>Null is not a code either, and says so rather than throwing.</summary>

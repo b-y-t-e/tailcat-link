@@ -10,6 +10,11 @@ using Tailcat.Tailcfg;
 
 namespace Tailcat.Net.Tests;
 
+// TAILCAT001: the sealed-message design is what this file implements and
+// tests, so its experimental warning has nothing to tell it. Only a consumer
+// reaching for Seal or TryOpen from outside is meant to hear it.
+#pragma warning disable TAILCAT001
+
 /// <summary>
 /// Covers how a node tracks a session's lifetime: what it remembers while a
 /// session is up, and what it must forget when one ends.

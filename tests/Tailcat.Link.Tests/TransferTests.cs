@@ -8,6 +8,8 @@ using Tailcat.Net;
 
 namespace Tailcat.Link.Tests;
 
+using static LinkHarness;
+
 /// <summary>
 /// Covers the promise the transfer API makes: hand it a stream of any size
 /// and it arrives, whatever the link does in the meantime.
@@ -20,25 +22,10 @@ namespace Tailcat.Link.Tests;
 /// </remarks>
 public class TransferTests
 {
-    private static LinkOptions OptionsFor(FakeRelayGatewayFactory gateways, ILinkStore store) => new()
-    {
-        Store = store,
-        Gateway = gateways,
-        RequestTimeout = TimeSpan.FromSeconds(5),
-        RequestDeadline = TimeSpan.FromSeconds(45),
-        TransferStallTimeout = TimeSpan.FromMinutes(1),
-        HeartbeatInterval = TimeSpan.FromSeconds(1),
-        MinReconnectDelay = TimeSpan.FromMilliseconds(200),
-        MaxReconnectDelay = TimeSpan.FromSeconds(2),
-    };
-
-    private static CancellationTokenSource Deadline(TimeSpan limit)
-    {
-        CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
-            TestContext.Current.CancellationToken);
-        cts.CancelAfter(limit);
-        return cts;
-    }
+    // A transfer is given longer to stall than the shared harness allows: what
+    // these tests break and resume is measured against it.
+    private static LinkOptions OptionsFor(FakeRelayGatewayFactory gateways, ILinkStore store) =>
+        LinkHarness.OptionsFor(gateways, store) with { TransferStallTimeout = TimeSpan.FromMinutes(1) };
 
     /// <summary>Compared by hash: a failed assertion on twenty megabytes is unreadable.</summary>
     private static string Digest(ReadOnlySpan<byte> content) => Convert.ToHexString(SHA256.HashData(content));

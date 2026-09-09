@@ -81,6 +81,67 @@ The three things worth knowing:
   finished dealing with, and a handler that throws fails the sender's call
   instead of being retried.
 
+## More than one machine
+
+`HostAsync` pairs one. An application with several clients — a bridge for a
+handful of phones, a code per device — uses `HostManyAsync` instead:
+
+```csharp
+await using ILinkHost host = await TailcatLink.HostManyAsync(
+    "my-app", new LinkOptions { MaxPeers = 4 });
+
+host.SetRequestHandler((peer, request, ct) => Handle(peer, request, ct));
+host.PeerJoined += (_, e) => Show(e.Peer.Name, e.Peer.PairedAt);
+
+LinkInvitation invitation = await host.InviteAsync(new InvitationRequest
+{
+    Label     = "kitchen phone",   // for your own list; it never goes on the wire
+    Lifetime  = TimeSpan.FromMinutes(2),
+    SingleUse = true,
+});
+Draw(invitation.Code, invitation.ExpiresAt);
+
+await host.ForgetPeerAsync(peer);  // unpair one device, and the code it came in on
+```
+
+One identity, one stored file, one relay region and one node underneath all of
+it — which is what a link per client would otherwise multiply. `HostAsync` is
+exactly this with `MaxPeers = 1` behind the narrower `ILink`, so there is one
+set of pairing rules rather than two that could drift.
+
+Two things are worth reading twice. **`MaxPeers` is a security bound, not a
+resource one**: every admitted peer reaches your handler, and lowering it
+unpairs the machines the host saw longest ago rather than quietly keeping a
+store written under a wider bound. And **`ILinkPeer.Name` is
+unauthenticated** — it is what the other machine said about itself in
+`JoinAsync(..., new JoinRequest { DisplayName })`, and the public key is the
+only thing a session proves.
+
+The stored file is versioned: a file written by 0.3 is read and rewritten in
+the new shape, and an older build refuses the new shape rather than silently
+losing every peer but the first.
+
+## A channel, for what is neither a request nor a file
+
+Realtime frames — audio, telemetry, input events — are a round trip and a
+ledger entry each as requests, and a promise of durability that is actively
+wrong as transfers. `OpenChannelAsync` is the third shape: **ordered within
+the channel, and not durable**. It ends with the session carrying it rather
+than being resumed, and `Closed` says which of "the peer hung up" and "the
+session died" happened.
+
+```csharp
+host.OnChannel("telemetry", async (peer, channel, ct) =>
+{
+    await foreach (ReadOnlyMemory<byte> frame in channel.ReadAllAsync(ct)) Consume(frame);
+});
+
+await using ILinkChannelWriter audio = await link.OpenChannelAsync("audio");
+await audio.SendAsync(frame);
+```
+
+A name nothing is listening for is refused rather than swallowed.
+
 ## What it handles for you
 
 - **A pairing that survives a restart.** The identity key is generated once
@@ -130,6 +191,22 @@ sender waiting.
 
 `Tailcat.Net` and the two layers under it are not published separately; their
 assemblies ship inside this package, so one reference is the whole thing.
+
+Three optional packages sit beside it, each of which you may ignore entirely:
+
+- `Tailcat.Link.Json` — typed requests and handlers over `System.Text.Json`,
+  through source-generated metadata so they survive trimming and
+  ahead-of-time compilation. Separate so that `ILink` stays as narrow as it is
+  and nobody who wants bytes pays for a serializer.
+- `Tailcat.Link.Extensions.DependencyInjection` —
+  `services.AddTailcatLinkHost("my-app")` and an `IHostedService` that owns
+  start-up and shutdown, because dispose ordering against a supervision loop
+  is what everyone hand-rolls and gets subtly wrong. A worker that takes
+  `ILinkHost` and sets a handler in its constructor is registered on the host
+  the moment it is built, rather than being told there is not one yet.
+- `Tailcat.TestSupport` — an in-memory DERP relay, the node gateway factory
+  that builds real nodes against it, and a manually advanced `TimeProvider`.
+  Without it, a test of your own handler needs a network.
 
 ## Known limits
 

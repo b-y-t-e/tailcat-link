@@ -7,27 +7,41 @@
 // the .NET half.
 
 import { delay, str, utf8 } from "./bytes.js";
+import { LinkTimeoutError, RemoteHandlerError } from "./errors.js";
 import { FrameKind, FrameStatus, newExchange, readFrame, writeFrame } from "./link-frame.js";
+import {
+  ChannelCloseReason,
+  ChannelReader,
+  ChannelWriter,
+  decodeChannelName,
+  encodeChannelName,
+} from "./link-channel.js";
 import { IdleTimeout } from "./idle-timeout.js";
 
 export class LinkSession {
   #connection;
   #handler;
   #notifyHandler;
+  #channels;
   #ledger;
   #options;
   #emit;
   #answering = new Set();
+  #open = new Set();
   #beating = false;
 
   /// @param handler read on every inbound request rather than captured, so an
   ///   application that sets its handler after connecting still answers.
+  /// @param channels finds what serves a channel of a given name, or nothing
+  ///   when this browser is not listening for that name. Read on arrival for
+  ///   the same reason the request handler is.
   /// @param ledger shared with every other session of the same link, because
   ///   that is where a request retried after this session dies will arrive.
-  constructor({ connection, handler, notifyHandler, ledger, options, emit }) {
+  constructor({ connection, handler, notifyHandler, channels, ledger, options, emit }) {
     this.#connection = connection;
     this.#handler = handler;
     this.#notifyHandler = notifyHandler;
+    this.#channels = channels ?? (() => null);
     this.#ledger = ledger;
     this.#options = options;
     this.#emit = emit;
@@ -50,6 +64,32 @@ export class LinkSession {
       }
     } finally {
       this.#beating = false;
+    }
+  }
+
+  /// Opens a channel on this session, once the host has said it has a handler
+  /// for the name. The channel it returns ends with this session and is not
+  /// resumed on the next one, which is the whole of what a channel promises.
+  ///
+  /// @throws {RemoteHandlerError} if the host is not listening for that name.
+  async openChannel(name) {
+    const idle = new IdleTimeout(this.#options.requestTimeout);
+    let stream;
+    try {
+      stream = this.#connection.openStream();
+      idle.restart();
+      await writeFrame(stream, FrameKind.Channel, newExchange(), encodeChannelName(name), idle);
+
+      const answer = await readFrame(stream, idle);
+      if (answer.tag === FrameStatus.Failed) throw new RemoteHandlerError(str(answer.payload));
+      // Not closed in a finally: from here the channel owns the stream, and
+      // that is what it sends its frames on.
+      return this.#hold(new ChannelWriter(name, stream));
+    } catch (error) {
+      await stream?.close().catch(() => {});
+      throw idle.expired ? new LinkTimeoutError(`the host sent nothing for ${idle.limitMs} ms`) : error;
+    } finally {
+      idle.stop();
     }
   }
 
@@ -95,7 +135,7 @@ export class LinkSession {
       // its silence really does mean silence. The caller asks again on this
       // same session and spends another whole window waiting, so this is
       // patience rather than a spin.
-      if (idle.expired) throw new Error(`the host sent nothing for ${idle.limitMs} ms`);
+      if (idle.expired) throw new LinkTimeoutError(`the host sent nothing for ${idle.limitMs} ms`);
 
       this.close(error);
       throw error;
@@ -114,6 +154,11 @@ export class LinkSession {
   /// Bounded, because a handler of the page's own is allowed to hang and
   /// closing must still happen.
   async drain(timeout) {
+    // The channels first, and without waiting for them: a channel is not
+    // durable and nothing is owed to it, while an answer already produced is
+    // — and a handler sitting inside a channel's frames would otherwise hold
+    // the whole drain open until its timeout.
+    await this.#endChannels("the link was closed");
     if (this.#answering.size) {
       await Promise.race([Promise.allSettled([...this.#answering]), delay(timeout)]);
     }
@@ -124,7 +169,25 @@ export class LinkSession {
 
   close(error = new Error("the session was closed")) {
     this.#beating = false;
+    this.#endChannels(error.message).catch(() => {});
     this.#connection.close(error);
+  }
+
+  // Held so that the session can end them: a channel that outlived the
+  // session carrying it would be exactly the durability a channel does not
+  // promise, and its reader would be parked on a stream nothing can arrive on.
+  #hold(channel) {
+    // Pruned as new ones arrive rather than through `onclose`, which belongs
+    // to the application: a session that opens thousands of channels must not
+    // keep every closed one, and must not lose the page's own listener either.
+    for (const held of this.#open) if (!held.open) this.#open.delete(held);
+    this.#open.add(channel);
+    return channel;
+  }
+
+  async #endChannels(detail) {
+    await Promise.allSettled([...this.#open].map((channel) => channel.close(ChannelCloseReason.SessionEnded, detail)));
+    this.#open.clear();
   }
 
   #answer(stream) {
@@ -142,6 +205,9 @@ export class LinkSession {
             await handler?.(str(payload), payload);
             break;
           }
+          case FrameKind.Channel:
+            await this.#serveChannel(stream, exchange, payload);
+            break;
           case FrameKind.Request: {
             // Through the ledger, so that a request the host is retrying after
             // a session died is answered from what its first arrival produced
@@ -169,6 +235,29 @@ export class LinkSession {
     })();
     this.#answering.add(answering);
     answering.finally(() => this.#answering.delete(answering)).catch(() => {});
+  }
+
+  /// Hands a channel the host opened to whatever is listening for the name,
+  /// and refuses it outright when nothing is: swallowing the frames into a
+  /// browser that will never read them is the one answer that helps nobody.
+  ///
+  /// The stream is the caller's to close, which it does once this returns —
+  /// so a handler that means to keep receiving stays inside `read()`.
+  async #serveChannel(stream, exchange, payload) {
+    const name = decodeChannelName(payload);
+    const handler = this.#channels(name);
+    if (!handler) {
+      await writeFrame(stream, FrameStatus.Failed, exchange, utf8(`this browser has no "${name}" channel`));
+      return;
+    }
+
+    await writeFrame(stream, FrameStatus.Ok, exchange, new Uint8Array(0));
+    const channel = this.#hold(new ChannelReader(name, stream));
+    try {
+      await handler(channel);
+    } finally {
+      await channel.close(ChannelCloseReason.LocalClosed, "the handler returned");
+    }
   }
 
   /// Runs the application's handler and turns whatever it does into an answer.
@@ -215,11 +304,6 @@ export class LinkSession {
   }
 }
 
-/// The far end's handler failed. Not a broken session: retrying it would only
-/// run it again.
-export class RemoteHandlerError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "RemoteHandlerError";
-  }
-}
+// Re-exported because it was raised from here before the errors had a module
+// of their own, and applications import it from this one.
+export { RemoteHandlerError };

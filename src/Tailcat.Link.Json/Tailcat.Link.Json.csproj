@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Tailcat.Link.Json</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <IsPackable>true</IsPackable>
+    <PackageId>Tailcat.Link.Json</PackageId>
+    <Title>Tailcat.Link.Json — typed requests over a link</Title>
+    <Description>Sends and answers requests over a Tailcat link as JSON instead of bytes, through System.Text.Json's source-generated metadata so it survives trimming and ahead-of-time compilation. A separate package on purpose: ILink stays exactly as narrow as it is, and nobody who wants bytes pays for a serializer.</Description>
+    <PackageTags>tailcat;json;rpc;p2p;networking</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Tailcat.Link\Tailcat.Link.csproj" />
+  </ItemGroup>
+
+</Project>

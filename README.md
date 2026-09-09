@@ -109,6 +109,14 @@ What it adds on top of `Tailcat.Net`, and why each part is needed:
   memory on neither machine, and `SendAsync` returns only once the receiving
   handler has finished with the content. The wire format is
   [docs/transfers.md](docs/transfers.md).
+- **A channel, for what is neither.** Realtime frames — audio, telemetry,
+  input events — are a round trip and a ledger entry per frame as requests,
+  and a promise of durability that is actively wrong as transfers.
+  `OpenChannelAsync` is the third shape: **ordered within the channel, and not
+  durable**. It ends with the session that carries it rather than being
+  resumed, which is correct rather than a limitation, and `Closed` says which
+  of "the peer hung up" and "the session died" happened. The wire format is
+  [docs/channels.md](docs/channels.md).
 - **A retry that is not a second command.** A request carries an id that
   belongs to the request, not to the attempt, so the machine that already ran
   it answers the retry from memory instead of running it again. Without that,
@@ -116,6 +124,50 @@ What it adds on top of `Tailcat.Net`, and why each part is needed:
   restart the service, write the file, or take the payment twice. The one
   case outside the promise is the other machine's process ending mid-request:
   nothing here can know how far its handler got.
+
+### More than one peer
+
+`HostAsync` pairs one machine, which is the case the paragraphs above
+describe. An application with several clients — a bridge for a handful of
+phones, a QR code per device — uses `HostManyAsync` instead:
+
+```csharp
+await using ILinkHost host = await TailcatLink.HostManyAsync(
+    "my-app", new LinkOptions { MaxPeers = 4 });
+
+host.SetRequestHandler((peer, request, ct) => Handle(peer, request, ct));
+host.PeerJoined += (_, e) => Show(e.Peer.Name, e.Peer.PairedAt);
+
+LinkInvitation invitation = await host.InviteAsync(new InvitationRequest
+{
+    Label     = "kitchen phone",   // for the operator's list; never goes on the wire
+    Lifetime  = TimeSpan.FromMinutes(2),
+    SingleUse = true,
+});
+Draw(invitation.Code, invitation.ExpiresAt);
+
+await host.ForgetPeerAsync(peer);  // unpair one device, and the code it came in on
+```
+
+One identity, one stored file, one region measurement and one node underneath
+all of it — which is what one link per client would otherwise multiply.
+`HostAsync` is exactly this with `MaxPeers = 1` behind the narrower `ILink`,
+deliberately the same machinery: two implementations of the pairing rules
+would drift, and the drift would be in who is let in. Options that ask for
+more than one machine are refused there rather than narrowed, because
+narrowing runs the bound against the store as well as the process — a caller
+reusing a `HostManyAsync` host's options would unpair its devices and be told
+so in a log line.
+
+Three things are worth reading twice. **`MaxPeers` is a security bound, not a
+resource one**: every admitted peer can send requests into the application's
+handler, and lowering it unpairs the machines a host saw longest ago rather
+than letting a store written under a wider bound quietly keep them. **`ILinkPeer.Name` is unauthenticated** — it is what the other
+machine said about itself in `JoinAsync(..., new JoinRequest { DisplayName })`,
+the host has no way to check it, and the public key is the only thing a
+session proves. And **the stored file is versioned**: a file written by 0.3
+is read and rewritten in the new shape, and a build older than this one
+refuses the new shape rather than silently losing every peer but the first.
 
 Sending a file is the whole of it on either side:
 
@@ -332,7 +384,12 @@ session: f24953dc0b78 up in 3376 ms
 ```
 
 Counters are published on the `Tailcat.Net` meter for anything collecting
-`System.Diagnostics.Metrics`.
+`System.Diagnostics.Metrics`. `Tailcat.Link` has a meter and an
+`ActivitySource` of its own, both named `Tailcat.Link`: sessions up now and in
+total, reconnections by reason, node rebuilds, requests by outcome, and the
+bytes each carried, with one span per request rather than per attempt. A link
+is meant to run for months, and a log line answers "did it reconnect" where
+only a counter answers "is it getting worse".
 
 `TailcatNodeOptions.TimeProvider` sets the clock the node measures with, so
 endpoint freshness can be tested without waiting.
@@ -538,7 +595,9 @@ arrived. See [clients/browser](clients/browser/README.md).
   direct path actually sustains.
 - **A security review.** The primitives are libsodium and TLS 1.3, but the
   authentication design — pinning a certificate fingerprint announced inside
-  a sealed box — has not been reviewed by anyone else.
+  a sealed box — has not been reviewed by anyone else. `PeerMessage.Seal` and
+  `PeerMessage.TryOpen` carry `[Experimental("TAILCAT001")]`, so that is said
+  at the call site rather than only in this document.
 
 ## What was not ported, and why
 
@@ -594,11 +653,28 @@ npm --prefix clients/browser run interop -- <code>
 
 ## What is published
 
-One package, `Tailcat.Link`. The layers below it — `Tailcat`, `Tailcat.Derp`
-and `Tailcat.Net` — are named after someone else's project and exist to serve
-it, so their assemblies ship *inside* that package rather than beside it on
-nuget.org. `Tailcat.Cli`, `Tailcat.WebDemo` and `tailcat-demo` are here as
-source and are not published at all.
+`Tailcat.Link` is the package, and three optional ones sit beside it, each of
+which a consumer may ignore entirely:
+
+- `Tailcat.Link.Json` — `RequestAsync<TReq, TRes>` and typed handlers over
+  `System.Text.Json`, through source-generated metadata so it survives
+  trimming and ahead-of-time compilation. Separate so that `ILink` stays as
+  narrow as it is and nobody who wants bytes pays for a serializer.
+- `Tailcat.Link.Extensions.DependencyInjection` —
+  `services.AddTailcatLinkHost("my-app")` and an `IHostedService` that owns
+  start-up and shutdown, because dispose ordering against a supervision loop
+  is exactly what everyone hand-rolls and gets subtly wrong. A worker that
+  takes `ILinkHost` and sets a handler in its constructor is registered on the
+  host the moment it is built, rather than being told there is not one yet.
+- `Tailcat.TestSupport` — the in-memory DERP relay, the node gateway factory
+  that builds real nodes against it, and a manually advanced `TimeProvider`.
+  Without it a consumer's test of their own handler needs a network.
+
+The layers below `Tailcat.Link` — `Tailcat`, `Tailcat.Derp` and `Tailcat.Net`
+— are named after someone else's project and exist to serve it, so their
+assemblies ship *inside* that package rather than beside it on nuget.org.
+`Tailcat.Cli`, `Tailcat.WebDemo` and `tailcat-demo` are here as source and are
+not published at all.
 
 That is a deliberate trade: a consumer of `Tailcat.Link` gets everything with
 one reference, and nobody else's project name gets claimed on a public feed.

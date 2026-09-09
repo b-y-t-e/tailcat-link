@@ -25,7 +25,7 @@ public delegate Task<ReadOnlyMemory<byte>> LinkRequestHandler(
 /// Both ends are equal once paired: each can send a request and each can
 /// answer one. The link is created by <see cref="TailcatLink.HostAsync"/> on
 /// the machine that publishes an <see cref="InvitationCode"/>, and by
-/// <see cref="TailcatLink.JoinAsync"/> on the machine that is given it.
+/// <see cref="TailcatLink.JoinAsync(string, string?, LinkOptions?, CancellationToken)"/> on the machine that is given it.
 /// </para>
 /// <para>
 /// Nothing here needs to be called in a particular order, and a request sent
@@ -70,17 +70,51 @@ public interface ILink : IAsyncDisposable
     /// </summary>
     NodePublic Peer { get; }
 
+    /// <summary>Where this link stands, as one value a user interface can bind to.</summary>
+    /// <remarks>
+    /// <see cref="IsConnected"/> cannot say "trying", which is the state a
+    /// link spends most of a bad afternoon in and the one an operator most
+    /// wants to see.
+    /// </remarks>
+    LinkConnectionState State { get; }
+
     /// <summary>Raised when a session comes up, including every re-established one.</summary>
     event Action? Connected;
 
-    /// <summary>Raised when a session goes down, with the reason it ended.</summary>
+    /// <summary>Raised when a session goes down, with the reason it ended in words.</summary>
+    /// <remarks>
+    /// <see cref="SessionEnded"/> says the same thing in a form worth
+    /// branching on; this one stays because applications written against it
+    /// still work.
+    /// </remarks>
     event Action<string>? Disconnected;
+
+    /// <summary>
+    /// Raised when a session goes down, with a reason code beside the words.
+    /// </summary>
+    /// <remarks>
+    /// The structured form of <see cref="Disconnected"/>: showing a fresh
+    /// invitation code on <see cref="LinkDisconnectReason.Refused"/> and
+    /// nothing at all on <see cref="LinkDisconnectReason.NetworkLost"/> is the
+    /// ordinary case, and matching on a message to tell them apart is what
+    /// this exists to replace.
+    /// </remarks>
+    event EventHandler<DisconnectedEventArgs>? SessionEnded;
+
+    /// <summary>Raised whenever <see cref="State"/> changes.</summary>
+    event EventHandler<LinkStateChangedEventArgs>? StateChanged;
 
     /// <summary>
     /// Sets what answers requests from the peer. Replaces any previous
     /// handler; a link without one refuses requests with an error.
     /// </summary>
     void OnRequest(LinkRequestHandler handler);
+
+    /// <summary>
+    /// <see cref="OnRequest"/>, under the name <see cref="ILinkHost"/> uses,
+    /// so that moving from one peer to several renames nothing.
+    /// </summary>
+    void SetRequestHandler(LinkRequestHandler handler) => OnRequest(handler);
 
     /// <summary>
     /// Sends a request and waits for the peer's answer, waiting through a
@@ -159,6 +193,42 @@ public interface ILink : IAsyncDisposable
         TransferOffer offer,
         IProgress<TransferProgress>? progress = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sets what takes channels named <paramref name="name"/>, replacing any
+    /// previous handler for that name.
+    /// </summary>
+    /// <remarks>
+    /// Handlers are per name because a channel's name is what says what is on
+    /// it: an application receiving audio and telemetry wants two pieces of
+    /// code, not one with a switch.
+    /// </remarks>
+    /// <seealso cref="OpenChannelAsync"/>
+    void OnChannel(string name, Func<ILinkChannelReader, CancellationToken, Task> handler);
+
+    /// <summary>
+    /// Opens an ordered, non-durable channel to the peer, into the handler it
+    /// registered for <paramref name="name"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The third shape, between <see cref="RequestAsync"/> and
+    /// <see cref="SendAsync"/>. A request is a message and costs a round trip;
+    /// a transfer is a file and promises to survive a reconnection. A channel
+    /// is the stream of the moment — audio, telemetry, input events — and
+    /// promises neither: <b>ordered within the channel, and not durable</b>.
+    /// It ends with the session that carries it, which is correct rather than
+    /// a limitation, because a frame of audio from ten seconds ago is worth
+    /// nothing.
+    /// </para>
+    /// <para>
+    /// Unlike a request, this needs a session: there is nothing to resume a
+    /// channel onto, so it waits for one rather than being buffered.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="RemoteHandlerException">If the peer has no handler for that name.</exception>
+    /// <exception cref="LinkException">If no session could be had in time.</exception>
+    Task<ILinkChannelWriter> OpenChannelAsync(string name, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Returns the invitation code worth publishing now, minting a fresh one

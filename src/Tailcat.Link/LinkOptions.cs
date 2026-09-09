@@ -1,6 +1,7 @@
 // Copyright (c) Andrzej Ból and contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
+using Microsoft.Extensions.Logging;
 using Tailcat.Link.Protocol;
 using Tailcat.Link.Storage;
 using Tailcat.Link.Transport;
@@ -243,7 +244,47 @@ public sealed record LinkOptions
 
     private readonly int _rebuildNodeAfterFailures = 3;
 
-    /// <summary>Where the link reports what it is doing. Nowhere, by default.</summary>
+    /// <summary>
+    /// How many machines a host may be paired with at once.
+    /// </summary>
+    /// <remarks>
+    /// One, which is what <see cref="TailcatLink.HostAsync"/> means. It is a
+    /// <em>security</em> bound rather than a resource one: every admitted
+    /// peer can send requests into the application's handler, so raising it
+    /// is a decision about who may reach that handler and not about memory.
+    /// Lowering it applies to the machines already paired: a host started
+    /// against a store holding more than this unpairs the ones it saw longest
+    /// ago, rather than bringing them all back up under a bound the
+    /// application believes it has narrowed.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The bound is below one.</exception>
+    public int MaxPeers
+    {
+        get => _maxPeers;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(value, 1);
+            _maxPeers = value;
+        }
+    }
+
+    private readonly int _maxPeers = 1;
+
+    /// <summary>
+    /// Where the link reports what it is doing, with a level and a category.
+    /// Nowhere, by default.
+    /// </summary>
+    /// <remarks>
+    /// Preferred over <see cref="Log"/>, which cannot be filtered or
+    /// correlated. Both are written to when both are set.
+    /// </remarks>
+    public ILoggerFactory? LoggerFactory { get; init; }
+
+    /// <summary>Where the link reports what it is doing, as plain text. Nowhere, by default.</summary>
+    /// <remarks>
+    /// Kept for the applications that already use it.
+    /// <see cref="LoggerFactory"/> is the one to reach for now.
+    /// </remarks>
     public Action<string>? Log { get; init; }
 
     /// <summary>The clock the link measures with; tests pass their own.</summary>

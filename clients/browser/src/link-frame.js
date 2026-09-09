@@ -14,6 +14,9 @@ export const FrameKind = {
   Notify: 2,
   Ping: 3,
   Hello: 4,
+  // 5 is a transfer, which this client does not speak; a frame carrying one
+  // is refused rather than swallowed.
+  Channel: 6,
 };
 
 export const FrameStatus = {

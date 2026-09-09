@@ -15,7 +15,21 @@ namespace Tailcat.Link.Storage;
 /// hold a copy of the state and keep it in step with the disk. They ask this,
 /// and this decides whether anything needs saving.
 /// </remarks>
-internal sealed class PairingRecord(string appName, LinkState state, ILinkStore store, TimeProvider time)
+/// <param name="appName">The application these settings belong to.</param>
+/// <param name="state">What was loaded from the store.</param>
+/// <param name="store">Where changes are written.</param>
+/// <param name="time">The clock expiry and "last seen" are measured on.</param>
+/// <param name="maxPeers">
+/// How many machines may be paired at once. It is a security bound rather
+/// than a resource one: every admitted peer can reach the application's
+/// handler.
+/// </param>
+internal sealed class PairingRecord(
+    string appName,
+    LinkState state,
+    ILinkStore store,
+    TimeProvider time,
+    int maxPeers = 1)
     : IPairingPolicy
 {
     private readonly Lock _mu = new();
@@ -24,6 +38,12 @@ internal sealed class PairingRecord(string appName, LinkState state, ILinkStore 
 
     /// <summary>The application these settings belong to.</summary>
     public string AppName => appName;
+
+    /// <summary>How many machines may be paired at once.</summary>
+    public int MaxPeers => maxPeers;
+
+    /// <summary>The clock expiry and "last seen" are measured on.</summary>
+    public TimeProvider Time => time;
 
     /// <summary>The state as it currently stands.</summary>
     public LinkState State
@@ -37,15 +57,20 @@ internal sealed class PairingRecord(string appName, LinkState state, ILinkStore 
         }
     }
 
-    /// <summary>The machine this one is paired with, or the zero key.</summary>
-    public NodePublic Peer => State.PeerKey;
+    /// <inheritdoc/>
+    public IReadOnlyList<PairedPeer> Peers => State.Peers;
 
     /// <summary>
-    /// Pins <paramref name="peer"/> as the machine at the other end, unless
-    /// one is already pinned.
+    /// Remembers <paramref name="peer"/> as a machine at the other end,
+    /// refreshing when it was last seen if it is already known.
     /// </summary>
-    public Task PairWithAsync(NodePublic peer, CancellationToken cancellationToken = default) =>
-        UpdateAsync(current => current.IsPaired ? null : current with { PeerKey = peer }, cancellationToken);
+    /// <remarks>
+    /// This is what the joining end calls: it dialled a host it already
+    /// trusts, so there is no invitation to check. A host reaches its peers
+    /// through <see cref="AdmitAsync"/> instead.
+    /// </remarks>
+    public Task PairWithAsync(NodePublic peer, string? name = null, CancellationToken cancellationToken = default) =>
+        UpdateAsync(current => WithPeer(current, peer, name), cancellationToken);
 
     /// <summary>
     /// Returns the offer this host should publish, minting a fresh one when
@@ -55,47 +80,184 @@ internal sealed class PairingRecord(string appName, LinkState state, ILinkStore 
     /// A host that is restarted inside the window keeps showing the same
     /// code, because the operator may already have written it down; one
     /// restarted after the window shows a new one, which is the only way to
-    /// re-open pairing without a way to reach the machine.
+    /// re-open pairing without a way to reach the machine. That holds while
+    /// the host still has room for another machine; a full one goes on
+    /// showing the code it published, spent as it is.
     /// </remarks>
     public async Task<PairingOffer> OfferPairingAsync(TimeSpan window, CancellationToken cancellationToken = default)
     {
         LinkState current = State;
-        // A paired host's offer is spent, but it is still what its code says,
-        // so it is shown rather than replaced.
-        if (current.Pairing is { } offer && (current.IsPaired || !offer.HasExpired(time)))
+        // A host with no room left has an offer that is spent, but it is
+        // still what its published code says, so it is shown rather than
+        // replaced. Room left is the other case: an expired offer there would
+        // publish a code that pairing then refuses, which is exactly what the
+        // machine has no way to correct.
+        bool full = current.Peers.Count >= maxPeers;
+        if (current.Pairing is { } offer && (full || !offer.HasExpired(time)))
         {
             return offer;
         }
+        return await AddOfferAsync(PairingOffer.New(window, time), cancellationToken).ConfigureAwait(false);
+    }
 
-        PairingOffer fresh = PairingOffer.New(window, time);
-        await UpdateAsync(c => c with { Pairing = fresh }, cancellationToken).ConfigureAwait(false);
-        return fresh;
+    /// <summary>Adds an offer to the ones this host is making, and remembers it.</summary>
+    public async Task<PairingOffer> AddOfferAsync(PairingOffer offer, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(offer);
+        await UpdateAsync(
+                current => current with { Pairings = [.. Live(current.Pairings), offer] }, cancellationToken)
+            .ConfigureAwait(false);
+        return offer;
+    }
+
+    /// <summary>Withdraws one offer, whether or not it had expired.</summary>
+    /// <returns>Whether an offer with that id was still there.</returns>
+    public async Task<bool> RevokeOfferAsync(Guid offerId, CancellationToken cancellationToken = default)
+    {
+        bool found = false;
+        await UpdateAsync(
+            current =>
+            {
+                found = current.Pairings.Any(offer => offer.Id == offerId);
+                return found
+                    ? current with { Pairings = [.. current.Pairings.Where(offer => offer.Id != offerId)] }
+                    : null;
+            },
+            cancellationToken).ConfigureAwait(false);
+        return found;
+    }
+
+    /// <summary>Unpairs one machine, leaving this machine's identity and its other peers alone.</summary>
+    /// <remarks>
+    /// The invitation it was admitted by goes with it. Forgetting a machine
+    /// that still holds a live code would otherwise last only until its next
+    /// reconnection, which is seconds: it arrives as a stranger with a valid
+    /// token and is admitted again. A reusable offer is withdrawn for
+    /// everyone it was shown to, because letting the forgotten machine back
+    /// in is the worse of the two costs — the operator can invite again.
+    /// </remarks>
+    /// <returns>Whether that machine was paired.</returns>
+    public async Task<bool> ForgetPeerAsync(NodePublic peer, CancellationToken cancellationToken = default)
+    {
+        bool found = false;
+        await UpdateAsync(
+            current =>
+            {
+                if (current.PeerWith(peer) is not { } known)
+                {
+                    found = false;
+                    return null;
+                }
+                found = true;
+                return current with
+                {
+                    Peers = [.. current.Peers.Where(other => other.Key != peer)],
+                    Pairings = [.. current.Pairings.Where(offer => offer.Id != known.InvitationId)],
+                };
+            },
+            cancellationToken).ConfigureAwait(false);
+        return found;
+    }
+
+    /// <summary>
+    /// Unpairs whatever a lowered <see cref="MaxPeers"/> no longer has room
+    /// for, keeping the machines seen most recently.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The bound is a security one, so a store written under a larger one
+    /// cannot simply be honoured: every peer in it comes back up able to
+    /// reach the application's handler. Dropping the least recently seen is
+    /// the choice that costs an operator least — the devices still in use are
+    /// the ones that stay.
+    /// </para>
+    /// <para>
+    /// The invitations the dropped machines were admitted by go with them,
+    /// for the reason <see cref="ForgetPeerAsync"/> withdraws one: a code
+    /// still in a dropped machine's hands is a way straight back in as soon
+    /// as unpairing another device makes room.
+    /// </para>
+    /// </remarks>
+    /// <returns>The machines that were unpaired, in the order they were stored.</returns>
+    public async Task<IReadOnlyList<PairedPeer>> EnforcePeerLimitAsync(CancellationToken cancellationToken = default)
+    {
+        IReadOnlyList<PairedPeer> dropped = [];
+        await UpdateAsync(
+            current =>
+            {
+                if (current.Peers.Count <= maxPeers)
+                {
+                    return null;
+                }
+
+                HashSet<NodePublic> kept =
+                [
+                    .. current.Peers.OrderByDescending(peer => peer.LastSeen).Take(maxPeers).Select(peer => peer.Key),
+                ];
+                dropped = [.. current.Peers.Where(peer => !kept.Contains(peer.Key))];
+                HashSet<Guid> withdrawn =
+                [
+                    .. dropped.Select(peer => peer.InvitationId).OfType<Guid>(),
+                ];
+                return current with
+                {
+                    Peers = [.. current.Peers.Where(peer => kept.Contains(peer.Key))],
+                    Pairings = [.. current.Pairings.Where(offer => !withdrawn.Contains(offer.Id))],
+                };
+            },
+            cancellationToken).ConfigureAwait(false);
+        return dropped;
     }
 
     /// <inheritdoc/>
-    public async Task<bool> AdmitAsync(
+    public async Task<PairedPeer?> AdmitAsync(
         NodePublic candidate,
-        string pairingToken,
+        LinkHello hello,
         CancellationToken cancellationToken)
     {
-        bool admitted = false;
+        PairedPeer? admitted = null;
+        bool lapsed = false;
         // The decision is made inside the update so that it and the pinning
         // are one step: two strangers arriving at once must not both be told
         // yes, with only the first of them written down.
         await UpdateAsync(
             current =>
             {
-                admitted = Admits(current, candidate, pairingToken);
-                return admitted && !current.IsPaired ? current with { PeerKey = candidate } : null;
+                admitted = null;
+                lapsed = false;
+                bool known = current.PeerWith(candidate) is not null;
+                if (!known
+                    && (current.Peers.Count >= maxPeers || Invitation(current, hello.PairingToken) is null))
+                {
+                    lapsed = current.Peers.Count < maxPeers && Lapsed(current, hello.PairingToken);
+                    return null;
+                }
+
+                PairingOffer? admittedBy = known ? null : Invitation(current, hello.PairingToken);
+                LinkState paired =
+                    WithPeer(current, candidate, hello.DisplayName, admittedBy?.Id) ?? current;
+                admitted = paired.PeerWith(candidate);
+                PairingOffer? spent = admittedBy is { SingleUse: true } ? admittedBy : null;
+                if (spent is null)
+                {
+                    return ReferenceEquals(paired, current) ? null : paired;
+                }
+                return paired with { Pairings = [.. paired.Pairings.Where(offer => offer.Id != spent.Id)] };
             },
             cancellationToken).ConfigureAwait(false);
+
+        // Thrown rather than returned, and only after the decision is
+        // written: the machine outside is told nothing but "no", while this
+        // machine's operator gets the one refusal that has an obvious cure —
+        // a fresh invitation — instead of hunting for a wrong token or a host
+        // that filled up.
+        if (lapsed)
+        {
+            throw new InvitationExpiredException(
+                $"{candidate} presented an invitation whose window has closed; invite it again");
+        }
         return admitted;
     }
-
-    private bool Admits(LinkState current, NodePublic candidate, string pairingToken) =>
-        current.IsPaired
-            ? current.PeerKey == candidate
-            : current.Pairing is { } offer && !offer.HasExpired(time) && offer.Matches(pairingToken);
 
     /// <summary>Records the region a host settled in, fixing its address for good.</summary>
     public Task RememberHomeRegionAsync(int regionId, CancellationToken cancellationToken = default) =>
@@ -116,8 +278,39 @@ internal sealed class PairingRecord(string appName, LinkState state, ILinkStore 
         UpdateAsync(
             current => current.PeerCode == code && current.PeerKey == host
                 ? null
-                : current with { PeerCode = code, PeerKey = host },
+                : WithPeer(current with { PeerCode = code, Peers = [] }, host, null),
             cancellationToken);
+
+    private PairingOffer? Invitation(LinkState current, string token) =>
+        current.Pairings.FirstOrDefault(offer => !offer.HasExpired(time) && offer.Matches(token));
+
+    // The invitation this token names, expired: the difference between a
+    // machine that was invited and left it too long and one that was never
+    // invited at all.
+    private bool Lapsed(LinkState current, string token) =>
+        current.Pairings.Any(offer => offer.HasExpired(time) && offer.Matches(token));
+
+    // Offers that ran out are dropped, except the newest, which is what the
+    // machine's published code is made of and is still worth showing.
+    private IEnumerable<PairingOffer> Live(IReadOnlyList<PairingOffer> offers) =>
+        offers.Where((offer, index) => index == offers.Count - 1 || !offer.HasExpired(time));
+
+    private LinkState? WithPeer(LinkState current, NodePublic key, string? name, Guid? invitationId = null)
+    {
+        DateTimeOffset now = time.GetUtcNow();
+        if (current.PeerWith(key) is not { } known)
+        {
+            return current with
+            {
+                Peers = [.. current.Peers, new PairedPeer(key, name, now, now) { InvitationId = invitationId }],
+            };
+        }
+
+        PairedPeer refreshed = known with { Name = name ?? known.Name, LastSeen = now };
+        return refreshed == known
+            ? null
+            : current with { Peers = [.. current.Peers.Select(peer => peer.Key == key ? refreshed : peer)] };
+    }
 
     // Writing only on a real change keeps a link that reconnects every few
     // minutes for a week from rewriting the same file every time.

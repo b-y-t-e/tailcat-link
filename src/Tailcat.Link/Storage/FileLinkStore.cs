@@ -1,6 +1,7 @@
 // Copyright (c) Andrzej Ból and contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Tailcat.Keys;
@@ -27,7 +28,17 @@ namespace Tailcat.Link.Storage;
 /// </remarks>
 public sealed class FileLinkStore : ILinkStore
 {
-    private const int CurrentVersion = 1;
+    /// <summary>
+    /// The shape written today: version 1 held one peer and one offer,
+    /// version 2 holds a list of each.
+    /// </summary>
+    /// <remarks>
+    /// A version 1 file is read and folded into the new shape, and written
+    /// back as version 2. A build older than this one refuses a version 2
+    /// file rather than silently losing every peer but the first, which is
+    /// the case to think about before rolling a deployment back.
+    /// </remarks>
+    private const int CurrentVersion = 2;
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -90,15 +101,14 @@ public sealed class FileLinkStore : ILinkStore
         byte[] key = _protector.Unprotect(Convert.FromBase64String(stored.PrivateKey));
         try
         {
+            (IReadOnlyList<PairingOffer> pairings, IReadOnlyList<PairedPeer> peers) = ReadPairings(stored);
             return new LinkState
             {
                 PrivateKey = NodePrivate.FromRaw32(key),
                 HomeRegionId = stored.HomeRegionId,
-                Pairing = stored.PairingToken is null || stored.PairingExpiresAt is null
-                    ? null
-                    : new PairingOffer(stored.PairingToken, stored.PairingExpiresAt.Value),
-                PeerCode = stored.PeerCode is null ? null : InvitationCode.Parse(stored.PeerCode),
-                PeerKey = stored.PeerKey is null ? default : NodePublic.FromRaw32(Convert.FromHexString(stored.PeerKey)),
+                Pairings = pairings,
+                Peers = peers,
+                PeerCode = stored.PeerCode is null ? null : InvitationCode.Parse(stored.PeerCode, CultureInfo.InvariantCulture),
             };
         }
         catch (Exception ex) when (ex is ArgumentException or FormatException)
@@ -130,10 +140,9 @@ public sealed class FileLinkStore : ILinkStore
                 Protector = _protector.Name,
                 PrivateKey = Convert.ToBase64String(_protector.Protect(raw)),
                 HomeRegionId = state.HomeRegionId,
-                PairingToken = state.Pairing?.Token,
-                PairingExpiresAt = state.Pairing?.ExpiresAt,
                 PeerCode = state.PeerCode?.Value,
-                PeerKey = state.IsPaired ? Convert.ToHexStringLower(state.PeerKey.Raw32()) : null,
+                Pairings = [.. state.Pairings.Select(StoredOffer.From)],
+                Peers = [.. state.Peers.Select(StoredPeer.From)],
             };
         }
         finally
@@ -217,7 +226,7 @@ public sealed class FileLinkStore : ILinkStore
         {
             throw new LinkException($"{path} holds no identity");
         }
-        if (stored.Version != CurrentVersion)
+        if (stored.Version > CurrentVersion)
         {
             throw new LinkException(
                 $"{path} was written by a newer version of this library (format {stored.Version})");
@@ -262,12 +271,122 @@ public sealed class FileLinkStore : ILinkStore
 
         public int? HomeRegionId { get; init; }
 
-        public string? PairingToken { get; init; }
-
-        public DateTimeOffset? PairingExpiresAt { get; init; }
-
         public string? PeerCode { get; init; }
 
+        public IReadOnlyList<StoredOffer>? Pairings { get; init; }
+
+        public IReadOnlyList<StoredPeer>? Peers { get; init; }
+
+        /// <summary>The single offer a version 1 file held. Read, never written.</summary>
+        public string? PairingToken { get; init; }
+
+        /// <inheritdoc cref="PairingToken"/>
+        public DateTimeOffset? PairingExpiresAt { get; init; }
+
+        /// <summary>The single peer a version 1 file held. Read, never written.</summary>
         public string? PeerKey { get; init; }
+    }
+
+    private sealed class StoredOffer
+    {
+        public Guid Id { get; init; }
+
+        public string Token { get; init; } = "";
+
+        public DateTimeOffset ExpiresAt { get; init; }
+
+        public string? Label { get; init; }
+
+        public bool SingleUse { get; init; }
+
+        public static StoredOffer From(PairingOffer offer) => new()
+        {
+            Id = offer.Id,
+            Token = offer.Token,
+            ExpiresAt = offer.ExpiresAt,
+            Label = offer.Label,
+            SingleUse = offer.SingleUse,
+        };
+
+        public PairingOffer ToOffer() =>
+            new(Token, ExpiresAt) { Id = Id, Label = Label, SingleUse = SingleUse };
+    }
+
+    private sealed class StoredPeer
+    {
+        public string Key { get; init; } = "";
+
+        public string? Name { get; init; }
+
+        public DateTimeOffset PairedAt { get; init; }
+
+        public DateTimeOffset LastSeen { get; init; }
+
+        /// <summary>Absent for a peer written before invitations were named.</summary>
+        public Guid? InvitationId { get; init; }
+
+        public static StoredPeer From(PairedPeer peer) => new()
+        {
+            Key = Convert.ToHexStringLower(peer.Key.Raw32()),
+            Name = peer.Name,
+            PairedAt = peer.PairedAt,
+            LastSeen = peer.LastSeen,
+            InvitationId = peer.InvitationId,
+        };
+
+        public PairedPeer ToPeer() =>
+            new(NodePublic.FromRaw32(Convert.FromHexString(Key)), Name, PairedAt, LastSeen)
+            {
+                InvitationId = InvitationId,
+            };
+    }
+
+    // Version 1 held exactly one of each. Folding it into a one-element list
+    // here is the whole of the migration: nothing above this class ever learns
+    // that the file had another shape. The two are read together because the
+    // fold has to tie them to one another.
+    private static (IReadOnlyList<PairingOffer> Offers, IReadOnlyList<PairedPeer> Peers) ReadPairings(StoredLink stored)
+    {
+        if (stored.Pairings is null && stored.Peers is null)
+        {
+            return FoldVersion1(stored);
+        }
+        return (
+            [.. (stored.Pairings ?? []).Select(offer => offer.ToOffer())],
+            [.. (stored.Peers ?? []).Select(peer => peer.ToPeer())]);
+    }
+
+    /// <summary>Reads the single offer and single peer a version 1 file held.</summary>
+    /// <remarks>
+    /// The two are given one invitation id, though the file never recorded
+    /// that they belonged together — and in version 1 they always did, since
+    /// there was only ever one of each and the offer outlived the pairing.
+    /// Without the id <see cref="PairingRecord.ForgetPeerAsync"/> would drop
+    /// the machine and leave the token it came in on: an unpaired device would
+    /// walk back in on the same still-valid code the moment the host had room,
+    /// which is the way back that unpairing is meant to close. The id is
+    /// minted rather than read because there is nothing to read; the next save
+    /// writes the file as version 2 and it is a stored fact from then on.
+    /// </remarks>
+    private static (IReadOnlyList<PairingOffer>, IReadOnlyList<PairedPeer>) FoldVersion1(StoredLink stored)
+    {
+        Guid invitationId = Guid.NewGuid();
+        IReadOnlyList<PairingOffer> offers = stored.PairingToken is null || stored.PairingExpiresAt is null
+            ? []
+            : [new PairingOffer(stored.PairingToken, stored.PairingExpiresAt.Value) { Id = invitationId }];
+        if (stored.PeerKey is null)
+        {
+            return (offers, []);
+        }
+
+        // A version 1 file recorded neither when the pairing was made nor when
+        // the peer was last seen. The file's own timestamps are no better a
+        // guess than this one, and nothing depends on it but a display.
+        DateTimeOffset unknown = DateTimeOffset.UnixEpoch;
+        PairedPeer peer = new(NodePublic.FromRaw32(Convert.FromHexString(stored.PeerKey)), null, unknown, unknown)
+        {
+            InvitationId = offers.Count == 0 ? null : invitationId,
+        };
+        return (offers, [peer]);
     }
 }

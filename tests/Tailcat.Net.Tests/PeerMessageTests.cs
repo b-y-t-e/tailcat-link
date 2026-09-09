@@ -7,6 +7,11 @@ using Tailcat.Keys;
 
 namespace Tailcat.Net.Tests;
 
+// TAILCAT001: the sealed-message design is what this file implements and
+// tests, so its experimental warning has nothing to tell it. Only a consumer
+// reaching for Seal or TryOpen from outside is meant to hear it.
+#pragma warning disable TAILCAT001
+
 /// <summary>
 /// Covers the framing and sealing of peer messages. These are the guarantees
 /// that let two nodes trust each other while a relay they don't control sits

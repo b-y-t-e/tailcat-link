@@ -9,6 +9,11 @@ using Tailcat.Keys;
 
 namespace Tailcat.Net.Tests;
 
+// TAILCAT001: the sealed-message design is what this file implements and
+// tests, so its experimental warning has nothing to tell it. Only a consumer
+// reaching for Seal or TryOpen from outside is meant to hear it.
+#pragma warning disable TAILCAT001
+
 /// <summary>
 /// Covers what happens when a node's addresses change underneath it — moving
 /// from Wi-Fi to a mobile network, say. Without this, every address a peer

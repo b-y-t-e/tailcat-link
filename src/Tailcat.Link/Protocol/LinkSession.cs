@@ -33,6 +33,7 @@ internal sealed class LinkSession : IAsyncDisposable
 {
     private readonly ITailcatConnection _connection;
     private readonly Func<LinkRequestHandler?> _handler;
+    private readonly Func<string, LinkChannelServe?> _channels;
     private readonly CancellationToken _handlerLifetime;
     private readonly ExchangeLedger _ledger;
     private readonly TransferRegistry _transfers;
@@ -41,6 +42,10 @@ internal sealed class LinkSession : IAsyncDisposable
     private readonly TimeProvider _time;
     private readonly CancellationTokenSource _cts = new();
     private readonly TaskCompletionSource<string> _ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly Lock _channelsMu = new();
+    private readonly HashSet<LinkChannelBase> _openChannels = [];
+    private bool _channelsEnded;
+    private string _endedReason = "the session ended";
     private Task? _serveLoop;
     private bool _disposed;
 
@@ -48,6 +53,11 @@ internal sealed class LinkSession : IAsyncDisposable
     /// <param name="handler">
     /// Read on every inbound request rather than captured, so an application
     /// that sets its handler after connecting still answers.
+    /// </param>
+    /// <param name="channels">
+    /// Finds what serves a channel of a given name, or null when nothing
+    /// does. Read on arrival rather than captured, for the same reason the
+    /// request handler is.
     /// </param>
     /// <param name="ledger">
     /// Shared with every other session of the same link, because that is where
@@ -79,6 +89,7 @@ internal sealed class LinkSession : IAsyncDisposable
     public LinkSession(
         ITailcatConnection connection,
         Func<LinkRequestHandler?> handler,
+        Func<string, LinkChannelServe?> channels,
         ExchangeLedger ledger,
         TransferRegistry transfers,
         TimeSpan requestTimeout,
@@ -88,6 +99,7 @@ internal sealed class LinkSession : IAsyncDisposable
     {
         _connection = connection;
         _handler = handler;
+        _channels = channels;
         _handlerLifetime = linkClosed;
         _ledger = ledger;
         _transfers = transfers;
@@ -102,8 +114,64 @@ internal sealed class LinkSession : IAsyncDisposable
     /// <summary>Completes with the reason this session ended.</summary>
     public Task<string> Ended => _ended.Task;
 
+    /// <summary>Cancelled the moment this session stops carrying anything.</summary>
+    /// <remarks>
+    /// A channel holds this rather than the link's token: it ends with the
+    /// session that carries it, which is the whole of what a channel promises
+    /// instead of a transfer's durability.
+    /// </remarks>
+    public CancellationToken Alive => _cts.Token;
+
     /// <summary>Starts answering the peer.</summary>
     public void Start() => _serveLoop ??= Task.Run(() => ServeLoopAsync(_cts.Token), CancellationToken.None);
+
+    /// <summary>
+    /// Opens a channel on this session and returns the stream its frames go
+    /// on, once the peer has said it has a handler for the name.
+    /// </summary>
+    /// <exception cref="RemoteHandlerException">If the peer has no handler for that name.</exception>
+    /// <exception cref="LinkException">If the session could not carry it.</exception>
+    public async Task<Stream> OpenChannelAsync(string name, CancellationToken cancellationToken)
+    {
+        using IdleTimeout idle = new(_requestTimeout, _time);
+        Stream? stream = null;
+        try
+        {
+            using CancellationTokenSource cts =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token, idle.Token);
+            stream = await _connection.OpenStreamAsync(cts.Token).ConfigureAwait(false);
+            idle.Restart();
+            await LinkFrame.WriteAsync(
+                    stream, (byte)LinkFrameKind.Channel, Guid.NewGuid(), ChannelFrame.EncodeName(name), idle, cts.Token)
+                .ConfigureAwait(false);
+
+            (byte status, _, byte[] answer) =
+                await LinkFrame.ReadAsync(stream, idle, cts.Token).ConfigureAwait(false);
+            if (status == (byte)LinkFrameStatus.Failed)
+            {
+                throw new RemoteHandlerException(
+                    $"the other machine would not take the channel: {Encoding.UTF8.GetString(answer)}");
+            }
+            return stream;
+        }
+        catch (Exception ex) when (IsSessionFailure(ex) && !cancellationToken.IsCancellationRequested)
+        {
+            if (stream is not null)
+            {
+                await stream.DisposeAsync().ConfigureAwait(false);
+            }
+            string reason = idle.Expired ? $"the other machine sent nothing for {_requestTimeout}" : ex.Message;
+            throw new LinkException(reason, ex);
+        }
+        catch (RemoteHandlerException)
+        {
+            if (stream is not null)
+            {
+                await stream.DisposeAsync().ConfigureAwait(false);
+            }
+            throw;
+        }
+    }
 
     /// <summary>Sends a request and returns the peer's answer.</summary>
     /// <param name="exchange">
@@ -297,7 +365,95 @@ internal sealed class LinkSession : IAsyncDisposable
             .ConfigureAwait(false);
 
     /// <summary>Declares the session over, for the first caller to say so.</summary>
-    public void Fail(string reason) => _ended.TrySetResult(reason);
+    public void Fail(string reason)
+    {
+        if (!_ended.TrySetResult(reason))
+        {
+            return;
+        }
+
+        // A channel is not durable: it ends with the session carrying it, and
+        // the application is told so here rather than on a send it may never
+        // make. Not awaited, because failing is what every path that touches
+        // the network does on its way out and none of them may block on an
+        // application's Closed handler; EndChannelsAsync swallows what those
+        // handlers throw for the same reason.
+        _ = EndChannelsAsync(reason);
+    }
+
+    /// <summary>
+    /// Takes on a channel opened on this session, so that the session ending
+    /// ends the channel too.
+    /// </summary>
+    /// <remarks>
+    /// The channel the peer opens is ended by the loop serving it, which owns
+    /// the handler and the stream; this is for the one this end opened, which
+    /// nothing else is watching.
+    /// </remarks>
+    public async Task<TChannel> HoldAsync<TChannel>(TChannel channel)
+        where TChannel : LinkChannelBase
+    {
+        bool tooLate;
+        lock (_channelsMu)
+        {
+            tooLate = _channelsEnded;
+            if (!tooLate)
+            {
+                _openChannels.Add(channel);
+            }
+        }
+
+        if (tooLate)
+        {
+            // The session died while the channel was being opened. Nothing
+            // else is going to say so: the ending has already been through
+            // every channel this session was holding.
+            await channel.EndWithSessionAsync(_endedReason).ConfigureAwait(false);
+            return channel;
+        }
+
+        // A session may carry thousands of channels one after another, so each
+        // is let go of as it closes rather than kept until the session ends.
+        channel.Closed += ForgetChannel;
+        return channel;
+    }
+
+    private void ForgetChannel(object? sender, ChannelClosedEventArgs ending)
+    {
+        if (sender is not LinkChannelBase channel)
+        {
+            return;
+        }
+        lock (_channelsMu)
+        {
+            _openChannels.Remove(channel);
+        }
+    }
+
+    private async Task EndChannelsAsync(string reason)
+    {
+        LinkChannelBase[] open;
+        lock (_channelsMu)
+        {
+            _channelsEnded = true;
+            _endedReason = reason;
+            open = [.. _openChannels];
+            _openChannels.Clear();
+        }
+
+        foreach (LinkChannelBase channel in open)
+        {
+            try
+            {
+                await channel.EndWithSessionAsync(reason).ConfigureAwait(false);
+            }
+#pragma warning disable CA1031 // One channel's ending, or an application's handler for it, must not stop the rest.
+            catch (Exception)
+#pragma warning restore CA1031
+            {
+            }
+        }
+    }
 
     private async Task<(byte Status, byte[] Payload)> ExchangeAsync(
         LinkFrameKind kind,
@@ -420,6 +576,10 @@ internal sealed class LinkSession : IAsyncDisposable
                 await _transfers.DeliverAsync(exchange, payload, stream, ct).ConfigureAwait(false);
                 return;
 
+            case LinkFrameKind.Channel:
+                await ServeChannelAsync(exchange, payload, stream, ct).ConfigureAwait(false);
+                return;
+
             case LinkFrameKind.Request:
                 // Through the ledger, so that a request the sender is retrying
                 // is answered from what its first arrival produced.
@@ -438,6 +598,32 @@ internal sealed class LinkSession : IAsyncDisposable
                     ct).ConfigureAwait(false);
                 return;
         }
+    }
+
+    /// <summary>
+    /// Answers whether anything here takes this channel, and if so hands the
+    /// stream to it for as long as it keeps reading.
+    /// </summary>
+    private async Task ServeChannelAsync(Guid exchange, byte[] payload, Stream stream, CancellationToken ct)
+    {
+        string name = ChannelFrame.DecodeName(payload);
+        if (_channels(name) is not { } serve)
+        {
+            await AnswerAsync(
+                stream,
+                exchange,
+                new LinkAnswer(
+                    LinkFrameStatus.Failed,
+                    Encoding.UTF8.GetBytes($"the other machine has no \"{name}\" channel")),
+                ct).ConfigureAwait(false);
+            return;
+        }
+
+        await AnswerAsync(stream, exchange, new LinkAnswer(LinkFrameStatus.Ok, default), ct).ConfigureAwait(false);
+        // The session's own token, not the link's: a channel is not resumed,
+        // so a handler still reading one when the session dies is told so
+        // rather than left waiting for frames that will never come.
+        await serve(stream, _cts.Token).ConfigureAwait(false);
     }
 
     /// <summary>Runs the application's handler and turns whatever it does into an answer.</summary>

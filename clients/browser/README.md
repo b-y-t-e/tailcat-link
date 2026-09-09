@@ -57,7 +57,28 @@ the same protocol and the same promises.
   same way however often it is asked, so a refused pairing ends the link
   rather than being retried on the backoff schedule: the stored code is
   dropped, `link.events` fires `failed`, and every pending and later
-  `request()` rejects with `PairingRefusedError` instead of a deadline.
+  `request()` rejects with `PairingRefusedError` instead of a deadline. Every
+  failure this library raises is a `LinkError` — `PairingRefusedError`,
+  `LinkTimeoutError`, `LinkClosedError`, `RemoteHandlerError` — matching the
+  exceptions of the same names in .NET, so a page catches the same
+  distinctions the other end draws.
+- **A channel, for what is neither a request nor a file.** Realtime frames —
+  audio, telemetry, input events — are a round trip and a ledger entry each as
+  requests. `openChannel` is the third shape: **ordered within the channel,
+  and not durable**, so it ends with the session under it rather than being
+  resumed, and `channel.closed.reason` says which of `peer-closed`,
+  `local-closed` and `session-ended` happened.
+  [docs/channels.md](../../docs/channels.md) is the wire format.
+
+```js
+const audio = await link.openChannel("audio");
+await audio.send(frame);
+await audio.close();
+
+link.onChannel("telemetry", async (channel) => {
+  for await (const frame of channel.read()) consume(frame);
+});
+```
 
 ## Options
 
@@ -65,6 +86,7 @@ the same protocol and the same promises.
 | --- | --- | --- |
 | `appName` | — | names the stored identity, so one origin can hold several pairings |
 | `invitationCode` | `null` | needed the first time only |
+| `displayName` | `null` | what the host lists this browser as; it authenticates nothing |
 | `derpMap` | `"/derpmap.json"` | where to read the relay list; must be same-origin (below) |
 | `relayHost` | — | dial this relay and skip the map entirely |
 | `store` | IndexedDB | `memoryStore()` for a page that would rather persist nothing |
@@ -91,7 +113,10 @@ obvious place to land on the other.
 | `src/link.js` | `DurableLink.cs` | the reconnect loop, and a request re-sent across it |
 | `src/link-session.js` | `LinkSession.cs` | one session: serving, one attempt, the heartbeat |
 | `src/session-source.js` | `SessionSources.cs` | where the next session comes from |
-| `src/pairing-handshake.js` | `PairingHandshake.cs` | the token, offered on every session |
+| `src/pairing-handshake.js` | `PairingHandshake.cs` | the hello, offered on every session |
+| `src/link-hello.js` | `LinkHello.cs` | which invitation this browser holds, and what to call it |
+| `src/link-channel.js` | `LinkChannel.cs` | frames on a stream of their own, ordered and not durable |
+| `src/errors.js` | `LinkExceptions.cs` | the failures worth catching apart from one another |
 | `src/link-frame.js` | `LinkFrame.cs` | one request per stream, length-prefixed |
 | `src/idle-timeout.js` | `IdleTimeout.cs` | silence, not duration, is what times a request |
 | `src/exchange-ledger.js` | `ExchangeLedger.cs` | a retried request answered again, never run again |

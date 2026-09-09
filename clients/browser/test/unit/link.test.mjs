@@ -10,9 +10,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { TailcatLink } from "../../src/link.js";
+import { ChannelCloseReason } from "../../src/link-channel.js";
 import { PairingRefusedError } from "../../src/pairing-handshake.js";
 import { memoryStore } from "../../src/store.js";
-import { delay } from "../../src/bytes.js";
+import { delay, str, utf8 } from "../../src/bytes.js";
 import { LoopbackHost, loopbackDialer } from "./loopback.mjs";
 import { invitationCode } from "./invitation.mjs";
 
@@ -190,6 +191,125 @@ test("closing lets an answer already produced leave before the session goes", as
 
     await link.close();
     assert.equal(await asked, "slowly: wait for me");
+  } finally {
+    await link.close();
+  }
+});
+
+test("the host is told what this browser calls itself, and pairs without being told", async () => {
+  const named = await linkedTo(() => ({}), { displayName: "kitchen phone" });
+  const anonymous = await linkedTo(() => ({}));
+  try {
+    await named.hosts[0].paired.promise;
+    await anonymous.hosts[0].paired.promise;
+    assert.equal(named.hosts[0].hello.displayName, "kitchen phone");
+    assert.equal(anonymous.hosts[0].hello.displayName, null);
+  } finally {
+    await named.link.close();
+    await anonymous.link.close();
+  }
+});
+
+test("a channel carries its frames to the host in order, and says so when it is closed on purpose", async () => {
+  const { link, hosts } = await linkedTo(() => ({}));
+  try {
+    await hosts[0].paired.promise;
+    const audio = await link.openChannel("audio");
+    for (const frame of ["one", "two", "three"]) await audio.send(utf8(frame));
+    await audio.close();
+
+    await until(() => hosts[0].channels[0]?.frames.length === 3, "three frames to arrive");
+    assert.deepEqual(hosts[0].channels[0].frames.map(str), ["one", "two", "three"]);
+    assert.equal(audio.closed.reason, ChannelCloseReason.LocalClosed);
+    await assert.rejects(audio.send(utf8("after")), /has ended/);
+  } finally {
+    await link.close();
+  }
+});
+
+test("closing a channel waits for the frames already queued rather than cutting one in half", async () => {
+  const { link, hosts } = await linkedTo(() => ({}));
+  try {
+    await hosts[0].paired.promise;
+    const audio = await link.openChannel("audio");
+    // Not awaited: the goodbye marker has to queue behind these, or it lands
+    // in the middle of one and the host reads a corrupt length instead.
+    const sending = ["one", "two", "three"].map((frame) => audio.send(utf8(frame)));
+    await audio.close();
+    await Promise.all(sending);
+
+    await until(() => hosts[0].channels[0]?.frames.length === 3, "every queued frame to arrive");
+    assert.deepEqual(hosts[0].channels[0].frames.map(str), ["one", "two", "three"]);
+    assert.equal(audio.closed.reason, ChannelCloseReason.LocalClosed);
+  } finally {
+    await link.close();
+  }
+});
+
+test("an onclose listener that throws does not escape the close that ran it", async () => {
+  const { link, hosts } = await linkedTo(() => ({}));
+  try {
+    await hosts[0].paired.promise;
+    const audio = await link.openChannel("audio");
+    audio.onclose = () => {
+      throw new Error("the page tore its pipeline down badly");
+    };
+
+    // Closing is also the failure path of send(), so a listener escaping from
+    // here would replace the reason the caller is being told about.
+    await audio.close();
+    assert.equal(audio.closed.reason, ChannelCloseReason.LocalClosed);
+  } finally {
+    await link.close();
+  }
+});
+
+test("a channel dies with its session rather than being resumed on the next one", async () => {
+  const { link, hosts, connections } = await linkedTo(() => ({}));
+  try {
+    await hosts[0].paired.promise;
+    const audio = await link.openChannel("audio");
+    connections[0].cut();
+
+    await until(() => !audio.open, "the channel to notice");
+    assert.equal(audio.closed.reason, ChannelCloseReason.SessionEnded);
+    // The link itself is not lost with it: that is the difference between a
+    // channel and everything else the link carries.
+    await until(() => hosts.length === 2, "a second session");
+    assert.equal(await link.request("still here?"), "STILL HERE?");
+  } finally {
+    await link.close();
+  }
+});
+
+test("a channel the host opens reaches the handler listening for its name", async () => {
+  const { link, hosts } = await linkedTo(() => ({}));
+  const heard = [];
+  const ended = new Promise((resolve) => {
+    link.onChannel("telemetry", async (channel) => {
+      for await (const frame of channel.read()) heard.push(str(frame));
+      resolve(channel.closed.reason);
+    });
+  });
+
+  try {
+    await hosts[0].paired.promise;
+    const telemetry = await hosts[0].openChannel("telemetry");
+    await telemetry.send(utf8("42"));
+    await telemetry.close();
+
+    assert.equal(await ended, ChannelCloseReason.PeerClosed);
+    assert.deepEqual(heard, ["42"]);
+  } finally {
+    await link.close();
+  }
+});
+
+test("a channel nothing is listening for is refused rather than swallowed", async () => {
+  const { link, hosts } = await linkedTo(() => ({}));
+  try {
+    await hosts[0].paired.promise;
+    await assert.rejects(hosts[0].openChannel("audio"), /no "audio" channel/);
   } finally {
     await link.close();
   }

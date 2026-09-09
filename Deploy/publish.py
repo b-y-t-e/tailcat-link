@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Publish Tailcat.Link to NuGet.org.
+Publish Tailcat.Link and the packages beside it to NuGet.org.
 
-One package goes out. The three libraries under it — Tailcat, Tailcat.Derp, Tailcat.Net — are not
-packages of their own; their assemblies are bundled into Tailcat.Link's lib/ folder by a target in
-its csproj. That bundling is silent when it breaks: the build stays green, the package still builds,
-and the failure only shows up as a TypeLoadException on a consumer's machine. So this script opens
-the .nupkg and refuses to push one that is missing an assembly.
+Four packages go out, all on the one version: Tailcat.Link, and the three a consumer may ignore —
+Tailcat.Link.Json, Tailcat.Link.Extensions.DependencyInjection and Tailcat.TestSupport. The three
+libraries under Tailcat.Link — Tailcat, Tailcat.Derp, Tailcat.Net — are not packages of their own;
+their assemblies are bundled into Tailcat.Link's lib/ folder by a target in its csproj. That
+bundling is silent when it breaks: the build stays green, the package still builds, and the failure
+only shows up as a TypeLoadException on a consumer's machine. So this script opens each .nupkg and
+refuses to push one that is missing an assembly or the licence.
 
 Usage:
     python publish.py                     # test, bump the patch, build, pack, verify, push
@@ -37,16 +39,24 @@ SOLUTION   = REPO_ROOT / "Tailcat.slnx"
 ARTIFACTS  = REPO_ROOT / "artifacts"
 ENV_FILE   = SCRIPT_DIR / ".env"
 
-PACKAGE_ID = "Tailcat.Link"
-CSPROJ     = REPO_ROOT / "src" / "Tailcat.Link" / "Tailcat.Link.csproj"
-
-# Every assembly a consumer needs. Tailcat.Link.dll is its own build output; the rest are bundled
-# from projects that are not packages, which is the part that breaks quietly.
-EXPECTED_ASSEMBLIES = [
-    "Tailcat.Link.dll",
-    "Tailcat.Net.dll",
-    "Tailcat.Derp.dll",
-    "Tailcat.dll",
+# Everything that is published, in dependency order: the three beside Tailcat.Link depend on it as
+# a package, so pushing them first would briefly offer a dependency nobody can resolve. Each entry
+# names the assemblies its lib/ folder must carry — Tailcat.Link's are mostly bundled from projects
+# that are not packages of their own, which is the part that breaks quietly.
+PACKAGES = [
+    ("Tailcat.Link",
+     REPO_ROOT / "src" / "Tailcat.Link" / "Tailcat.Link.csproj",
+     ["Tailcat.Link.dll", "Tailcat.Net.dll", "Tailcat.Derp.dll", "Tailcat.dll"]),
+    ("Tailcat.Link.Json",
+     REPO_ROOT / "src" / "Tailcat.Link.Json" / "Tailcat.Link.Json.csproj",
+     ["Tailcat.Link.Json.dll"]),
+    ("Tailcat.Link.Extensions.DependencyInjection",
+     REPO_ROOT / "src" / "Tailcat.Link.Extensions.DependencyInjection"
+               / "Tailcat.Link.Extensions.DependencyInjection.csproj",
+     ["Tailcat.Link.Extensions.DependencyInjection.dll"]),
+    ("Tailcat.TestSupport",
+     REPO_ROOT / "tests" / "Tailcat.TestSupport" / "Tailcat.TestSupport.csproj",
+     ["Tailcat.TestSupport.dll"]),
 ]
 
 # VersionPrefix rather than Version: the repository leaves room for a -preview suffix.
@@ -116,7 +126,7 @@ def find_nupkg(package_id: str, version: str) -> Path:
     return matches[0]
 
 
-def verify_package(nupkg: Path):
+def verify_package(nupkg: Path, expected_assemblies: list):
     """Refuse to push a package whose bundled assemblies went missing.
 
     A pushed version can be unlisted but never replaced, so this is checked here rather than
@@ -125,7 +135,7 @@ def verify_package(nupkg: Path):
     with zipfile.ZipFile(nupkg) as z:
         names = z.namelist()
     libs = {Path(n).name for n in names if n.startswith("lib/")}
-    missing = [a for a in EXPECTED_ASSEMBLIES if a not in libs]
+    missing = [a for a in expected_assemblies if a not in libs]
     if missing:
         print(f"\nERROR: {nupkg.name} is missing bundled {', '.join(missing)}")
         print("       The IncludeReferencedProjectsInPackage target in Tailcat.Link.csproj is what")
@@ -141,7 +151,8 @@ def verify_package(nupkg: Path):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Publish Tailcat.Link to NuGet.org")
+    parser = argparse.ArgumentParser(
+        description="Publish Tailcat.Link and the packages beside it to NuGet.org")
     parser.add_argument("--dry-run",    action="store_true", help="Skip the push step (implies --no-bump)")
     parser.add_argument("--no-bump",    action="store_true", help="Skip the version bump")
     parser.add_argument("--set-version",                     help="Release this exact version (x.y.z)")
@@ -188,24 +199,30 @@ def main():
     run(["dotnet", "build", str(SOLUTION), "-c", "Release", "-warnaserror"], cwd=REPO_ROOT)
 
     ARTIFACTS.mkdir(exist_ok=True)
-    run(["dotnet", "pack", str(CSPROJ), "-c", "Release", "-o", str(ARTIFACTS)], cwd=REPO_ROOT)
+    packed = []
+    for package_id, csproj, expected_assemblies in PACKAGES:
+        run(["dotnet", "pack", str(csproj), "-c", "Release", "-o", str(ARTIFACTS)], cwd=REPO_ROOT)
+        nupkg = find_nupkg(package_id, version)
+        verify_package(nupkg, expected_assemblies)
+        packed.append((package_id, nupkg))
 
-    nupkg = find_nupkg(PACKAGE_ID, version)
-    verify_package(nupkg)
-
-    # 4. Push.
+    # 4. Push. Everything is packed and verified before anything goes out: a half-released version
+    #    is the one state nobody can undo, since a pushed version can be unlisted but never replaced.
     if args.dry_run:
-        print(f"\n[dry-run] Skipping push of {nupkg.name} to NuGet.org.")
+        names = ", ".join(nupkg.name for _, nupkg in packed)
+        print(f"\n[dry-run] Skipping push of {names} to NuGet.org.")
         return
 
-    run([
-        "dotnet", "nuget", "push", str(nupkg),
-        "--api-key", api_key,
-        "--source",  "https://api.nuget.org/v3/index.json",
-        "--skip-duplicate",
-    ], cwd=REPO_ROOT)
+    for _, nupkg in packed:
+        run([
+            "dotnet", "nuget", "push", str(nupkg),
+            "--api-key", api_key,
+            "--source",  "https://api.nuget.org/v3/index.json",
+            "--skip-duplicate",
+        ], cwd=REPO_ROOT)
 
-    print(f"\nPublished {PACKAGE_ID} {version} to NuGet.org")
+    published = ", ".join(package_id for package_id, _ in packed)
+    print(f"\nPublished {published} {version} to NuGet.org")
     print("Indexing takes a few minutes before `dotnet add package` finds it.")
 
 

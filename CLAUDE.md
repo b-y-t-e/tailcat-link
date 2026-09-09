@@ -38,7 +38,7 @@ npm --prefix clients/browser ci
 npm --prefix clients/browser test
 npm --prefix clients/browser run interop -- <invitation-code>
 
-dotnet pack -c Release -o artifacts   # builds the one published package
+dotnet pack -c Release -o artifacts   # builds the four published packages
 python Deploy/publish.py --dry-run    # everything a release does but the push
 ```
 
@@ -64,7 +64,9 @@ Tailcat        wire format (ConnBlob/CBOR), keys, DERP map fetching, proxying
 Tailcat.Derp   DERP relay client: framing, TLS, reconnection, region pool
 Tailcat.Net    sessions: STUN, sealed control messages, path selection, QUIC
 Tailcat.Link   the durable, paired link on top: stored identity, reconnection,
-               requests, and transfers of content too large to be a request
+               requests, channels, transfers, and a host that holds several peers
+Tailcat.Link.Json  typed requests over System.Text.Json, as its own package
+Tailcat.Link.Extensions.DependencyInjection  the host with the app's lifetime
 Tailcat.Cli    the pure logic from cmd/tailcat
 Tailcat.WebDemo  the webdemo package
 Tailcat.Demo   tailcat-demo, for verifying a link between two machines
@@ -86,7 +88,10 @@ without a build failing. Add to that file when you change one.
 
 ## Publishing
 
-**Only `Tailcat.Link` is a package.** Everything else has `IsPackable=false`
+**`Tailcat.Link` is the package that matters.** `Tailcat.Link.Json`,
+`Tailcat.Link.Extensions.DependencyInjection` and `tests/Tailcat.TestSupport`
+are published beside it and depend on it as a package dependency; a consumer
+can ignore all three. Everything else has `IsPackable=false`
 (the default, set in `Directory.Build.props`) and the assemblies of `Tailcat`,
 `Tailcat.Derp` and `Tailcat.Net` ship *inside* the `Tailcat.Link` package,
 bundled by the `IncludeReferencedProjectsInPackage` target in its csproj. Two
@@ -140,9 +145,37 @@ These were each found the hard way; the README explains them at length.
   it yet, and refuses a transfer rather than hanging. Everything about a
   transfer that outlives a session lives in `TransferRegistry` and
   `IncomingTransfer` on the link, never in `LinkSession`.
+- **A channel is not a transfer and not a message.** `OpenChannelAsync` is
+  ordered within the channel and *not durable*: it ends with the session and
+  is never resumed, which is the point rather than a gap. `docs/channels.md`
+  is the specification, and `clients/browser` speaks it: `link.onChannel` and
+  `link.openChannel` are `link-channel.js`, the shape of `LinkChannel.cs`. A
+  name nothing is listening for is refused rather than swallowed.
+- **A host may hold several peers.** `HostManyAsync` is the real thing;
+  `HostAsync` is it with `MaxPeers = 1` behind `ILink`, and refuses options
+  asking for more rather than narrowing them, because narrowing unpairs stored
+  peers. Never give the facade pairing rules of its own — the two would drift, and the drift would be in
+  who is let in. `MaxPeers` is a *security* bound: every admitted peer reaches
+  the application's handler, and lowering it unpairs the peers already stored —
+  `PairingRecord.EnforcePeerLimitAsync`, run before a host starts, drops the
+  ones seen longest ago. `ILinkPeer.Name` comes from the other machine and
+  is authenticated by nothing.
+- **The stored file is versioned.** Version 1 held one peer and one offer;
+  version 2 holds a list of each and is what is written now. A version 1 file
+  is folded into the new shape on read, and an older build refuses a version 2
+  file rather than losing every peer but the first. `LinkHello` does the same
+  job on the wire: a bare pairing token is read as the older shape, so the
+  browser client still pairs.
 - **Writing into a dead session succeeds.** The bytes go to a relay with
   nobody to hand them to, so a broken link is silent rather than faulty.
   Anything that must notice needs a heartbeat and a per-request timeout.
+- **Half a DERP frame poisons the connection.** A send cancelled after the
+  header reached the wire left five bytes the relay took for the next frame's
+  header, and every packet after it was misrouted until the process ended —
+  which looked exactly like a peer that never answered. `DerpFrameStream`
+  writes header and payload as one write and closes the stream when a write
+  fails anyway, so the connection is reconnected rather than silently out of
+  step. Anything else framing bytes over a stream owes the same.
 
 ## Conventions
 
@@ -156,9 +189,11 @@ These were each found the hard way; the README explains them at length.
   Tailscale's public, rate-limited relays, so CI must not depend on them.
   Give them generous timeouts — a shared relay under load varies a lot.
   Because CI never runs them, a live test is *extra* coverage, never the only
-  coverage: `tests/Tailcat.TestSupport` holds an in-memory DERP relay and a
-  manually advanced clock, and `TailcatNodeOptions.ConnectRelay` is the seam
-  that stands a whole node up against them offline.
+  coverage: `tests/Tailcat.TestSupport` holds an in-memory DERP relay, the
+  gateway factory that builds real nodes against it, and a manually advanced
+  clock; `TailcatNodeOptions.ConnectRelay` is the seam that stands a whole
+  node up against them offline. That project ships as a package, so its public
+  surface is documented and is somebody else's API — change it accordingly.
 - **Every `IAsyncDisposable` here is idempotent** (`_disposed` guard) and has
   a `DisposingTwiceIsHarmless` test. Keep that true for new ones.
 - **Anything measuring time takes a `TimeProvider`**, so tests never sleep.

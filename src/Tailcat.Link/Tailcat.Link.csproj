@@ -71,6 +71,10 @@
     <!-- DPAPI: on Windows the stored identity key is encrypted to the user
          account, so a readable file is not a usable key. -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+    <!-- ILogger, so what the link is doing can be filtered and correlated
+         rather than only printed. Abstractions only: the application chooses
+         the implementation. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <!-- Transitive through the bundled assemblies rather than through NuGet,
          because the projects that reference them are not packages. Declared
          here so a consumer still gets them restored. -->
@@ -81,6 +85,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Tailcat.Link.Tests" />
+    <InternalsVisibleTo Include="Tailcat.TestSupport" />
   </ItemGroup>
 
   <ItemGroup>
