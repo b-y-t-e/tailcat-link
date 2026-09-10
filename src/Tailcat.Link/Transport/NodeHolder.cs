@@ -19,6 +19,7 @@ namespace Tailcat.Link.Transport;
 internal sealed class NodeHolder(INodeGatewayFactory factory, Func<LinkState> state) : IAsyncDisposable
 {
     private readonly Lock _mu = new();
+    private readonly SemaphoreSlim _building = new(1, 1);
     private INodeGateway? _gateway;
     private bool _disposed;
 
@@ -44,6 +45,17 @@ internal sealed class NodeHolder(INodeGatewayFactory factory, Func<LinkState> st
     }
 
     /// <summary>Returns the node, building it from the stored identity if there is none.</summary>
+    /// <remarks>
+    /// One at a time, and never a spare. A host has two callers here — its
+    /// accept loop and every peer's supervision loop — and letting both build
+    /// a node was not the harmless waste it looked like. A node announces
+    /// itself to the relay the moment it exists and the relay keeps one
+    /// connection per key, so the loser's login displaced the winner's and was
+    /// then thrown away. What was left was a machine that believed it was
+    /// listening and whose published address had nobody behind it. Relayed,
+    /// that is unreachable outright; where QUIC could find a direct path it
+    /// stayed hidden.
+    /// </remarks>
     public async Task<INodeGateway> EnsureAsync(CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -52,36 +64,29 @@ internal sealed class NodeHolder(INodeGatewayFactory factory, Func<LinkState> st
             return existing;
         }
 
-        // Same key and, for a host, the same pinned region: the rebuilt node
-        // has the address the peer already has.
-        LinkState stored = state();
-        INodeGateway built = await factory
-            .CreateAsync(stored.PrivateKey, stored.HomeRegionId, cancellationToken).ConfigureAwait(false);
+        await _building.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // Asked again with the turn in hand: whoever held it has just
+            // built the node this caller was about to build a second one of.
+            if (Current is { } waited)
+            {
+                return waited;
+            }
+            ObjectDisposedException.ThrowIf(_disposed, this);
 
-        INodeGateway? spare = null;
-        INodeGateway held;
-        lock (_mu)
-        {
-            if (_gateway is null)
-            {
-                _gateway = built;
-            }
-            else
-            {
-                spare = built;
-            }
-            // Taken under the same lock that chose the winner. Reading it
-            // afterwards would let a DiscardAsync in between leave nothing to
-            // return but the node this call is about to dispose, and the
-            // caller would dial a disposed one.
-            held = _gateway;
+            // Same key and, for a host, the same pinned region: the rebuilt
+            // node has the address the peer already has.
+            LinkState stored = state();
+            INodeGateway built = await factory
+                .CreateAsync(stored.PrivateKey, stored.HomeRegionId, cancellationToken).ConfigureAwait(false);
+            Adopt(built);
+            return built;
         }
-        if (spare is not null)
+        finally
         {
-            // Somebody else got there first while this one was being built.
-            await spare.DisposeAsync().ConfigureAwait(false);
+            _building.Release();
         }
-        return held;
     }
 
     /// <summary>Throws the node away, so the next <see cref="EnsureAsync"/> builds a fresh one.</summary>
@@ -108,5 +113,6 @@ internal sealed class NodeHolder(INodeGatewayFactory factory, Func<LinkState> st
         }
         _disposed = true;
         await DiscardAsync().ConfigureAwait(false);
+        _building.Dispose();
     }
 }
