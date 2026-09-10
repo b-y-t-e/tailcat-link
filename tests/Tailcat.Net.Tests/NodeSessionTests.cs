@@ -333,6 +333,15 @@ public class NodeSessionTests
     [Fact]
     public async Task AnAbandonedHandshakeIsSweptAway()
     {
+        if (!QuicListener.IsSupported)
+        {
+            // What is swept is a pending QUIC accept, and the hello below
+            // offers QUIC alone, which is what PeerHello means by an empty
+            // list. A node with no QUIC shares nothing with it and refuses it
+            // outright, so there is no abandoned handshake to sweep.
+            Assert.Skip("this machine has no QUIC; Windows 10 has none and Linux needs libmsquic");
+        }
+
         using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
             TestContext.Current.CancellationToken);
         cts.CancelAfter(TimeSpan.FromMinutes(1));

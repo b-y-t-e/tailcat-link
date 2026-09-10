@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Net;
+using System.Net.Quic;
 using System.Net.Sockets;
 using Tailcat.Derp;
 using Tailcat.Keys;
@@ -237,6 +238,15 @@ public class StunDiscoveryTests
     [Fact]
     public async Task AMovedNatMappingIsAnnouncedToLiveSessions()
     {
+        if (!QuicListener.IsSupported)
+        {
+            // A moved mapping is announced so that a peer can go on probing
+            // the right port, and probing is the direct path — which only the
+            // QUIC transport has. Relayed alone, there is no path whose remote
+            // endpoint could move.
+            Assert.Skip("this machine has no QUIC; Windows 10 has none and Linux needs libmsquic");
+        }
+
         using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
             TestContext.Current.CancellationToken);
         cts.CancelAfter(TimeSpan.FromMinutes(2));
