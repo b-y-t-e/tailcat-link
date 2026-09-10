@@ -36,6 +36,29 @@ jobs:
       - name: Test
         run: dotnet test --no-build --configuration Release
 
+      # The runner writes the failures to a file beside the assembly and puts
+      # only the counts in the step log, so a red build says how many broke
+      # and never which — and a platform-specific failure is exactly the one
+      # nobody can reproduce from the machine they have. This is what makes it
+      # readable without pushing a commit to find out.
+      - name: Say what failed
+        if: failure()
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          for log in tests/**/TestResults/*.log; do
+            echo "::group::$log"
+            cat "$log"
+            echo "::endgroup::"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results-${{ matrix.os }}
+          path: tests/**/TestResults/*
+          if-no-files-found: ignore
+
   # Tailcat.Link bundles the assemblies of four projects that are not packages
   # of their own, and the three packages beside it depend on it as a package.
   # Both are easy to break without noticing, because the build stays green

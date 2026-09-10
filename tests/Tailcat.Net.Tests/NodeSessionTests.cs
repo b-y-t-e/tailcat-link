@@ -3,6 +3,7 @@
 
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Quic;
 using System.Text;
 using Tailcat.Derp;
 using Tailcat.Keys;
@@ -28,6 +29,19 @@ namespace Tailcat.Net.Tests;
 /// </remarks>
 public class NodeSessionTests
 {
+    /// <summary>
+    /// What a node built here offers, in preference order, worked out the way
+    /// the node works it out.
+    /// </summary>
+    /// <remarks>
+    /// QUIC is not everywhere: Windows 10 has none and Linux has none without
+    /// libmsquic. A test that writes the list down instead of asking passes on
+    /// whichever machine its author had and fails everywhere else, which says
+    /// nothing about the code.
+    /// </remarks>
+    private static PeerTransport[] TransportsHere =>
+        QuicListener.IsSupported ? [PeerTransport.Quic, PeerTransport.Relay1] : [PeerTransport.Relay1];
+
     // Records what the node says it is doing, so a test can assert on the
     // reason a handshake failed rather than only on its absence.
     private sealed class RecordingObserver : ITailcatObserver
@@ -166,8 +180,11 @@ public class NodeSessionTests
         Assert.True(PeerHello.TryDecode(payload, out PeerHello? ack));
 
         // The answer names everything this node does have, so the caller can
-        // say why it is giving up rather than only that it did.
-        Assert.Equal([PeerTransport.Quic, PeerTransport.Relay1], ack.Transports);
+        // say why it is giving up rather than only that it did. What that is
+        // depends on the machine, which is the point of asking rather than
+        // asserting a list: Windows 10 has no QUIC and Linux has none without
+        // libmsquic, and such a node is not broken.
+        Assert.Equal(TransportsHere, ack.Transports);
         Assert.Equal(0, listener.SessionCount);
         Assert.Contains(observer.Failures, f => f.Reason.Contains("200", StringComparison.Ordinal));
     }
@@ -181,6 +198,14 @@ public class NodeSessionTests
     [Fact]
     public async Task TheAnswererTakesTheBestTransportBothSpeak()
     {
+        if (!QuicListener.IsSupported)
+        {
+            // The scenario is a peer offering something better first and QUIC
+            // as a fallback, so a machine with no QUIC has nothing to agree on
+            // and the hello is refused. That refusal is its own test, above.
+            Assert.Skip("this machine has no QUIC; Windows 10 has none and Linux needs libmsquic");
+        }
+
         using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
             TestContext.Current.CancellationToken);
         cts.CancelAfter(TimeSpan.FromMinutes(1));
