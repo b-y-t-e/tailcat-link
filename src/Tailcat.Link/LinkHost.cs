@@ -518,6 +518,18 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
             admitted = await PairingHandshake.AcceptAsync(connection, _pairing, idle, cts.Token)
                 .ConfigureAwait(false);
         }
+        catch (InvitationExpiredException ex)
+        {
+            // Told apart from every other failed handshake, and at a level
+            // somebody reads. The machine outside heard the same "no" as a
+            // wrong token and a full host, deliberately — but this is the one
+            // refusal with a cure, and inviting again is something only
+            // somebody at this end can do. A log line that reads like all the
+            // others leaves them with nothing to act on.
+            _log.Warn($"refused {connection.Peer}: {ex.Message}");
+            await connection.DisposeAsync().ConfigureAwait(false);
+            return;
+        }
 #pragma warning disable CA1031 // Nothing a stranger can do to its own handshake may reach the loop that is waiting for the peers.
         catch (Exception ex)
 #pragma warning restore CA1031

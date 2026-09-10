@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 using Tailcat.Link.Storage;
 
 namespace Tailcat.Link.Tests;
@@ -77,8 +78,21 @@ public class MultiPeerHostTests
             host.InvitationCode.Value,
             OptionsFor(gateways, new InMemoryLinkStore()) with { RequestDeadline = TimeSpan.FromSeconds(8) },
             ct);
+        ConcurrentQueue<LinkDisconnectReason> refusals = [];
+        extra.SessionEnded += (_, e) => refusals.Enqueue(e.Reason);
+
         await Assert.ThrowsAsync<LinkTimeoutException>(() => extra.RequestAsync("ping", ct));
         Assert.Single(host.Peers);
+
+        // The refused machine is told which "no" it got, because a fresh
+        // invitation is the only thing that answers this one and an interface
+        // has to know to ask for it. That is an attempt which never became a
+        // session, so it is also the case the reason code exists for.
+        Assert.Contains(LinkDisconnectReason.Refused, refusals);
+
+        // And it is still connecting rather than reconnecting: nothing was
+        // ever up here, however many attempts it has made.
+        Assert.Equal(LinkConnectionState.Connecting, extra.State);
     }
 
     /// <summary>
@@ -149,6 +163,52 @@ public class MultiPeerHostTests
             OptionsFor(gateways, new InMemoryLinkStore()) with { RequestDeadline = TimeSpan.FromSeconds(8) },
             ct);
         await Assert.ThrowsAsync<LinkTimeoutException>(() => shoulderSurfer.RequestAsync("ping", ct));
+    }
+
+    /// <summary>
+    /// An invitation that ran out is refused in exactly the words a wrong
+    /// token gets — and said plainly to the operator, who is the only one who
+    /// can do anything about it.
+    /// </summary>
+    /// <remarks>
+    /// It is the one refusal with an obvious cure, and the cure is a fresh
+    /// invitation. A line that reads like every other failed handshake leaves
+    /// whoever is watching with nothing to act on, which is why the level is
+    /// asserted here and not only the words.
+    /// </remarks>
+    [Fact]
+    public async Task AnExpiredInvitationIsTheOneRefusalTheOperatorIsToldAbout()
+    {
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(2));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        FakeRelayGatewayFactory gateways = new(relay);
+        using CapturingLoggerFactory logs = new();
+
+        await using ILinkHost host = await TailcatLink.HostManyAsync(
+            "demo",
+            HostOptions(gateways, new InMemoryLinkStore(), maxPeers: 4) with { LoggerFactory = logs },
+            ct);
+        host.SetRequestHandler((_, _, _) => Task.FromResult<ReadOnlyMemory<byte>>("pong"u8.ToArray()));
+
+        // Minted with a window rather than waited out, so the test spends no
+        // time being sure the moment has passed.
+        LinkInvitation invitation = await host.InviteAsync(
+            new InvitationRequest { Label = "kitchen phone", Lifetime = TimeSpan.FromMilliseconds(1) }, ct);
+        await Task.Delay(TimeSpan.FromMilliseconds(50), ct);
+
+        await using ILink late = await TailcatLink.JoinAsync(
+            "demo",
+            invitation.Code.Value,
+            OptionsFor(gateways, new InMemoryLinkStore()) with { RequestDeadline = TimeSpan.FromSeconds(8) },
+            ct);
+        await Assert.ThrowsAsync<LinkTimeoutException>(() => late.RequestAsync("ping", ct));
+
+        Assert.Empty(host.Peers);
+        Assert.True(
+            logs.Said(LogLevel.Warning, "invitation whose window has closed"),
+            $"the host never said the invitation had run out; it said: {logs}");
     }
 
     /// <summary>A withdrawn invitation pairs nobody, even before it expires.</summary>

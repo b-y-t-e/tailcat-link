@@ -57,6 +57,13 @@ public interface ILinkPeer
     event EventHandler<EventArgs>? Connected;
 
     /// <summary>Raised when a session with it goes down, with the reason it ended.</summary>
+    /// <remarks>
+    /// Also raised for an attempt that never became a session, because the
+    /// most useful reason of all — <see cref="LinkDisconnectReason.Refused"/>,
+    /// which is answered by a fresh invitation and nothing else — happens
+    /// only there. <see cref="State"/> is what separates the two: a peer still
+    /// building its first session stays <see cref="LinkConnectionState.Connecting"/>.
+    /// </remarks>
     event EventHandler<DisconnectedEventArgs>? Disconnected;
 
     /// <summary>Raised whenever <see cref="State"/> changes.</summary>

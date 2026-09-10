@@ -27,4 +27,12 @@
     <ProjectReference Include="..\Tailcat.TestSupport\Tailcat.TestSupport.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The same file the browser client's unit tests read. It is what holds
+         the two implementations of the hello and the channel to the same
+         bytes offline; the interop run needs a live relay and a host. -->
+    <None Include="..\..\clients\browser\test\vectors\link-frames.json"
+          CopyToOutputDirectory="PreserveNewest" Link="link-frames.json" />
+  </ItemGroup>
+
 </Project>

@@ -1,0 +1,66 @@
+{
+  "_comment": "The link layer's two newest wire formats, read by both implementations. LinkVectorTests.cs is the .NET half and link-frames.test.mjs the JavaScript one. relay1-records.json covers the transport underneath; this file covers what Tailcat.Link itself writes.",
+  "limits": {
+    "maxDisplayNameBytes": 256,
+    "maxChannelNameBytes": 256,
+    "maxChannelFrameBytes": 262144
+  },
+  "helloVersionByte": 2,
+  "hellos": [
+    {
+      "name": "a token and a name, the ordinary hello",
+      "pairingToken": "tok",
+      "displayName": "phone",
+      "encodedHex": "020003746f6b000570686f6e65"
+    },
+    {
+      "name": "a machine that says nothing about itself: an empty field, not a missing one",
+      "pairingToken": "s3cret-token",
+      "displayName": null,
+      "encodedHex": "02000c7333637265742d746f6b656e0000"
+    },
+    {
+      "name": "a name whose length is bytes rather than characters",
+      "pairingToken": "aB-_9",
+      "displayName": "telefon w kuchni ☎",
+      "encodedHex": "02000561422d5f39001474656c65666f6e2077206b7563686e6920e2988e"
+    }
+  ],
+  "legacyHellos": [
+    {
+      "name": "a bare pairing token, as everything written before the envelope sends it",
+      "pairingToken": "just-a-token",
+      "displayName": null,
+      "encodedHex": "6a7573742d612d746f6b656e"
+    }
+  ],
+  "channelNames": [
+    {
+      "name": "an ordinary channel name",
+      "channelName": "audio",
+      "encodedHex": "617564696f"
+    },
+    {
+      "name": "a channel name outside ASCII",
+      "channelName": "dźwięk",
+      "encodedHex": "64c5ba7769c4996b"
+    }
+  ],
+  "channelFrames": [
+    {
+      "name": "a short frame, length-prefixed",
+      "payloadHex": "010203",
+      "frameHex": "00000003010203"
+    },
+    {
+      "name": "the zero-length marker that ends a channel on purpose",
+      "payloadHex": "",
+      "frameHex": "00000000"
+    },
+    {
+      "name": "a length past one byte, which pins the prefix as big-endian",
+      "payloadHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff0001",
+      "frameHex": "00000102000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff0001"
+    }
+  ]
+}

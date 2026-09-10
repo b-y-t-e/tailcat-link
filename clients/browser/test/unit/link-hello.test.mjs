@@ -1,20 +1,16 @@
 // The hello, in both shapes.
 //
 // The versioned envelope and the bare token it replaced are told apart by one
-// byte, and a host older than the envelope has to keep pairing — so this
-// checks the bytes rather than a round trip alone. `LinkHelloTests` is the
-// .NET half.
+// byte, and a host older than the envelope has to keep pairing. The bytes
+// themselves live in `link-frames.test.mjs`, against the vector file the .NET
+// side reads; what is here is the behaviour around them. `LinkHelloTests` is
+// the .NET half of this file.
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { hex, utf8 } from "../../src/bytes.js";
+import { utf8 } from "../../src/bytes.js";
 import { MAX_DISPLAY_NAME_BYTES, decodeLinkHello, encodeLinkHello } from "../../src/link-hello.js";
-
-test("a hello carries the token and the name in the shape the .NET side reads", () => {
-  const encoded = encodeLinkHello({ pairingToken: "tok", displayName: "phone" });
-  assert.equal(hex(encoded), "02" + "0003" + hex(utf8("tok")) + "0005" + hex(utf8("phone")));
-});
 
 test("a hello without a name says so with an empty field rather than by leaving it out", () => {
   assert.deepEqual(decodeLinkHello(encodeLinkHello({ pairingToken: "tok" })), {

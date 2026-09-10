@@ -97,7 +97,10 @@ public interface ILink : IAsyncDisposable
     /// invitation code on <see cref="LinkDisconnectReason.Refused"/> and
     /// nothing at all on <see cref="LinkDisconnectReason.NetworkLost"/> is the
     /// ordinary case, and matching on a message to tell them apart is what
-    /// this exists to replace.
+    /// this exists to replace. Both are raised for an attempt that never
+    /// became a session too, since being refused is exactly that; use
+    /// <see cref="State"/> to tell a link that dropped from one that has not
+    /// come up yet.
     /// </remarks>
     event EventHandler<DisconnectedEventArgs>? SessionEnded;
 

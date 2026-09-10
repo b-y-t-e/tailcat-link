@@ -81,10 +81,14 @@ is the only thing keeping two implementations of one protocol in step: a
 change on one side has an obvious place to land on the other. `npm --prefix
 clients/browser test` runs its own unit tests offline; `npm --prefix
 clients/browser run interop` checks the two against each other over a real
-relay, against `tailcat-demo host`. The record vectors in
-`clients/browser/test/vectors/relay1-records.json` are read by both sides —
-`Relay1VectorTests` is the .NET half — so the wire formats cannot drift apart
-without a build failing. Add to that file when you change one.
+relay, against `tailcat-demo host`. The vectors in
+`clients/browser/test/vectors/` are read by both sides, so the wire formats
+cannot drift apart without a build failing: `relay1-records.json` covers the
+transport (`Relay1VectorTests` is the .NET half) and `link-frames.json` what
+`Tailcat.Link` writes on top of it — the hello and the channel frame
+(`LinkVectorTests`, and `link-frames.test.mjs`). Add to those files when you
+change a format, and put the hex there rather than in a test of one side: two
+literals that agree today are two literals, not a vector.
 
 ## Publishing
 

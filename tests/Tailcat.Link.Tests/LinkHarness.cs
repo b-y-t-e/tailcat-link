@@ -1,6 +1,8 @@
 // Copyright (c) Andrzej Ból and contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
+using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 using Tailcat.Link.Storage;
 
 namespace Tailcat.Link.Tests;
@@ -34,5 +36,59 @@ internal static class LinkHarness
             TestContext.Current.CancellationToken);
         cts.CancelAfter(limit);
         return cts;
+    }
+}
+
+/// <summary>
+/// Keeps what the link said, and at what level.
+/// </summary>
+/// <remarks>
+/// <see cref="LinkOptions.Log"/> would be enough to read the words, and that
+/// is exactly why it is not enough here: the level is the part that decides
+/// whether an operator ever sees a line, so a test about being told something
+/// has to assert it.
+/// </remarks>
+internal sealed class CapturingLoggerFactory : ILoggerFactory
+{
+    private readonly ConcurrentQueue<(LogLevel Level, string Message)> _lines = new();
+
+    /// <summary>Whether something was said at that level with those words in it.</summary>
+    public bool Said(LogLevel level, string fragment) =>
+        _lines.Any(line => line.Level == level && line.Message.Contains(fragment, StringComparison.Ordinal));
+
+    /// <inheritdoc/>
+    public ILogger CreateLogger(string categoryName) => new Sink(_lines);
+
+    /// <inheritdoc/>
+    public void AddProvider(ILoggerProvider provider)
+    {
+    }
+
+    /// <inheritdoc/>
+    public void Dispose()
+    {
+    }
+
+    /// <summary>Everything said, for the message of a test that failed.</summary>
+    public override string ToString() =>
+        _lines.IsEmpty ? "nothing" : string.Join("; ", _lines.Select(line => $"[{line.Level}] {line.Message}"));
+
+    private sealed class Sink(ConcurrentQueue<(LogLevel Level, string Message)> lines) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            ArgumentNullException.ThrowIfNull(formatter);
+            lines.Enqueue((logLevel, formatter(state, exception)));
+        }
     }
 }

@@ -129,6 +129,41 @@ public class LinkChannelTests
     }
 
     /// <summary>
+    /// A name this side got wrong is the caller's own mistake, and is said
+    /// before a stream is opened to find it out.
+    /// </summary>
+    /// <remarks>
+    /// The order is the point rather than the exception: a name checked after
+    /// the stream exists leaves one open on every bad call, and a stream a
+    /// peer opened and never wrote to is one the other end waits on until the
+    /// session goes.
+    /// </remarks>
+    [Fact]
+    public async Task ANameTooLongIsRefusedBeforeAStreamIsOpened()
+    {
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(2));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        FakeRelayGatewayFactory gateways = new(relay);
+
+        await using ILinkHost host = await TailcatLink.HostManyAsync(
+            "demo", OptionsFor(gateways, new InMemoryLinkStore()), ct);
+        host.OnChannel("audio", (_, _, _) => Task.CompletedTask);
+
+        await using ILink phone = await JoinAsync(gateways, host, ct);
+        await host.WaitForPeerAsync(ct);
+
+        await Assert.ThrowsAsync<ArgumentException>(
+            async () => await phone.OpenChannelAsync(new string('n', 257), ct));
+
+        // And the session is untouched by it: a call refused at this end is
+        // not a reason for anything already up to end.
+        await using ILinkChannelWriter audio = await phone.OpenChannelAsync("audio", ct);
+        Assert.True(audio.IsOpen);
+    }
+
+    /// <summary>
     /// Closing while frames are still going out ends the channel cleanly: the
     /// goodbye marker queues behind them rather than landing in the middle of
     /// one, which the reading end would see as a corrupt length prefix.

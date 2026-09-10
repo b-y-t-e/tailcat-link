@@ -133,8 +133,13 @@ internal sealed class LinkSession : IAsyncDisposable
     /// <exception cref="LinkException">If the session could not carry it.</exception>
     public async Task<Stream> OpenChannelAsync(string name, CancellationToken cancellationToken)
     {
+        // Before the stream exists, because a name this side got wrong is the
+        // caller's own mistake and must not cost a stream to find out.
+        byte[] encodedName = ChannelFrame.EncodeName(name);
+
         using IdleTimeout idle = new(_requestTimeout, _time);
         Stream? stream = null;
+        bool handedOver = false;
         try
         {
             using CancellationTokenSource cts =
@@ -142,7 +147,7 @@ internal sealed class LinkSession : IAsyncDisposable
             stream = await _connection.OpenStreamAsync(cts.Token).ConfigureAwait(false);
             idle.Restart();
             await LinkFrame.WriteAsync(
-                    stream, (byte)LinkFrameKind.Channel, Guid.NewGuid(), ChannelFrame.EncodeName(name), idle, cts.Token)
+                    stream, (byte)LinkFrameKind.Channel, Guid.NewGuid(), encodedName, idle, cts.Token)
                 .ConfigureAwait(false);
 
             (byte status, _, byte[] answer) =
@@ -152,24 +157,25 @@ internal sealed class LinkSession : IAsyncDisposable
                 throw new RemoteHandlerException(
                     $"the other machine would not take the channel: {Encoding.UTF8.GetString(answer)}");
             }
+            handedOver = true;
             return stream;
         }
         catch (Exception ex) when (IsSessionFailure(ex) && !cancellationToken.IsCancellationRequested)
         {
-            if (stream is not null)
-            {
-                await stream.DisposeAsync().ConfigureAwait(false);
-            }
             string reason = idle.Expired ? $"the other machine sent nothing for {_requestTimeout}" : ex.Message;
             throw new LinkException(reason, ex);
         }
-        catch (RemoteHandlerException)
+        finally
         {
-            if (stream is not null)
+            // Every way out but the one that worked: a caller that gave up,
+            // a name the peer would not take, a session that died mid-open.
+            // The exchange beside this says the same thing with `await
+            // using`, which does not fit here because on success the stream
+            // outlives the call — it is what the channel then sends on.
+            if (!handedOver && stream is not null)
             {
                 await stream.DisposeAsync().ConfigureAwait(false);
             }
-            throw;
         }
     }
 

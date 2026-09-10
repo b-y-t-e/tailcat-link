@@ -509,6 +509,7 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
             string reason;
             LinkDisconnectReason kind = LinkDisconnectReason.NetworkLost;
             LinkSession? session = null;
+            bool wasUp = false;
             try
             {
                 INodeGateway gateway = await _node.EnsureAsync(ct).ConfigureAwait(false);
@@ -581,12 +582,12 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
                     // Here rather than in OnSessionDown, which a dispose and a
                     // fatal stop both return without reaching: a gauge of what
                     // is up now must not keep counting a session that is not.
-                    ReleaseSessionCount();
+                    wasUp = ReleaseSessionCount();
                     await session.DisposeAsync().ConfigureAwait(false);
                 }
             }
 
-            OnSessionDown(kind, reason);
+            OnSessionDown(kind, reason, wasUp);
 
             if (_dials && failures >= _options.RebuildNodeAfterFailures)
             {
@@ -660,7 +661,15 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
         Raise(() => Connected?.Invoke(this, EventArgs.Empty), nameof(Connected));
     }
 
-    private void OnSessionDown(LinkDisconnectReason kind, string reason)
+    /// <param name="kind">Why this attempt ended.</param>
+    /// <param name="reason">The same thing in words.</param>
+    /// <param name="wasUp">
+    /// Whether there was a session, as opposed to an attempt that never
+    /// became one. It is what tells "the link dropped" from "the link has not
+    /// come up yet", which are the same code path here and different things
+    /// to everyone watching.
+    /// </param>
+    private void OnSessionDown(LinkDisconnectReason kind, string reason, bool wasUp)
     {
         lock (_mu)
         {
@@ -675,7 +684,15 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
         ReleaseSessionEnded();
         _log.Say($"link down: {reason}");
         LinkTelemetry.Reconnecting(kind);
-        MoveTo(LinkConnectionState.Reconnecting);
+        // A peer that has never had a session is still building its first one,
+        // however many attempts that has taken. Reconnecting says there was
+        // one and it went, so an interface bound to this would show a machine
+        // that has never answered as one that has just dropped out — and the
+        // state exists precisely so that "trying" can be told from "was up".
+        MoveTo(wasUp ? LinkConnectionState.Reconnecting : LinkConnectionState.Connecting);
+        // Raised either way, and the reason is what separates them: an
+        // attempt refused is how a peer learns it needs a fresh invitation,
+        // and that attempt never has a session by definition.
         Raise(
             () => Disconnected?.Invoke(this, new DisconnectedEventArgs(kind, reason)),
             nameof(Disconnected));
@@ -686,17 +703,23 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
     /// up, once however often it is called and never for one that never came
     /// up.
     /// </summary>
-    private void ReleaseSessionCount()
+    /// <returns>
+    /// Whether this call is the one that gave it back — which is to say,
+    /// whether there was a session at all. The caller reports the ending
+    /// differently for an attempt that never became one.
+    /// </returns>
+    private bool ReleaseSessionCount()
     {
         lock (_mu)
         {
             if (!_sessionIsUp)
             {
-                return;
+                return false;
             }
             _sessionIsUp = false;
         }
         LinkTelemetry.SessionEnded();
+        return true;
     }
 
     /// <summary>Retires the peer for good, with the reason it will not come back.</summary>
