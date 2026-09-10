@@ -628,8 +628,30 @@ public class PairedLinkTests
         Assert.Equal("pong", await operatorSide.RequestAsync("ping", ct));
         int nodesBefore = gateways.NodesCreated;
 
+        // Whose key comes back on the relay, and when. The link's own log says
+        // only that the peer did not answer; this says whether it was ever
+        // reachable to answer from.
+        NodePublic hostKey = operatorSide.Peer;
+        NodePublic peerKey = host.Peer;
+
         Say("test", "breaking every node");
         await gateways.BreakEveryNodeAsync();
+        Say("relay", $"holds {relay.ClientCount} client(s) right after the break");
+
+        _ = Task.Run(
+            async () =>
+            {
+                await relay.WaitForClientAsync(hostKey, ct);
+                Say("relay", "the host is logged in again");
+            },
+            CancellationToken.None);
+        _ = Task.Run(
+            async () =>
+            {
+                await relay.WaitForClientAsync(peerKey, ct);
+                Say("relay", "the peer is logged in again");
+            },
+            CancellationToken.None);
 
         string answer;
         try

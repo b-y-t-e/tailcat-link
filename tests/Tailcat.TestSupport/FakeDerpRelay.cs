@@ -267,6 +267,18 @@ public sealed class FakeDerpRelay : IAsyncDisposable
         _ = frames.DisposeAsync().AsTask();
     }
 
+    /// <summary>How many clients are logged in right now.</summary>
+    public int ClientCount
+    {
+        get
+        {
+            lock (_mu)
+            {
+                return _clients.Count;
+            }
+        }
+    }
+
     /// <summary>Waits until <paramref name="client"/> has finished logging in.</summary>
     public async Task WaitForClientAsync(NodePublic client, CancellationToken ct = default)
     {
