@@ -32,6 +32,17 @@ public sealed class FakeRelayGatewayFactory(
     /// <summary>How many nodes have been built, so a test can see a rebuild happen.</summary>
     public int NodesCreated { get; private set; }
 
+    /// <summary>
+    /// Where every node built here reports what it is doing. Nothing, by
+    /// default.
+    /// </summary>
+    /// <remarks>
+    /// A link that will not come back looks the same from above whatever the
+    /// reason, so the node's own account is the first thing to reach for —
+    /// which is why it is settable here rather than only on the real factory.
+    /// </remarks>
+    public ITailcatObserver Observer { get; init; } = NullTailcatObserver.Instance;
+
     /// <inheritdoc/>
     public async Task<INodeGateway> CreateAsync(
         NodePrivate privateKey,
@@ -62,6 +73,7 @@ public sealed class FakeRelayGatewayFactory(
                 // address the other can reach them at; asking a STUN server
                 // that is not there would only cost the handshake its timeout.
                 StunServers = [],
+                Observer = Observer,
                 HandshakeTimeout = TimeSpan.FromSeconds(8),
                 ConnectRelay = async (_, token) => await DerpClient.ConnectOverStreamAsync(
                     await relay.DialAsync(token), privateKey, relay.PublicKey, token),

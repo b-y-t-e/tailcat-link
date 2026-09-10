@@ -596,7 +596,6 @@ public class PairedLinkTests
         CancellationToken ct = cts.Token;
 
         await using FakeDerpRelay relay = new();
-        FakeRelayGatewayFactory gateways = new(relay);
 
         // Both ends' own account of the recovery, stamped. This is the one
         // test that has failed where nobody can watch it — it comes back on a
@@ -606,6 +605,13 @@ public class PairedLinkTests
         long from = Stopwatch.GetTimestamp();
         void Say(string end, string line) =>
             said.Enqueue($"{Stopwatch.GetElapsedTime(from).TotalSeconds,6:F1}s {end}: {line}");
+
+        // The nodes' own account too: the link can only say that the peer did
+        // not answer, and what is wanted is why.
+        FakeRelayGatewayFactory gateways = new(relay)
+        {
+            Observer = new TextTailcatObserver(line => Say("node", line)),
+        };
 
         await using ILink host = await TailcatLink.HostAsync(
             "demo",
