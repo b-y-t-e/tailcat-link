@@ -597,20 +597,57 @@ public class PairedLinkTests
 
         await using FakeDerpRelay relay = new();
         FakeRelayGatewayFactory gateways = new(relay);
-        LinkOptions options = OptionsFor(gateways, new InMemoryLinkStore()) with { RebuildNodeAfterFailures = 1 };
 
-        await using ILink host = await TailcatLink.HostAsync("demo", options, ct);
+        // Both ends' own account of the recovery, stamped. This is the one
+        // test that has failed where nobody can watch it — it comes back on a
+        // fast machine and not always on a slow one — and a bare timeout says
+        // nothing about which end was stuck on what.
+        ConcurrentQueue<string> said = [];
+        long from = Stopwatch.GetTimestamp();
+        void Say(string end, string line) =>
+            said.Enqueue($"{Stopwatch.GetElapsedTime(from).TotalSeconds,6:F1}s {end}: {line}");
+
+        await using ILink host = await TailcatLink.HostAsync(
+            "demo",
+            OptionsFor(gateways, new InMemoryLinkStore()) with
+            {
+                RebuildNodeAfterFailures = 1,
+                Log = line => Say("host", line),
+            },
+            ct);
         host.OnRequest(_ => "pong");
         await using ILink operatorSide = await TailcatLink.JoinAsync(
             "demo", host.InvitationCode.Value,
-            OptionsFor(gateways, new InMemoryLinkStore()) with { RebuildNodeAfterFailures = 1 }, ct);
+            OptionsFor(gateways, new InMemoryLinkStore()) with
+            {
+                RebuildNodeAfterFailures = 1,
+                Log = line => Say("peer", line),
+            },
+            ct);
 
         Assert.Equal("pong", await operatorSide.RequestAsync("ping", ct));
         int nodesBefore = gateways.NodesCreated;
 
+        Say("test", "breaking every node");
         await gateways.BreakEveryNodeAsync();
 
-        Assert.Equal("pong", await operatorSide.RequestAsync("ping", ct));
+        string answer;
+        try
+        {
+            answer = await operatorSide.RequestAsync("ping", ct);
+        }
+#pragma warning disable CA1031 // The point is to report what both ends were doing, whatever went wrong.
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+            answer = $"<{ex.GetType().Name}: {ex.Message}>";
+        }
+
+        Assert.True(
+            answer == "pong",
+            $"the link never came back; it answered {answer} after "
+            + $"{gateways.NodesCreated - nodesBefore} new node(s). What both ends said:"
+            + Environment.NewLine + string.Join(Environment.NewLine, said));
         Assert.True(
             gateways.NodesCreated > nodesBefore,
             "the link should have built new nodes from the stored identity");
