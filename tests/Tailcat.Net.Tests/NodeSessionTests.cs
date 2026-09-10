@@ -399,4 +399,123 @@ public class NodeSessionTests
             }
         }
     }
+
+    /// <summary>
+    /// A QUIC session the node takes away says what took it, the same as a
+    /// relayed one, and it reaches a loop already parked in
+    /// <see cref="ITailcatConnection.AcceptStreamAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// QUIC is what a pair that has QUIC uses, so a reason only relay1 carried
+    /// would be one almost nobody in the field ever read: the serve loop would
+    /// still log "Cannot access a disposed object", which names the type that
+    /// noticed and nothing that happened.
+    /// </remarks>
+    [Fact]
+    public async Task AQuicSessionTakenAwaySaysWhoTookIt()
+    {
+        if (!QuicListener.IsSupported)
+        {
+            Assert.Skip("this machine has no QUIC; Windows 10 has none and Linux needs libmsquic");
+        }
+
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+
+        // The same identity both times, which is what a machine that lost its
+        // network and rebuilt its node looks like from here.
+        NodePrivate key = NodePrivate.NewKey();
+        TailcatNodeOptions dialling = OptionsFor(relay);
+
+        Task<ITailcatConnection> firstArrival = listener.AcceptConnectionAsync(ct);
+        await using TailcatNode first = await TailcatNode.CreateAsync(OptionsFor(relay, key, dialling), ct);
+        await using ITailcatConnection dialled = await first.ConnectAsync(listener.Address, ct);
+        ITailcatConnection served = await firstArrival;
+
+        // The far end is left switched on, so nothing but this node's own
+        // replacement can end the session: a peer that hangs up says so
+        // through QUIC, and that account is worth keeping.
+        // Parked before anything replaces the session, the way a serve loop is.
+        Task<Stream> waiting = served.AcceptStreamAsync(ct);
+
+        await using TailcatNode again = await TailcatNode.CreateAsync(OptionsFor(relay, key, dialling), ct);
+        Task<ITailcatConnection> secondArrival = listener.AcceptConnectionAsync(ct);
+        await using ITailcatConnection redialled = await again.ConnectAsync(listener.Address, ct);
+        await using ITailcatConnection replacement = await secondArrival;
+
+        await using (served)
+        {
+            TailcatException ended = await Assert.ThrowsAsync<TailcatException>(async () => await waiting);
+            Assert.Contains("opened another session", ended.Message, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The reason also reaches a read already parked on an open QUIC stream,
+    /// which is where a transfer in flight finds out.
+    /// </summary>
+    /// <remarks>
+    /// A stream handed out before the node swaps the session outlives it, and
+    /// QUIC can only say that something was disposed or aborted. Whichever of
+    /// the two loops loses the race is what an operator reads, so a reason the
+    /// accept loop alone carried would still surface as "Cannot access a
+    /// disposed object" as often as not.
+    /// </remarks>
+    [Fact]
+    public async Task AQuicStreamAlreadyBeingReadSaysWhoTookTheSession()
+    {
+        if (!QuicListener.IsSupported)
+        {
+            Assert.Skip("this machine has no QUIC; Windows 10 has none and Linux needs libmsquic");
+        }
+
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+
+        NodePrivate key = NodePrivate.NewKey();
+        TailcatNodeOptions dialling = OptionsFor(relay);
+
+        Task<ITailcatConnection> firstArrival = listener.AcceptConnectionAsync(ct);
+        await using TailcatNode first = await TailcatNode.CreateAsync(OptionsFor(relay, key, dialling), ct);
+        await using ITailcatConnection dialled = await first.ConnectAsync(listener.Address, ct);
+        ITailcatConnection served = await firstArrival;
+
+        // QUIC opens streams lazily: until the opener writes, the peer never
+        // sees the stream at all.
+        await using Stream opened = await dialled.OpenStreamAsync(ct);
+        await opened.WriteAsync(new byte[] { 1 }, ct);
+        await opened.FlushAsync(ct);
+
+        Stream accepted = await served.AcceptStreamAsync(ct);
+        byte[] one = new byte[1];
+        Assert.Equal(1, await accepted.ReadAsync(one, ct));
+
+        // Parked the way a transfer waiting for the rest of its content is.
+        ValueTask<int> reading = accepted.ReadAsync(new byte[1], ct);
+
+        await using TailcatNode again = await TailcatNode.CreateAsync(OptionsFor(relay, key, dialling), ct);
+        Task<ITailcatConnection> secondArrival = listener.AcceptConnectionAsync(ct);
+        await using ITailcatConnection redialled = await again.ConnectAsync(listener.Address, ct);
+        await using ITailcatConnection replacement = await secondArrival;
+
+        await using (served)
+        {
+            // An IOException, because that is what the Stream contract has a
+            // reading loop catch and what the relayed transport throws for the
+            // same event: one type, or a consumer survives a relayed session
+            // and falls over a QUIC one.
+            IOException ended = await Assert.ThrowsAsync<IOException>(async () => await reading);
+            Assert.Contains("opened another session", ended.Message, StringComparison.Ordinal);
+        }
+    }
 }

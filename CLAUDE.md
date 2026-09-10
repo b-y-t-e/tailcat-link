@@ -173,6 +173,25 @@ These were each found the hard way; the README explains them at length.
 - **Writing into a dead session succeeds.** The bytes go to a relay with
   nobody to hand them to, so a broken link is silent rather than faulty.
   Anything that must notice needs a heartbeat and a per-request timeout.
+- **A backoff belongs to the end that dials.** The two ends of a link share
+  one supervision loop, and the pause it keeps between attempts paces
+  something only on the end that makes them. On a host the session is handed
+  in by the accept loop, already handshaken, and nobody serves it until the
+  loop takes it — so the pause is dead time in which the machine at the other
+  end is connected, asking, and hearing nothing. It doubles towards
+  `MaxReconnectDelay`, and once it exceeds the far end's `HeartbeatInterval`
+  plus `RequestTimeout`, that end gives up and re-dials inside every pause;
+  each re-dial replaces the session whose connection is still waiting, so the
+  loop finally picks up one the node has already closed. Two machines flapped
+  like that for as long as both were switched on. `ISessionSource.PauseAsync`
+  is where the difference lives.
+- **A session the node takes away is not a misused object.** `ObjectDisposedException`
+  is the truth only when the caller disposed its own connection.
+  `Relay1Connection.CloseAsync` and `TailcatConnection.CloseAsync` carry the
+  reason the node had — the peer re-dialled, a record was lost, the node was
+  shut down — on both transports, because otherwise
+  every one of those reaches an operator's log as "Cannot access a disposed
+  object", which names the type that noticed and nothing that happened.
 - **Half a DERP frame poisons the connection.** A send cancelled after the
   header reached the wire left five bytes the relay took for the next frame's
   header, and every packet after it was misrouted until the process ended —

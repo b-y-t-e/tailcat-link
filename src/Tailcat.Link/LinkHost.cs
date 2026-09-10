@@ -309,7 +309,7 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
         {
             if (!_peers.TryGetValue(remembered.Key, out PeerEntry? known))
             {
-                OfferedSessionSource offered = new();
+                OfferedSessionSource offered = new(_options.TimeProvider);
                 known = new PeerEntry(NewPeer(remembered, offered, dials: false), offered);
                 _peers[remembered.Key] = known;
             }
@@ -400,7 +400,7 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
                 // Not something waiting will fix — no QUIC on this platform,
                 // a store that cannot be written. Every peer is told, rather
                 // than left waiting for a session that will never come.
-                _log.Warn($"the host stopped listening: {ex.Message}");
+                _log.Warn($"the host stopped listening: {ex.Message}", ex);
                 foreach (PeerEntry entry in _peers.Values)
                 {
                     entry.Peer.Fault(ex);
@@ -539,7 +539,7 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
             // must happen when the next one is a peer.
             if (!ct.IsCancellationRequested)
             {
-                _log.Say($"handshake with {connection.Peer} failed: {ex.Message}");
+                _log.Say($"handshake with {connection.Peer} failed: {ex.Message}", ex);
             }
         }
 

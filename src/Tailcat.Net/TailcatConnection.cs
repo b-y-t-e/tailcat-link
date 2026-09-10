@@ -22,7 +22,17 @@ public sealed class TailcatConnection : ITailcatConnection
     private readonly PeerLink _link;
     private readonly UdpBridge _bridge;
     private readonly Func<TailcatConnection, ValueTask>? _onClosed;
-    private bool _disposed;
+    private volatile bool _disposed;
+
+    // Why the node ended this session, when the node is what ended it. Null
+    // means nothing but the owner disposing its own connection, which is the
+    // one case where ObjectDisposedException is the truth. Both fields are
+    // volatile because the reason is written on the node's thread and read on
+    // the caller's — including from the streams handed out, which read it
+    // long after they were made: without that, a reader on a weakly ordered
+    // machine may take the flag and still miss the reason, and report the
+    // disposal this change exists to stop reporting.
+    private volatile string? _endedBecause;
 
     internal TailcatConnection(
         QuicConnection quic,
@@ -56,12 +66,37 @@ public sealed class TailcatConnection : ITailcatConnection
     public event Action<PeerPath>? PathChanged;
 
     /// <summary>Opens a new bidirectional stream to the peer.</summary>
-    public async Task<Stream> OpenStreamAsync(CancellationToken cancellationToken = default) =>
-        await _quic.OpenOutboundStreamAsync(QuicStreamType.Bidirectional, cancellationToken).ConfigureAwait(false);
+    public async Task<Stream> OpenStreamAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            QuicStream opened = await _quic.OpenOutboundStreamAsync(QuicStreamType.Bidirectional, cancellationToken)
+                .ConfigureAwait(false);
+            return Carrying(opened);
+        }
+        catch (Exception ended) when (IsEndOfSession(ended) && _endedBecause is { } why)
+        {
+            throw new TailcatException(why, ended);
+        }
+    }
 
     /// <summary>Waits for the peer to open a stream.</summary>
-    public async Task<Stream> AcceptStreamAsync(CancellationToken cancellationToken = default) =>
-        await _quic.AcceptInboundStreamAsync(cancellationToken).ConfigureAwait(false);
+    public async Task<Stream> AcceptStreamAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            QuicStream accepted = await _quic.AcceptInboundStreamAsync(cancellationToken).ConfigureAwait(false);
+            return Carrying(accepted);
+        }
+        catch (Exception ended) when (IsEndOfSession(ended) && _endedBecause is { } why)
+        {
+            // A serve loop parked here is the usual way the layer above hears
+            // that a session is over, and QuicConnection can only say that
+            // something was disposed or aborted — which names the type that
+            // noticed and nothing that happened.
+            throw new TailcatException(why, ended);
+        }
+    }
 
     /// <summary>
     /// Waits until traffic is flowing over a direct path, or the timeout
@@ -88,7 +123,32 @@ public sealed class TailcatConnection : ITailcatConnection
         }
     }
 
+    // What closing the QUIC connection underneath looks like to a caller,
+    // whether it was already parked in a call or made a fresh one. Only ever
+    // consulted once the node has said why it took the session away, so a
+    // connection the peer aborted still surfaces QUIC's own account of it.
+    private static bool IsEndOfSession(Exception ex) => ex is ObjectDisposedException or QuicException;
+
+    // A stream handed out now will still be being read when the node takes
+    // the session away, and that read is where the layer above actually hears
+    // about it. The relayed transport tells its streams the same thing.
+    private SessionStream Carrying(QuicStream stream) => new(stream, () => _endedBecause);
+
     private void OnPathChanged(PeerPath path) => PathChanged?.Invoke(path);
+
+    /// <summary>Ends this session because the node did, saying why.</summary>
+    /// <param name="reason">
+    /// What the owner of this connection is to be told when it next uses it.
+    /// A session the node takes away is an ordinary end — the peer re-dialled,
+    /// the node was shut down — and the layer above repairs all of them by
+    /// reconnecting. It only has to be told which, and the node is the only
+    /// thing that knows.
+    /// </param>
+    internal async ValueTask CloseAsync(string reason)
+    {
+        _endedBecause = reason;
+        await DisposeAsync().ConfigureAwait(false);
+    }
 
     /// <summary>Closes the session and stops probing paths.</summary>
     public async ValueTask DisposeAsync()

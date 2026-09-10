@@ -160,7 +160,7 @@ internal sealed class LinkSession : IAsyncDisposable
             handedOver = true;
             return stream;
         }
-        catch (Exception ex) when (IsSessionFailure(ex) && !cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (SessionFailure.EndsTheSession(ex) && !cancellationToken.IsCancellationRequested)
         {
             string reason = idle.Expired ? $"the other machine sent nothing for {_requestTimeout}" : ex.Message;
             throw new LinkException(reason, ex);
@@ -279,7 +279,7 @@ internal sealed class LinkSession : IAsyncDisposable
                 Refused(done, reason);
             }
         }
-        catch (Exception ex) when (IsSessionFailure(ex) && !cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (SessionFailure.EndsTheSession(ex) && !cancellationToken.IsCancellationRequested)
         {
             string reason = idle.Expired
                 ? $"the transfer moved nothing for {_transferStall}"
@@ -496,7 +496,7 @@ internal sealed class LinkSession : IAsyncDisposable
                 return (status, answer);
             }
         }
-        catch (Exception ex) when (IsSessionFailure(ex) && !cancellationToken.IsCancellationRequested)
+        catch (Exception ex) when (SessionFailure.EndsTheSession(ex) && !cancellationToken.IsCancellationRequested)
         {
             bool timedOut = idle.Expired;
             string reason = timedOut
@@ -527,7 +527,7 @@ internal sealed class LinkSession : IAsyncDisposable
                 _ = Task.Run(() => ServeOneAsync(stream, ct), CancellationToken.None);
             }
         }
-        catch (Exception ex) when (IsSessionFailure(ex))
+        catch (Exception ex) when (SessionFailure.EndsTheSession(ex))
         {
             Fail(ex is OperationCanceledException ? "the link was closed" : ex.Message);
         }
@@ -543,7 +543,7 @@ internal sealed class LinkSession : IAsyncDisposable
                     await LinkFrame.ReadAsync(stream, idle: null, ct).ConfigureAwait(false);
                 await ServeAsync((LinkFrameKind)tag, exchange, payload, stream, ct).ConfigureAwait(false);
             }
-            catch (Exception ex) when (IsSessionFailure(ex) || ex is LinkException)
+            catch (Exception ex) when (SessionFailure.EndsTheSession(ex) || ex is LinkException)
             {
                 // One exchange died. That is not the session: each exchange has
                 // its own stream, so nothing is left half-read for the next one.
@@ -659,12 +659,6 @@ internal sealed class LinkSession : IAsyncDisposable
     private static Task AnswerAsync(Stream stream, Guid exchange, LinkAnswer answer, CancellationToken ct) =>
         LinkFrame.WriteAsync(stream, (byte)answer.Status, exchange, answer.Payload, idle: null, ct);
 
-    // What "the session is gone" looks like from every layer underneath: QUIC,
-    // the socket, a disposed connection, or a timeout that has run out.
-    private static bool IsSessionFailure(Exception ex) =>
-        ex is QuicException or IOException or SocketException or ObjectDisposedException
-            or OperationCanceledException or InvalidOperationException;
-
     public async ValueTask DisposeAsync()
     {
         if (_disposed)
@@ -682,7 +676,7 @@ internal sealed class LinkSession : IAsyncDisposable
             {
                 await _serveLoop.ConfigureAwait(false);
             }
-            catch (Exception ex) when (IsSessionFailure(ex))
+            catch (Exception ex) when (SessionFailure.EndsTheSession(ex))
             {
             }
         }

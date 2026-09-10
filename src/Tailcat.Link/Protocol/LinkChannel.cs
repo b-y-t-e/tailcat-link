@@ -207,11 +207,8 @@ internal abstract class LinkChannelBase(string name, ILinkPeer peer, LinkLog log
     /// waiting on it.
     /// </remarks>
     protected static bool EndsTheChannel(Exception ex, CancellationToken sessionAlive, CancellationToken caller) =>
-        IsSessionFailure(ex) && (sessionAlive.IsCancellationRequested || !caller.IsCancellationRequested);
-
-    private static bool IsSessionFailure(Exception ex) =>
-        ex is QuicException or IOException or SocketException or ObjectDisposedException
-            or OperationCanceledException or InvalidOperationException;
+        SessionFailure.EndsTheSession(ex)
+        && (sessionAlive.IsCancellationRequested || !caller.IsCancellationRequested);
 }
 
 /// <summary>The end that opened the channel and sends on it.</summary>

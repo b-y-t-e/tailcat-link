@@ -1102,8 +1102,9 @@ public sealed class TailcatNode : IAsyncDisposable
         {
             if (session.Relayed is not null && !session.Relayed.HandleRecord(packet.Span))
             {
-                _observer.HandshakeFailed(source, "a relay1 record was lost or forged; the session cannot continue");
-                await CloseSessionAsync(source).ConfigureAwait(false);
+                const string Lost = "a relay1 record was lost or forged; the session cannot continue";
+                _observer.HandshakeFailed(source, Lost);
+                await CloseSessionAsync(source, Lost).ConfigureAwait(false);
             }
             return;
         }
@@ -1404,11 +1405,18 @@ public sealed class TailcatNode : IAsyncDisposable
         }
     }
 
-    private async Task CloseSessionAsync(NodePublic peer)
+    // The reason only ever reaches somebody when the session had been handed
+    // out, which the handshake-time callers below have not done: they close
+    // what they built for an attempt that failed, and throw an exception of
+    // their own saying why. This is the wording for those.
+    private Task CloseSessionAsync(NodePublic peer) =>
+        CloseSessionAsync(peer, "this session was closed");
+
+    private async Task CloseSessionAsync(NodePublic peer, string reason)
     {
         if (_sessions.TryRemove(peer, out Session? session))
         {
-            await ReleaseSessionAsync(session).ConfigureAwait(false);
+            await ReleaseSessionAsync(session, reason).ConfigureAwait(false);
         }
     }
 
@@ -1421,7 +1429,10 @@ public sealed class TailcatNode : IAsyncDisposable
         // connection, whose close callback looks the session up again.
         if (_sessions.TryRemove(peer, out Session? previous) && !ReferenceEquals(previous, session))
         {
-            await ReleaseSessionAsync(previous).ConfigureAwait(false);
+            // The same words the link above uses for the same event, so one
+            // machine re-dialling reads the same whichever layer noticed it.
+            await ReleaseSessionAsync(previous, "the peer opened another session")
+                .ConfigureAwait(false);
         }
         _sessions[peer] = session;
     }
@@ -1448,7 +1459,11 @@ public sealed class TailcatNode : IAsyncDisposable
         }
     }
 
-    private async Task ReleaseSessionAsync(Session session)
+    // The reason is what whoever still holds this session's connection is told
+    // when it next uses it. Both transports carry it: a pair that has QUIC
+    // uses QUIC, so a reason only relay1 knew would be one almost nobody in
+    // the field ever read.
+    private async Task ReleaseSessionAsync(Session session, string reason)
     {
         if (session.Link is PeerLink forgetting)
         {
@@ -1456,11 +1471,11 @@ public sealed class TailcatNode : IAsyncDisposable
         }
         if (session.Connection is not null)
         {
-            await session.Connection.DisposeAsync().ConfigureAwait(false);
+            await session.Connection.CloseAsync(reason).ConfigureAwait(false);
         }
         if (session.Relayed is not null)
         {
-            await session.Relayed.DisposeAsync().ConfigureAwait(false);
+            await session.Relayed.CloseAsync(reason).ConfigureAwait(false);
         }
         if (session.Link is PeerLink link)
         {
@@ -1613,7 +1628,7 @@ public sealed class TailcatNode : IAsyncDisposable
 
         foreach (Session session in _sessions.Values)
         {
-            await ReleaseSessionAsync(session).ConfigureAwait(false);
+            await ReleaseSessionAsync(session, "the node was shut down").ConfigureAwait(false);
         }
         _sessions.Clear();
 

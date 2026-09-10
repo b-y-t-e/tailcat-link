@@ -57,7 +57,16 @@ internal sealed class Relay1Connection : ITailcatConnection
     private ulong _expectedCounter;
 
     private ulong _nextStreamId;
-    private bool _disposed;
+    private volatile bool _disposed;
+
+    // Why the node ended this session, when the node is what ended it. Null
+    // means nothing but the owner disposing its own connection, which is the
+    // one case where ObjectDisposedException is the truth. Both fields are
+    // volatile because the reason is written on the node's thread and read on
+    // the caller's: without that, a reader on a weakly ordered machine may
+    // take the flag and still miss the reason, and report the disposal this
+    // change exists to stop reporting.
+    private volatile string? _endedBecause;
 
     internal Relay1Connection(
         NodePublic peer,
@@ -104,7 +113,7 @@ internal sealed class Relay1Connection : ITailcatConnection
     /// <inheritdoc/>
     public Task<Stream> OpenStreamAsync(CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfEnded();
         ulong id = Interlocked.Add(ref _nextStreamId, 2) - 2;
         Relay1Stream stream = new(this, id);
         _streams[id] = stream;
@@ -114,8 +123,18 @@ internal sealed class Relay1Connection : ITailcatConnection
     /// <inheritdoc/>
     public async Task<Stream> AcceptStreamAsync(CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        return await _accepted.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+        ThrowIfEnded();
+        try
+        {
+            return await _accepted.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (ChannelClosedException ended) when (_endedBecause is { } why)
+        {
+            // A serve loop parked here is the usual way the layer above hears
+            // that a session is over, and "The channel has been closed" says
+            // less than nothing about which end did what.
+            throw new TailcatException(why, ended);
+        }
     }
 
     /// <summary>Seals one frame and hands it to the relay.</summary>
@@ -125,7 +144,7 @@ internal sealed class Relay1Connection : ITailcatConnection
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfEnded();
         byte[] frame = Relay1Frame.Encode(streamId, flags, payload.Span);
 
         await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -215,6 +234,29 @@ internal sealed class Relay1Connection : ITailcatConnection
         }
     }
 
+    /// <summary>
+    /// Ends this session because the node did, saying why.
+    /// </summary>
+    /// <param name="reason">
+    /// What the owner of this connection is to be told when it next uses it.
+    /// A session the node takes away is an ordinary end — the peer re-dialled,
+    /// a record was lost, the node was rebuilt — and the layer above repairs
+    /// all of them by reconnecting. It only has to be told which, and the node
+    /// is the only thing that knows.
+    /// </param>
+    /// <remarks>
+    /// Without this the whole of it reached an operator's log as "Cannot
+    /// access a disposed object", which names the type that noticed and
+    /// nothing that happened. A field report of a link flapping every few
+    /// seconds carried exactly that line, twice, from two loops, and it said
+    /// no more than that something somewhere had been disposed.
+    /// </remarks>
+    internal async ValueTask CloseAsync(string reason)
+    {
+        _endedBecause = reason;
+        await DisposeAsync().ConfigureAwait(false);
+    }
+
     /// <inheritdoc/>
     public async ValueTask DisposeAsync()
     {
@@ -227,7 +269,10 @@ internal sealed class Relay1Connection : ITailcatConnection
         _accepted.Writer.TryComplete();
         foreach (Relay1Stream stream in _streams.Values)
         {
-            stream.OnSessionClosed();
+            // The layer above almost always learns of an end from a read that
+            // was already parked, not from a fresh call, so the reason has to
+            // travel down here too or it never reaches anybody.
+            stream.OnSessionClosed(_endedBecause);
         }
         _streams.Clear();
         _sendLock.Dispose();
@@ -236,6 +281,23 @@ internal sealed class Relay1Connection : ITailcatConnection
         {
             await _onClosed(this).ConfigureAwait(false);
         }
+    }
+
+    // A session the node closed is not a misused object: the caller did
+    // nothing wrong and reconnecting is the whole of the repair. Saying
+    // ObjectDisposedException for it names the wrong culprit and, worse,
+    // carries no cause.
+    private void ThrowIfEnded()
+    {
+        if (!_disposed)
+        {
+            return;
+        }
+        if (_endedBecause is { } why)
+        {
+            throw new TailcatException(why);
+        }
+        throw new ObjectDisposedException(nameof(Relay1Connection));
     }
 
     // Parity alone says who opened a stream: odd from the dialler, even from

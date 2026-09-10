@@ -510,11 +510,16 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
             LinkDisconnectReason kind = LinkDisconnectReason.NetworkLost;
             LinkSession? session = null;
             bool wasUp = false;
+            // What the pause afterwards is allowed to shorten itself for. Only
+            // an attempt that got as far as taking a session leaves the source
+            // able to tell dead time from a genuine wait.
+            SessionAttempt attempt = SessionAttempt.NeverReachedTheSource;
             try
             {
                 INodeGateway gateway = await _node.EnsureAsync(ct).ConfigureAwait(false);
                 ITailcatConnection connection =
                     await _source.NextSessionAsync(gateway, ct).ConfigureAwait(false);
+                attempt = SessionAttempt.TookASession;
 
                 session = new LinkSession(
                     connection,
@@ -571,7 +576,7 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
                 // Not something waiting will fix — no QUIC on this platform,
                 // a store that cannot be written. Callers hear about it
                 // instead of waiting forever for a link that will never come.
-                _log.Warn($"link stopped: {ex.Message}");
+                _log.Warn($"link stopped: {ex.Message}", ex);
                 Stop(ex);
                 return;
             }
@@ -598,7 +603,7 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
 
             try
             {
-                await Task.Delay(backoff, _options.TimeProvider, ct).ConfigureAwait(false);
+                await _source.PauseAsync(backoff, attempt, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {

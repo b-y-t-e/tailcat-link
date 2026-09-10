@@ -23,6 +23,28 @@ public sealed class TailcatNodeGatewayFactory : INodeGatewayFactory
     /// <summary>Where the node reports what it is doing. Nothing, by default.</summary>
     public ITailcatObserver Observer { get; init; } = NullTailcatObserver.Instance;
 
+    /// <summary>
+    /// What this machine offers a peer, best first. Null works it out from the
+    /// platform, which is what almost every application wants.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Naming <see cref="PeerTransport.Relay1"/> alone is how a machine that
+    /// has QUIC is made to behave like one that has not — a browser, or
+    /// Windows 10 — which is the only way to reproduce a relayed-only problem
+    /// on the machine you have. It is also how an operator keeps a link on the
+    /// relay for good, at the cost of every direct path.
+    /// </para>
+    /// <para>
+    /// This is a property of the gateway rather than of
+    /// <see cref="LinkOptions"/> because a caller who supplied a gateway of
+    /// their own would find such an option quietly doing nothing. Asking for
+    /// <see cref="PeerTransport.Quic"/> where the platform has none is refused
+    /// when the node is built, rather than dropped in silence.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<PeerTransport>? Transports { get; init; }
+
     /// <inheritdoc/>
     public async Task<INodeGateway> CreateAsync(
         NodePrivate privateKey,
@@ -36,6 +58,7 @@ public sealed class TailcatNodeGatewayFactory : INodeGatewayFactory
                 HomeRegionId = homeRegionId,
                 HandshakeTimeout = HandshakeTimeout,
                 Observer = Observer,
+                Transports = Transports,
             },
             cancellationToken).ConfigureAwait(false);
         return new TailcatNodeGateway(node);

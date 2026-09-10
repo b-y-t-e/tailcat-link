@@ -901,6 +901,82 @@ public class PairedLinkTests
         Assert.Contains(LinkConnectionState.Connected, states);
     }
 
+    /// <summary>
+    /// A host with a machine already knocking must take it, rather than sit
+    /// out the pause it keeps between attempts.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The pause paces attempts a link makes itself, and a host makes none:
+    /// its accept loop has already done the handshake and put a live
+    /// connection in the queue, and nobody serves that connection until the
+    /// supervision loop comes round and takes it. The machine at the other end
+    /// is by then connected, asking, and hearing nothing.
+    /// </para>
+    /// <para>
+    /// Sitting it out is what turned a flap into a permanent one in the field.
+    /// The pause doubles towards <see cref="LinkOptions.MaxReconnectDelay"/>,
+    /// and once it is longer than the far end's heartbeat plus its request
+    /// timeout, that end gives up and dials again inside every pause — and
+    /// each new dial replaces the session whose connection is still waiting
+    /// here, so what this loop finally picks up is one the node has already
+    /// closed. Two machines flapped like that for as long as both were
+    /// switched on.
+    /// </para>
+    /// <para>
+    /// Relayed on purpose: that is the shape it was reported in, and a pair
+    /// that can do QUIC finds a direct path and never shows it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task AHostTakesAWaitingMachineWithoutSittingOutItsBackoff()
+    {
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(3));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        FakeRelayGatewayFactory gateways = new(relay, [PeerTransport.Relay1]);
+        InMemoryLinkStore operatorStore = new();
+
+        // Far longer than this test is willing to wait, which is the point:
+        // being in the pause at the wrong moment has to be what fails.
+        TimeSpan backoff = TimeSpan.FromSeconds(20);
+        LinkOptions hosting = OptionsFor(gateways, new InMemoryLinkStore()) with
+        {
+            RequestTimeout = TimeSpan.FromSeconds(2),
+            MinReconnectDelay = backoff,
+            MaxReconnectDelay = backoff,
+        };
+
+        await using ILinkHost host = await TailcatLink.HostManyAsync("demo", hosting, ct);
+        host.SetRequestHandler((_, _, _) =>
+            Task.FromResult<ReadOnlyMemory<byte>>(Encoding.UTF8.GetBytes("pong")));
+
+        TaskCompletionSource gone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.PeerLeft += (_, _) => gone.TrySetResult();
+
+        ILink first = await TailcatLink.JoinAsync(
+            "demo", host.InvitationCode.Value, OptionsFor(gateways, operatorStore), ct);
+        Assert.Equal("pong", await first.RequestAsync("ping", ct));
+
+        // The machine goes without a goodbye, so the host loses its session
+        // and starts the pause.
+        await first.DisposeAsync();
+        await gone.Task.WaitAsync(ct);
+
+        // And comes straight back, the way the application that reported this
+        // does: same store, no code, nobody typing anything.
+        long knocked = Stopwatch.GetTimestamp();
+        await using ILink again = await TailcatLink.JoinAsync(
+            "demo", invitationCode: null, OptionsFor(gateways, operatorStore), ct);
+        Assert.Equal("pong", await again.RequestAsync("ping", ct));
+
+        TimeSpan waited = Stopwatch.GetElapsedTime(knocked);
+        Assert.True(
+            waited < backoff,
+            $"the host took {waited} to answer a machine it had already admitted");
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, string because, CancellationToken ct)
     {
         using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct);

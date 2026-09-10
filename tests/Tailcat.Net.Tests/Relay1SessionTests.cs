@@ -452,4 +452,284 @@ public class Relay1SessionTests
         Assert.Equal([PeerTransport.Relay1], ack.Transports);
         Assert.Equal(0, listener.SessionCount);
     }
+
+    /// <summary>
+    /// A session the node takes away says what took it, rather than leaving
+    /// whoever held it to read "Cannot access a disposed object".
+    /// </summary>
+    /// <remarks>
+    /// This is the field case: one machine re-dials, the node replaces the
+    /// session it had for that key, and the layer above finds its connection
+    /// gone. Reconnecting is the whole of the repair, so the only thing that
+    /// end needs is to be told which ordinary thing happened — and the node
+    /// is the only thing that knows. A report of a link flapping every few
+    /// seconds carried nothing but the disposed-object line, from two loops
+    /// at once, and it named neither the peer nor the cause.
+    /// </remarks>
+    [Fact]
+    public async Task AMachineThatDialsAgainSaysSoOnTheSessionItReplaced()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+
+        // The same identity both times, which is what a machine that lost its
+        // network and rebuilt its node looks like from here.
+        NodePrivate key = NodePrivate.NewKey();
+
+        Task<ITailcatConnection> firstArrival = listener.AcceptConnectionAsync(ct);
+        ITailcatConnection served;
+        await using (TailcatNode first = await TailcatNode.CreateAsync(OptionsFor(relay, key), ct))
+        {
+            await using ITailcatConnection dialled = await first.ConnectAsync(listener.Address, ct);
+            served = await firstArrival;
+        }
+
+        await using TailcatNode again = await TailcatNode.CreateAsync(OptionsFor(relay, key), ct);
+        Task<ITailcatConnection> secondArrival = listener.AcceptConnectionAsync(ct);
+        await using ITailcatConnection redialled = await again.ConnectAsync(listener.Address, ct);
+        await using ITailcatConnection replacement = await secondArrival;
+
+        await using (served)
+        {
+            TailcatException ended = await Assert.ThrowsAsync<TailcatException>(
+                async () => await served.OpenStreamAsync(ct));
+            Assert.Contains("opened another session", ended.Message, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The reason reaches a loop already parked in
+    /// <see cref="ITailcatConnection.AcceptStreamAsync"/>, which is how the
+    /// layer above actually hears that a session has ended.
+    /// </summary>
+    /// <remarks>
+    /// Almost nothing learns of an end from a fresh call: a serve loop sits in
+    /// accept and a transfer sits in a read, and both were being told only
+    /// that a channel had been closed. A reason that reaches the calls nobody
+    /// is making is a reason nobody reads.
+    /// </remarks>
+    [Fact]
+    public async Task AParkedAcceptHearsWhyTheSessionEnded()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+
+        NodePrivate key = NodePrivate.NewKey();
+
+        Task<ITailcatConnection> firstArrival = listener.AcceptConnectionAsync(ct);
+        ITailcatConnection served;
+        await using (TailcatNode first = await TailcatNode.CreateAsync(OptionsFor(relay, key), ct))
+        {
+            await using ITailcatConnection dialled = await first.ConnectAsync(listener.Address, ct);
+            served = await firstArrival;
+        }
+
+        // Parked before anything replaces the session, the way a serve loop is.
+        Task<Stream> waiting = served.AcceptStreamAsync(ct);
+
+        await using TailcatNode again = await TailcatNode.CreateAsync(OptionsFor(relay, key), ct);
+        Task<ITailcatConnection> secondArrival = listener.AcceptConnectionAsync(ct);
+        await using ITailcatConnection redialled = await again.ConnectAsync(listener.Address, ct);
+        await using ITailcatConnection replacement = await secondArrival;
+
+        await using (served)
+        {
+            TailcatException ended = await Assert.ThrowsAsync<TailcatException>(async () => await waiting);
+            Assert.Contains("opened another session", ended.Message, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A stream of a session this node took away says what this node did, and
+    /// does not put the node's words in the peer's mouth.
+    /// </summary>
+    /// <remarks>
+    /// A RESET frame and a session the node ended are two different events
+    /// that leave the same stream unusable, and only the first is the peer's
+    /// doing. Reporting the second as "the peer reset the stream: the node was
+    /// shut down" sends whoever reads the log to the wrong machine, and the
+    /// link above copies the wording into its own exception unchanged.
+    /// </remarks>
+    [Fact]
+    public async Task AStreamThisNodeEndedDoesNotBlameThePeer()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+
+        // The same identity both times: a machine that lost its network and
+        // rebuilt its node, which is what replaces the session here.
+        NodePrivate key = NodePrivate.NewKey();
+
+        Task<ITailcatConnection> firstArrival = listener.AcceptConnectionAsync(ct);
+        ITailcatConnection served;
+        await using (TailcatNode first = await TailcatNode.CreateAsync(OptionsFor(relay, key), ct))
+        {
+            await using ITailcatConnection dialled = await first.ConnectAsync(listener.Address, ct);
+            served = await firstArrival;
+        }
+
+        // Handed out while the session is alive, the way a transfer's stream
+        // is, and still held when the session is replaced.
+        Stream stream = await served.OpenStreamAsync(ct);
+
+        await using TailcatNode again = await TailcatNode.CreateAsync(OptionsFor(relay, key), ct);
+        Task<ITailcatConnection> secondArrival = listener.AcceptConnectionAsync(ct);
+        await using ITailcatConnection redialled = await again.ConnectAsync(listener.Address, ct);
+        await using ITailcatConnection replacement = await secondArrival;
+
+        await using (served)
+        {
+            byte[] buffer = new byte[16];
+            IOException reading = await Assert.ThrowsAsync<IOException>(async () =>
+            {
+                int read = await stream.ReadAsync(buffer, ct);
+                Assert.Fail($"the read returned {read} instead of saying why the session ended");
+            });
+            Assert.Contains("opened another session", reading.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("the peer reset", reading.Message, StringComparison.Ordinal);
+
+            IOException writing = await Assert.ThrowsAsync<IOException>(
+                async () => await stream.WriteAsync(buffer, ct));
+            Assert.Contains("opened another session", writing.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("the peer reset", writing.Message, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// A relay1 stream already being read says who took the session, instead
+    /// of ending as if the peer had simply stopped sending.
+    /// </summary>
+    /// <remarks>
+    /// The reason is set while the read is parked, so a read that only looks
+    /// at it before it waits never sees it: it is woken by the closed queue
+    /// and reports an orderly end of stream, which the layer above reads as a
+    /// peer that stopped mid-frame. That is the shape the flapping was
+    /// reported in — a request waiting for its answer at the moment the node
+    /// replaced the session — and this is the transport it was reported on.
+    /// </remarks>
+    [Fact]
+    public async Task AStreamAlreadyBeingReadSaysWhoTookTheSession()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+
+        NodePrivate key = NodePrivate.NewKey();
+
+        Task<ITailcatConnection> firstArrival = listener.AcceptConnectionAsync(ct);
+        ITailcatConnection served;
+        await using (TailcatNode first = await TailcatNode.CreateAsync(OptionsFor(relay, key), ct))
+        {
+            await using ITailcatConnection dialled = await first.ConnectAsync(listener.Address, ct);
+            served = await firstArrival;
+        }
+
+        Stream stream = await served.OpenStreamAsync(ct);
+
+        // Parked the way a request waiting for its answer is, before anything
+        // has replaced the session.
+        ValueTask<int> reading = stream.ReadAsync(new byte[16], ct);
+
+        await using TailcatNode again = await TailcatNode.CreateAsync(OptionsFor(relay, key), ct);
+        Task<ITailcatConnection> secondArrival = listener.AcceptConnectionAsync(ct);
+        await using ITailcatConnection redialled = await again.ConnectAsync(listener.Address, ct);
+        await using ITailcatConnection replacement = await secondArrival;
+
+        await using (served)
+        {
+            IOException ended = await Assert.ThrowsAsync<IOException>(async () =>
+            {
+                int read = await reading;
+                Assert.Fail($"the read returned {read} instead of saying why the session ended");
+            });
+            Assert.Contains("opened another session", ended.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("the peer reset", ended.Message, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// Content the peer finished sending still ends as content, even when the
+    /// node takes the session away a moment later.
+    /// </summary>
+    /// <remarks>
+    /// The FIN and the closing race: the FIN wakes a parked read, and the node
+    /// can replace the session before that read runs again. Reading the reason
+    /// then would turn a transfer that arrived whole into a broken one, and
+    /// the layer above would resume it for nothing.
+    /// </remarks>
+    [Fact]
+    public async Task ContentTheFinFinishedIsNotTurnedIntoAFailureByTheSessionEnding()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+        await using TailcatNode dialer = await NodeAsync(relay, ct);
+
+        (ITailcatConnection client, ITailcatConnection server) = await PairAsync(relay, listener, dialer, ct);
+        await using (client)
+        await using (server)
+        {
+            Relay1Stream stream = (Relay1Stream)await client.OpenStreamAsync(ct);
+
+            // Parked with nothing left to read, the way an end of content is
+            // waited for.
+            ValueTask<int> reading = stream.ReadAsync(new byte[16], ct);
+
+            // The order the field report had: the FIN arrives, and the node
+            // takes the session away before the woken read has run.
+            stream.OnFin();
+            stream.OnSessionClosed("the peer opened another session");
+
+            Assert.Equal(0, await reading);
+            Assert.Equal(0, await stream.ReadAsync(new byte[16], ct));
+        }
+    }
+
+    /// <summary>
+    /// A connection its own owner disposed is still a misused object, because
+    /// there it is the caller's mistake and nothing happened to the session.
+    /// </summary>
+    [Fact]
+    public async Task AConnectionItsOwnerDisposedIsStillADisposedObject()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+        await using TailcatNode dialer = await NodeAsync(relay, ct);
+
+        (ITailcatConnection client, ITailcatConnection server) = await PairAsync(relay, listener, dialer, ct);
+        await using (server)
+        {
+            await client.DisposeAsync();
+            await Assert.ThrowsAsync<ObjectDisposedException>(
+                async () => await client.OpenStreamAsync(ct));
+        }
+    }
 }

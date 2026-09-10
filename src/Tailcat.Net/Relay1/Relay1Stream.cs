@@ -24,6 +24,20 @@ namespace Tailcat.Net.Relay1;
 /// </remarks>
 internal sealed class Relay1Stream : Stream
 {
+    /// <summary>Why this stream ended, and whether the peer is what ended it.</summary>
+    /// <remarks>
+    /// Both are needed to say anything true. A RESET frame carries the peer's
+    /// own words, while a session the node here took away carries this
+    /// machine's — and reporting the latter as "the peer reset the stream: the
+    /// node was shut down" sends whoever reads it to the other machine.
+    /// </remarks>
+    private readonly record struct StreamEnd(string Reason, bool ByPeer)
+    {
+        public string WhenReading => ByPeer ? $"the peer reset the stream: {Reason}" : Reason;
+
+        public string WhenWriting => ByPeer ? $"the stream is not writable: {Reason}" : Reason;
+    }
+
     /// <summary>How much a receiver lets the peer send before it has read any of it.</summary>
     public const int InitialWindow = 256 * 1024;
 
@@ -40,7 +54,15 @@ internal sealed class Relay1Stream : Stream
     private int _consumedSinceUpdate;
     private long _credit = InitialWindow;
     private TaskCompletionSource? _creditWaiter;
-    private string? _reset;
+    private StreamEnd? _ended;  // Null until something ends this stream.
+
+    // The peer said FIN: everything it meant to send is on its way here, so a
+    // drained queue is the orderly end of the content and nothing that happens
+    // to the session afterwards makes it anything else. Kept apart from
+    // <see cref="_ended"/> because the two race: a FIN can wake a parked read
+    // and the node can take the session away before that read runs again, and
+    // reporting a completed transfer as broken makes it resume for nothing.
+    private bool _finReceived;
     private bool _finSent;
     private bool _disposed;
 
@@ -85,9 +107,9 @@ internal sealed class Relay1Stream : Stream
         {
             lock (_mu)
             {
-                if (_reset is not null && _leftover.IsEmpty && !_inbound.Reader.TryPeek(out _))
+                if (!_finReceived && _ended is { } ended && _leftover.IsEmpty && !_inbound.Reader.TryPeek(out _))
                 {
-                    throw new IOException($"the peer reset the stream: {_reset}");
+                    throw new IOException(ended.WhenReading);
                 }
                 if (!_leftover.IsEmpty)
                 {
@@ -105,6 +127,19 @@ internal sealed class Relay1Stream : Stream
             }
             catch (ChannelClosedException)
             {
+                // A read already parked here is how the layer above usually
+                // hears that a session is over, so what ended the stream has
+                // to be looked at again: it was set while this read waited.
+                // Without that the caller sees an orderly end of stream and
+                // reports the peer as having stopped mid-frame, when what
+                // happened is that this node took the session away.
+                lock (_mu)
+                {
+                    if (!_finReceived && _ended is { } ended)
+                    {
+                        throw new IOException(ended.WhenReading);
+                    }
+                }
                 return 0; // The peer said FIN and everything it sent is read.
             }
         }
@@ -201,13 +236,20 @@ internal sealed class Relay1Stream : Stream
         }
     }
 
-    internal void OnFin() => _inbound.Writer.TryComplete();
+    internal void OnFin()
+    {
+        lock (_mu)
+        {
+            _finReceived = true;
+        }
+        _inbound.Writer.TryComplete();
+    }
 
     internal void OnReset(string reason)
     {
         lock (_mu)
         {
-            _reset = reason;
+            _ended = new StreamEnd(reason, ByPeer: true);
         }
         _inbound.Writer.TryComplete();
     }
@@ -224,11 +266,18 @@ internal sealed class Relay1Stream : Stream
         waiting?.TrySetResult();
     }
 
-    internal void OnSessionClosed()
+    /// <param name="reason">
+    /// Why the node took the session away, when it did. Null is the owner
+    /// disposing its own connection, where nothing happened worth naming.
+    /// </param>
+    internal void OnSessionClosed(string? reason = null)
     {
         lock (_mu)
         {
-            _reset ??= "the session ended";
+            // Not the peer's doing, whoever it was: this end's node took the
+            // session away, and a peer that had already reset the stream said
+            // so first and keeps the account it gave.
+            _ended ??= new StreamEnd(reason ?? "the session ended", ByPeer: false);
         }
         _inbound.Writer.TryComplete();
         OnWindow(0);
@@ -243,9 +292,9 @@ internal sealed class Relay1Stream : Stream
             Task waiting;
             lock (_mu)
             {
-                if (_reset is not null)
+                if (_ended is { } ended)
                 {
-                    throw new IOException($"the stream is not writable: {_reset}");
+                    throw new IOException(ended.WhenWriting);
                 }
                 if (_credit > 0)
                 {
