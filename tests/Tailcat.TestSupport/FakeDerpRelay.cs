@@ -100,6 +100,7 @@ public sealed class FakeDerpRelay : IAsyncDisposable
     private async Task ServeAsync(Socket socket, CancellationToken ct)
     {
         DerpFrameStream frames = new(new NetworkStream(socket, ownsSocket: true));
+        NodePublic? registered = null;
         try
         {
             NodePublic clientKey = await LoginAsync(frames, ct);
@@ -107,11 +108,41 @@ public sealed class FakeDerpRelay : IAsyncDisposable
             {
                 _clients[clientKey] = frames;
             }
+            registered = clientKey;
             await RouteAsync(frames, clientKey, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // A test closing a client is normal; nothing to report.
+        }
+        finally
+        {
+            // A client that has gone must stop being somewhere to deliver to.
+            // Left in, its entry is handed to the next sender, whose write
+            // into a dead socket used to end that sender's own connection —
+            // so one machine's disappearance took the other's relay with it,
+            // and both spent the test reconnecting past each other.
+            if (registered is { } key)
+            {
+                Forget(key, frames);
+            }
+        }
+    }
+
+    /// <summary>Takes a client out, unless it has already been replaced.</summary>
+    /// <remarks>
+    /// Only when the entry is still this connection: a client that reconnected
+    /// under the same key has overwritten it, and removing that would strand
+    /// the connection which is now the live one.
+    /// </remarks>
+    private void Forget(NodePublic client, DerpFrameStream frames)
+    {
+        lock (_mu)
+        {
+            if (_clients.TryGetValue(client, out DerpFrameStream? current) && ReferenceEquals(current, frames))
+            {
+                _clients.Remove(client);
+            }
         }
     }
 
@@ -165,18 +196,28 @@ public sealed class FakeDerpRelay : IAsyncDisposable
                     }
                     if (peer is null)
                     {
-                        // No such peer here: tell the sender, as a relay does.
-                        byte[] gone = new byte[DerpProtocol.KeyLen + 1];
-                        dst.Raw32().CopyTo(gone, 0);
-                        gone[^1] = (byte)DerpPeerGoneReason.NotHere;
-                        await frames.WriteFrameAsync(DerpFrameType.PeerGone, gone, ct);
+                        await SayPeerGoneAsync(frames, dst, ct).ConfigureAwait(false);
                         break;
                     }
 
                     byte[] delivery = new byte[DerpProtocol.KeyLen + packet.Length];
                     clientKey.Raw32().CopyTo(delivery, 0);
                     packet.Span.CopyTo(delivery.AsSpan(DerpProtocol.KeyLen));
-                    await peer.WriteFrameAsync(DerpFrameType.RecvPacket, delivery, ct);
+                    try
+                    {
+                        await peer.WriteFrameAsync(DerpFrameType.RecvPacket, delivery, ct).ConfigureAwait(false);
+                    }
+#pragma warning disable CA1031 // Whatever the destination did, it is not this sender's fault and must not be its ending.
+                    catch (Exception) when (!ct.IsCancellationRequested)
+#pragma warning restore CA1031
+                    {
+                        // The destination went while this packet was on its
+                        // way. A real relay drops it and says so; letting the
+                        // failure out of here would end the *sender's*
+                        // connection for the destination's mistake.
+                        Forget(dst, peer);
+                        await SayPeerGoneAsync(frames, dst, ct).ConfigureAwait(false);
+                    }
                     break;
 
                 case DerpFrameType.Pong:
@@ -186,6 +227,15 @@ public sealed class FakeDerpRelay : IAsyncDisposable
                     break;
             }
         }
+    }
+
+    /// <summary>Tells a sender that the machine it aimed at is not here.</summary>
+    private static Task SayPeerGoneAsync(DerpFrameStream frames, NodePublic gone, CancellationToken ct)
+    {
+        byte[] payload = new byte[DerpProtocol.KeyLen + 1];
+        gone.Raw32().CopyTo(payload, 0);
+        payload[^1] = (byte)DerpPeerGoneReason.NotHere;
+        return frames.WriteFrameAsync(DerpFrameType.PeerGone, payload, ct);
     }
 
     /// <summary>Sends a ping the client is expected to echo back.</summary>
