@@ -595,16 +595,16 @@ public class PairedLinkTests
         using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(3));
         CancellationToken ct = cts.Token;
 
-        await using FakeDerpRelay relay = new();
-
-        // Both ends' own account of the recovery, stamped. This is the one
-        // test that has failed where nobody can watch it — it comes back on a
-        // fast machine and not always on a slow one — and a bare timeout says
-        // nothing about which end was stuck on what.
         ConcurrentQueue<string> said = [];
         long from = Stopwatch.GetTimestamp();
         void Say(string end, string line) =>
             said.Enqueue($"{Stopwatch.GetElapsedTime(from).TotalSeconds,6:F1}s {end}: {line}");
+
+        await using FakeDerpRelay relay = new() { Log = line => Say("relay", line) };
+
+        // Every layer's own account of the recovery, stamped. This is the one
+        // test that has failed where nobody can watch it, and a bare timeout
+        // says nothing about which end was stuck on what.
 
         // The nodes' own account too: the link can only say that the peer did
         // not answer, and what is wanted is why.

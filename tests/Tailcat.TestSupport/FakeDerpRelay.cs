@@ -54,6 +54,17 @@ public sealed class FakeDerpRelay : IAsyncDisposable
     /// <summary>The client info the last connecting client sent.</summary>
     public DerpClientInfo? LastClientInfo { get; private set; }
 
+    /// <summary>
+    /// Where the relay says who logged in, who went, and what it could not
+    /// deliver. Nothing, by default.
+    /// </summary>
+    /// <remarks>
+    /// A machine that is not reachable and one that is reachable and silent
+    /// look identical from either end of a link. Only the relay in the middle
+    /// knows which it was.
+    /// </remarks>
+    public Action<string>? Log { get; init; }
+
     /// <summary>Opens a raw TCP stream to the relay, ready for the handshake.</summary>
     public async Task<Stream> DialAsync(CancellationToken cancellationToken = default)
     {
@@ -109,11 +120,12 @@ public sealed class FakeDerpRelay : IAsyncDisposable
                 _clients[clientKey] = frames;
             }
             registered = clientKey;
+            Log?.Invoke($"{Short(clientKey)} logged in");
             await RouteAsync(frames, clientKey, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // A test closing a client is normal; nothing to report.
+            Log?.Invoke($"{(registered is { } who ? Short(who) : "a client")} ended: {ex.Message}");
         }
         finally
         {
@@ -142,6 +154,7 @@ public sealed class FakeDerpRelay : IAsyncDisposable
             if (_clients.TryGetValue(client, out DerpFrameStream? current) && ReferenceEquals(current, frames))
             {
                 _clients.Remove(client);
+                Log?.Invoke($"{Short(client)} forgotten");
             }
         }
     }
@@ -196,6 +209,7 @@ public sealed class FakeDerpRelay : IAsyncDisposable
                     }
                     if (peer is null)
                     {
+                        Log?.Invoke($"{Short(clientKey)} -> {Short(dst)}: nobody there");
                         await SayPeerGoneAsync(frames, dst, ct).ConfigureAwait(false);
                         break;
                     }
@@ -228,6 +242,9 @@ public sealed class FakeDerpRelay : IAsyncDisposable
             }
         }
     }
+
+    /// <summary>Enough of a key to follow it through a log.</summary>
+    private static string Short(NodePublic key) => Convert.ToHexStringLower(key.Raw32())[..12];
 
     /// <summary>Tells a sender that the machine it aimed at is not here.</summary>
     private static Task SayPeerGoneAsync(DerpFrameStream frames, NodePublic gone, CancellationToken ct)
