@@ -51,6 +51,9 @@ się dalej.
 
 ### D1. Kto co potrafi: bajt możliwości w odpowiedzi na ping
 
+**Aktualizacja: klient przeglądarkowy mówi wymian tak samo jak .NET**, ze wznawianiem w obie strony i
+transferami. Tabele niżej opisują stan sprzed tej zmiany.
+
 **Zgodność z 0.4 nie jest dla nas ważna.** Żadna maszyna 0.4 nie działa, biblioteka jest dopiero testowana.
 Ścieżki dla starszych maszyn opisane niżej zostały zrobione, zanim to ustaliliśmy, i można je usunąć.
 

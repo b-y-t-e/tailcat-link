@@ -25,6 +25,18 @@ import {
 } from "../../src/link-frame.js";
 import { MAX_DISPLAY_NAME_BYTES, decodeLinkHello, encodeLinkHello } from "../../src/link-hello.js";
 import { hex, linkVectors, unhex } from "./vectors.mjs";
+import {
+  BLOCK_BYTES,
+  ExchangeFlags,
+  decodeAnswerHeader,
+  decodeExchangeHeader,
+  decodeOffset,
+  encodeAnswerHeader,
+  encodeExchangeHeader,
+  encodeOffset,
+  writeBlocks,
+} from "../../src/exchange-frame.js";
+import { IncomingContent } from "../../src/incoming-content.js";
 
 /// Collects what a channel writes, which is all a vector needs of a stream.
 const sink = () => {
@@ -116,17 +128,70 @@ test("both sides agree on the bounds that are left", () => {
   assert.equal(MAX_DISPLAY_NAME_BYTES, linkVectors.limits.maxDisplayNameBytes);
   assert.equal(MAX_CHANNEL_NAME_BYTES, linkVectors.limits.maxChannelNameBytes);
   assert.equal(HELLO_FRAME_BYTES, linkVectors.limits.helloFrameBytes);
+  // Also what decides whether content is pipelined, which both ends must agree on.
+  assert.equal(BLOCK_BYTES, linkVectors.limits.blockBytes);
 });
 
-test("a ping answer reads as the shared vectors say, and this client says only large frames", () => {
+test("a ping answer reads as the shared vectors say, and this client says what the .NET library says", () => {
   assert.equal(Capabilities.LargeFrames, linkVectors.capabilities.largeFrames);
   assert.equal(Capabilities.Exchanges, linkVectors.capabilities.exchanges);
   for (const vector of linkVectors.capabilities.pingAnswers) {
     assert.equal(decodeCapabilities(unhex(vector.answerHex)), vector.capabilities, vector.name);
   }
-  // This client takes frames of any size and does not speak exchanges, which
-  // is what keeps a .NET host from sending it one.
-  assert.equal(hex(encodeCapabilities(THIS_CLIENT)), "01");
+  // The same as the .NET library, which is what makes a .NET host send this
+  // client exchanges rather than single frames.
+  assert.equal(hex(encodeCapabilities(THIS_CLIENT)), "03");
+});
+
+test("an exchange header is written as the .NET side reads it, and read as it writes it", () => {
+  assert.equal(ExchangeFlags.Answer, linkVectors.exchangeFlags.answer);
+  assert.equal(ExchangeFlags.Transfer, linkVectors.exchangeFlags.transfer);
+  assert.equal(ExchangeFlags.Pipelined, linkVectors.exchangeFlags.pipelined);
+  assert.equal(ExchangeFlags.AckOnDelivery, linkVectors.exchangeFlags.ackOnDelivery);
+
+  for (const vector of linkVectors.exchangeHeaders) {
+    const header = {
+      flags: vector.flags,
+      length: vector.length,
+      answerOffset: vector.answerOffset,
+      name: vector.contentName,
+      contentType: vector.contentType,
+      metadata: unhex(vector.metadataHex),
+    };
+    assert.equal(hex(encodeExchangeHeader(header)), vector.encodedHex, vector.name);
+
+    const read = decodeExchangeHeader(unhex(vector.encodedHex));
+    assert.deepEqual({ ...read, metadata: hex(read.metadata) }, { ...header, metadata: vector.metadataHex }, vector.name);
+  }
+});
+
+test("an answer header is written as the .NET side reads it, and read as it writes it", () => {
+  for (const vector of linkVectors.answerHeaders) {
+    const header = { length: vector.length, contentType: vector.contentType, metadata: unhex(vector.metadataHex) };
+    assert.equal(hex(encodeAnswerHeader(header)), vector.encodedHex, vector.name);
+
+    const read = decodeAnswerHeader(unhex(vector.encodedHex));
+    assert.deepEqual({ ...read, metadata: hex(read.metadata) }, { ...header, metadata: vector.metadataHex }, vector.name);
+  }
+});
+
+test("an offset is eight bytes, big-endian, past what 32 bits can count", () => {
+  for (const vector of linkVectors.exchangeOffsets) {
+    assert.equal(hex(encodeOffset(vector.offset)), vector.encodedHex, vector.name);
+    assert.equal(decodeOffset(unhex(vector.encodedHex), null), vector.offset, vector.name);
+  }
+});
+
+test("content goes out in blocks the .NET side reads, and comes back from blocks it writes", async () => {
+  for (const vector of linkVectors.exchangeBlocks) {
+    const out = sink();
+    await writeBlocks(out, unhex(vector.contentHex), 0);
+    assert.equal(out.written.map(hex).join(""), vector.encodedHex, vector.name);
+
+    const content = new IncomingContent({ id: new Uint8Array(16), length: unhex(vector.contentHex).length });
+    await content.readBody(source(unhex(vector.encodedHex)), 0);
+    assert.equal(hex(content.bytes), vector.contentHex, vector.name);
+  }
 });
 
 test("a channel frame has no limit of its own", async () => {

@@ -17,6 +17,10 @@ export const FrameKind = {
   // 5 was the transfer before exchanges, which nothing sends any more; a frame
   // carrying one is refused rather than swallowed.
   Channel: 6,
+  // Content of any size, resumed in both directions across sessions: a
+  // request with its answer, a notification, or a transfer. See
+  // `outbound-exchange.js` and `incoming-exchange.js`.
+  Exchange: 7,
 };
 
 export const FrameStatus = {
@@ -31,12 +35,13 @@ export const Capabilities = {
   None: 0,
   // A message frame or a channel frame of any length.
   LargeFrames: 1,
-  // The exchange frame (7), which this client does not speak.
+  // The exchange frame (7).
   Exchanges: 2,
 };
 
-/// What this client says it can take.
-export const THIS_CLIENT = Capabilities.LargeFrames;
+/// What this client says it can take: the same as the .NET library, so the two
+/// exchange content the same way in both directions.
+export const THIS_CLIENT = Capabilities.LargeFrames | Capabilities.Exchanges;
 
 /// The most the first frame is read at before either end knows the other —
 /// the hello's answer. The one bound on anything a peer sends, and it is not on

@@ -40,9 +40,15 @@ the same protocol and the same promises.
 - **Reconnection.** A relay outage, a tab that was backgrounded, a host that
   rebooted — all the same from here, and all get the same answer. Nothing
   above is told.
-- **Requests that survive a reconnection.** An exchange keeps its id across
-  retries, so a request re-sent on a new session is answered from the host's
-  memory rather than run a second time.
+- **Anything, of any size, carried on where it stopped.** A request, a
+  notification or a transfer is one exchange, the same as in .NET
+  ([docs/exchanges.md](../../docs/exchanges.md)): the content goes in blocks,
+  each end says how far it got, and a session that dies mid-content is answered
+  by carrying on from there — in both directions, into a handler that runs
+  once. There is no size limit of the library's own; the content is held in the
+  page's memory, which is the one limit left.
+- **Content that says what it is.** `LinkContent` carries a name, a content
+  type and metadata beside the bytes, and they arrive before the content does.
 - **Detection that works.** Writing into a dead relayed session succeeds, so
   silence is what a host that has gone away looks like: a heartbeat and a
   per-request timeout are what notice.
@@ -51,8 +57,10 @@ the same protocol and the same promises.
   before it tears the session down — a handler returns long before its answer
   is on the wire, `send()` returns before the bytes leave, and a lost answer
   reaches the host as silence and a full timeout. `link.events` carries
-  `answered`, once the answer has been written, and `answer-failed` when it
-  could not be.
+  `answered`, once per request when its answer has been written, with
+  `{ name, requestLength, length }` — the request's name and both sizes in
+  bytes, never the content — and `answer-failed`, with the error, when an
+  answer could not be written or a notification's handler threw.
 - **A refusal that stops.** A host that will not have this browser answers the
   same way however often it is asked, so a refused pairing ends the link
   rather than being retried on the backoff schedule: the stored code is
@@ -62,13 +70,30 @@ the same protocol and the same promises.
   `LinkTimeoutError`, `LinkClosedError`, `RemoteHandlerError` — matching the
   exceptions of the same names in .NET, so a page catches the same
   distinctions the other end draws.
-- **A channel, for what is neither a request nor a file.** Realtime frames —
+- **A channel, for what must not be resumed.** Realtime frames —
   audio, telemetry, input events — are a round trip and a ledger entry each as
   requests. `openChannel` is the third shape: **ordered within the channel,
   and not durable**, so it ends with the session under it rather than being
   resumed, and `channel.closed.reason` says which of `peer-closed`,
   `local-closed` and `session-ended` happened.
   [docs/channels.md](../../docs/channels.md) is the wire format.
+
+```js
+import { LinkContent } from "@tailcat/link";
+
+// a request of any size, with what it says about itself
+const answer = await link.request(
+  LinkContent.fromBytes(recording, { name: "kuchnia.wav", contentType: "audio/wav", metadata }),
+);
+console.log(answer.text, answer.contentType);
+
+// a handler is given (text, bytes, content), and may answer with content
+link.onRequest((text, bytes, content) => LinkContent.fromString(`got ${content.name}`));
+
+// transfers, kept apart from requests; send() resolves once the host's handler has finished
+await link.send(LinkContent.fromBytes(file, { name: "film.mp4" }));
+link.onTransfer((content) => save(content.suggestedFileName, content.bytes));
+```
 
 ```js
 const audio = await link.openChannel("audio");
@@ -91,7 +116,8 @@ link.onChannel("telemetry", async (channel) => {
 | `relayHost` | — | dial this relay and skip the map entirely |
 | `store` | IndexedDB | `memoryStore()` for a page that would rather persist nothing |
 | `requestTimeout` | 30 s | how long one attempt waits before the session is suspect |
-| `requestDeadline` | 90 s | how long a request keeps being retried across sessions |
+| `requestDeadline` | 90 s | how long a request sent as text or bytes may go with nothing moving |
+| `transferStallTimeout` | 120 s | the same for `LinkContent` and transfers |
 | `heartbeatInterval` | 20 s | how often silence is tested for |
 | `minReconnectDelay` / `maxReconnectDelay` | 0.5 s / 30 s | backoff bounds |
 
@@ -117,7 +143,12 @@ obvious place to land on the other.
 | `src/link-hello.js` | `LinkHello.cs` | which invitation this browser holds, and what to call it |
 | `src/link-channel.js` | `LinkChannel.cs` | frames on a stream of their own, ordered and not durable |
 | `src/errors.js` | `LinkExceptions.cs` | the failures worth catching apart from one another |
-| `src/link-frame.js` | `LinkFrame.cs` | one request per stream, length-prefixed |
+| `src/link-frame.js` | `LinkFrame.cs` | one frame per stream, length-prefixed |
+| `src/exchange-frame.js` | `ExchangeFrame.cs`, `TransferFrame.cs` | the exchange headers, the offset and the blocks |
+| `src/outbound-exchange.js` | `OutboundExchange.cs`, `ExchangeAttempt.cs`, `ExchangeSender.cs` | an exchange sent, one attempt, and the loop across sessions |
+| `src/incoming-exchange.js` | `IncomingExchange.cs`, `ExchangeRegistry.cs` | an exchange received, once, across sessions |
+| `src/incoming-content.js` | `IncomingTransfer.cs` | content arriving, taken by position |
+| `src/link-content.js` | `LinkContent.cs` | content sent, with what it says about itself |
 | `src/idle-timeout.js` | `IdleTimeout.cs` | silence, not duration, is what times a request |
 | `src/exchange-ledger.js` | `ExchangeLedger.cs` | a retried request answered again, never run again |
 | `src/relay1.js` | `Relay1*.cs` | key schedule, records, stream multiplexing |

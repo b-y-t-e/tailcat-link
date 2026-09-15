@@ -8,7 +8,19 @@
 // received.
 
 import { Deferred, hex, readU32be, str, utf8 } from "../../src/bytes.js";
-import { FrameKind, FrameStatus, newExchange, readFrame, writeFrame } from "../../src/link-frame.js";
+import { ExchangeRegistry } from "../../src/incoming-exchange.js";
+import { LinkContent } from "../../src/link-content.js";
+import {
+  Capabilities,
+  FrameKind,
+  FrameStatus,
+  encodeCapabilities,
+  newExchange,
+  readFrame,
+  writeFrame,
+} from "../../src/link-frame.js";
+import { OutboundExchange, runExchangeAttempt } from "../../src/outbound-exchange.js";
+import { ExchangeFlags, writeBlocks } from "../../src/exchange-frame.js";
 import { ChannelWriter, decodeChannelName, encodeChannelName } from "../../src/link-channel.js";
 import { decodeLinkHello } from "../../src/link-hello.js";
 import { Relay1Session, deriveKeys } from "../../src/relay1.js";
@@ -23,10 +35,18 @@ class LoopbackConnection {
   #session;
   #peer = null;
   #inbound = Promise.resolve();
+  /// How many records this end has sent, so a test can cut a session part-way
+  /// through something it can only watch from the outside.
+  sentRecords = 0;
 
   constructor(keys, isDialer) {
     this.#session = new Relay1Session({
-      derp: { sendPacket: (_destination, record) => this.#peer?.deliver(record) },
+      derp: {
+        sendPacket: (_destination, record) => {
+          this.sentRecords++;
+          this.#peer?.deliver(record);
+        },
+      },
       peerPublic: UNROUTED,
       keys,
       isDialer,
@@ -101,25 +121,49 @@ export async function sessionPair() {
 /// The other machine: what `tailcat-demo host` does, in memory.
 ///
 /// It records what it was asked so a test can say what crossed the wire —
-/// which exchange ids arrived, and how many times each did.
+/// which exchange ids arrived, and how many times each did. Exchanges are
+/// served by the client's own registry, which is the same code a browser
+/// serves them with, held to the .NET wire format by the shared vectors.
 export class LoopbackHost {
   #connection;
   #pairingToken;
   #answer;
   #answersPings;
+  #answersHello;
+  #capabilities;
+  #registry;
 
   /// @param answer what to reply to a request; may hang, throw, or take its
-  ///   time, which is how the awkward cases are staged.
+  ///   time, which is how the awkward cases are staged. Given `(text, content)`.
   /// @param answersPings a host that stops answering these is the one thing a
   ///   relayed session cannot tell from a healthy one by writing to it.
+  /// @param answersHello false for a machine that takes the connection and
+  ///   says nothing, which is what a host that has gone for good looks like.
+  /// @param capabilities what the host says in a ping answer.
+  /// @param registry where exchanges are held: shared between hosts of one
+  ///   test to stand for one machine across reconnections, fresh by default
+  ///   to stand for one that forgot.
+  /// @param onTransfer takes what the browser sends as a transfer.
   constructor(
     connection,
-    { pairingToken = "token", answer = (text) => text.toUpperCase(), answersPings = true } = {},
+    {
+      pairingToken = "token",
+      answer = (text) => text.toUpperCase(),
+      answersPings = true,
+      answersHello = true,
+      capabilities = Capabilities.LargeFrames | Capabilities.Exchanges,
+      registry = null,
+      onTransfer = null,
+    } = {},
   ) {
     this.#connection = connection;
     this.#pairingToken = pairingToken;
     this.#answer = answer;
     this.#answersPings = answersPings;
+    this.#answersHello = answersHello;
+    this.#capabilities = capabilities;
+    this.#registry = registry ?? hostRegistry({ answer: (text, content) => this.#answer(text, content), onTransfer });
+    this.#registry.seenBy(this);
     this.requests = [];
     this.pings = 0;
     /// What the browser said about itself, so a test can check that a name it
@@ -145,6 +189,38 @@ export class LoopbackHost {
       const answer = await readFrame(stream);
       if (answer.tag === FrameStatus.Failed) throw new Error(str(answer.payload));
       return str(answer.payload);
+    } finally {
+      await stream.close().catch(() => {});
+    }
+  }
+
+  /// Asks the browser something as an exchange, the way a .NET host does,
+  /// resolving with the answer as content. Pass an `exchange` made earlier to
+  /// carry one attempt on from where another host's session left it.
+  async requestContent(content, { exchange = new OutboundExchange(content, ExchangeFlags.Answer, 5_000), flags } = {}) {
+    if (flags !== undefined) exchange.flags = flags;
+    const alive = new AbortController();
+    await runExchangeAttempt(
+      {
+        alive: alive.signal,
+        openStream: () => this.#connection.openStream(),
+        failUnlessBusy: () => {},
+      },
+      exchange,
+    );
+    return exchange.answer ? exchange.answer.complete : null;
+  }
+
+  /// Sends an exchange frame whose header is exactly `header`, resolving with
+  /// the first frame the browser answers with, for headers no sender would write.
+  /// @param pipelined content written in blocks before any answer is read,
+  ///   as a sender that asks with `Pipelined` does.
+  async exchangeWithHeader(header, pipelined = null) {
+    const stream = this.#connection.openStream();
+    try {
+      await writeFrame(stream, FrameKind.Exchange, newExchange(), header);
+      if (pipelined) await writeBlocks(stream, pipelined, 0, null);
+      return await readFrame(stream);
     } finally {
       await stream.close().catch(() => {});
     }
@@ -189,6 +265,10 @@ export class LoopbackHost {
       const { tag, exchange, payload } = await readFrame(stream);
       switch (tag) {
         case FrameKind.Hello: {
+          if (!this.#answersHello) {
+            leaveOpen = true;
+            break;
+          }
           this.hello = decodeLinkHello(payload);
           const accepted = this.hello.pairingToken === this.#pairingToken;
           await writeFrame(
@@ -215,7 +295,10 @@ export class LoopbackHost {
         case FrameKind.Ping:
           this.pings++;
           leaveOpen = !this.#answersPings;
-          if (this.#answersPings) await writeFrame(stream, FrameStatus.Ok, exchange, new Uint8Array(0));
+          if (this.#answersPings) await writeFrame(stream, FrameStatus.Ok, exchange, encodeCapabilities(this.#capabilities));
+          break;
+        case FrameKind.Exchange:
+          await this.#registry.deliver(exchange, payload, stream, new AbortController().signal);
           break;
         default: {
           this.requests.push({ exchange: hex(exchange), text: str(payload) });
@@ -227,6 +310,31 @@ export class LoopbackHost {
       if (!leaveOpen) await stream.close().catch(() => {});
     }
   }
+}
+
+/// A registry of the kind a host holds, which records every run of its request
+/// handler on whichever host last served it — so `requests` says what the
+/// handler was asked, once per run rather than once per attempt.
+export function hostRegistry({ answer = (text) => text.toUpperCase(), onTransfer = null } = {}) {
+  let host = null;
+  const registry = new ExchangeRegistry({
+    requests: () => async (content) => {
+      host?.requests.push({ exchange: content.id, text: content.text, content });
+      const answered = await answer(content.text, content);
+      return answered instanceof LinkContent ? answered : LinkContent.fromBytes(utf8(answered ?? ""));
+    },
+    transfers: () =>
+      onTransfer &&
+      (async (content) => {
+        await onTransfer(content);
+        return null;
+      }),
+    ackPatienceMs: 1_000,
+  });
+  registry.seenBy = (serving) => {
+    host = serving;
+  };
+  return registry;
 }
 
 /// A `dial` for TailcatLink.join. Every reconnection asks `hostFor` for the

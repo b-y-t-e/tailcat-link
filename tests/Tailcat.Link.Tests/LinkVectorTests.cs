@@ -36,12 +36,19 @@ public class LinkVectorTests
         CapabilityVectors Capabilities,
         FlagVector ExchangeFlags,
         IReadOnlyList<ExchangeHeaderVector> ExchangeHeaders,
-        IReadOnlyList<AnswerHeaderVector> AnswerHeaders);
+        IReadOnlyList<AnswerHeaderVector> AnswerHeaders,
+        IReadOnlyList<OffsetVector> ExchangeOffsets,
+        IReadOnlyList<BlocksVector> ExchangeBlocks);
+
+    private sealed record OffsetVector(string Name, long Offset, string EncodedHex);
+
+    private sealed record BlocksVector(string Name, string ContentHex, string EncodedHex);
 
     private sealed record LimitVector(
         int MaxDisplayNameBytes,
         int MaxChannelNameBytes,
-        int HelloFrameBytes);
+        int HelloFrameBytes,
+        int BlockBytes);
 
     private sealed record CapabilityVectors(byte LargeFrames, byte Exchanges, IReadOnlyList<PingAnswerVector> PingAnswers);
 
@@ -188,6 +195,7 @@ public class LinkVectorTests
         Assert.Equal(LinkHello.MaxDisplayNameBytes, limits.MaxDisplayNameBytes);
         Assert.Equal(ChannelFrame.MaxNameBytes, limits.MaxChannelNameBytes);
         Assert.Equal(LinkProtocol.HelloFrameBytes, limits.HelloFrameBytes);
+        Assert.Equal(TransferFrame.BlockBytes, limits.BlockBytes);
     }
 
     /// <summary>
@@ -239,6 +247,34 @@ public class LinkVectorTests
             Assert.Equal(header.Name, read.Name);
             Assert.Equal(header.ContentType, read.ContentType);
             Assert.Equal(vector.MetadataHex, Convert.ToHexStringLower(read.Metadata.Span));
+        }
+    }
+
+    /// <summary>An offset is eight bytes, big-endian, and reads back past what 32 bits can count.</summary>
+    [Fact]
+    public void OffsetsMatchTheSharedVectors()
+    {
+        foreach (OffsetVector vector in Load().ExchangeOffsets)
+        {
+            Assert.Equal(vector.EncodedHex, Convert.ToHexStringLower(TransferFrame.EncodeOffset(vector.Offset)));
+            Assert.Equal(vector.Offset, TransferFrame.DecodeOffset(Convert.FromHexString(vector.EncodedHex), length: null));
+        }
+    }
+
+    /// <summary>Content goes out as blocks the browser client reads, ending with an empty one.</summary>
+    [Fact]
+    public async Task BlocksMatchTheSharedVectors()
+    {
+        foreach (BlocksVector vector in Load().ExchangeBlocks)
+        {
+            byte[] content = Convert.FromHexString(vector.ContentHex);
+            using MemoryStream written = new();
+            OutboundTransfer cursor = new(
+                new TransferOffer { Length = content.Length }, new MemoryStream(content), progress: null, TimeProvider.System);
+
+            await TransferFrame.WriteContentAsync(written, cursor, idle: null, TestContext.Current.CancellationToken);
+
+            Assert.Equal(vector.EncodedHex, Convert.ToHexStringLower(written.ToArray()));
         }
     }
 

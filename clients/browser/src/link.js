@@ -10,10 +10,13 @@
 // and where a session comes from is `session-source.js`, the same split
 // `DurableLink.cs` keeps on the .NET side.
 
-import { Deferred, delay, str, utf8, withTimeout } from "./bytes.js";
+import { Deferred, delay, utf8, withTimeout } from "./bytes.js";
 import { parseAddress, parseInvitationCode } from "./address.js";
-import { LinkClosedError, LinkError, LinkTimeoutError, PairingRefusedError, RemoteHandlerError } from "./errors.js";
-import { FrameKind, newExchange } from "./link-frame.js";
+import { LinkClosedError, LinkError, LinkTimeoutError, PairingRefusedError } from "./errors.js";
+import { ExchangeFlags } from "./exchange-frame.js";
+import { EXCHANGE_RETENTION_MS, ExchangeRegistry } from "./incoming-exchange.js";
+import { LinkContent, asContent } from "./link-content.js";
+import { ExchangeSender } from "./outbound-exchange.js";
 import { DialingSessionSource, relayDialer } from "./session-source.js";
 import { LinkSession } from "./link-session.js";
 import { ExchangeLedger } from "./exchange-ledger.js";
@@ -23,7 +26,12 @@ import { nacl } from "./nacl.js";
 const DEFAULTS = {
   derpMap: "/derpmap.json",
   requestTimeout: 30_000,
+  // How long a request or notification sent as a string or bytes may go with
+  // nothing moving. Silence, not a deadline on the whole: see LinkOptions.RequestDeadline.
   requestDeadline: 90_000,
+  // The same for content sent as LinkContent, and for transfers, which more
+  // things may legitimately hold up: see LinkOptions.TransferStallTimeout.
+  transferStallTimeout: 120_000,
   heartbeatInterval: 20_000,
   minReconnectDelay: 500,
   maxReconnectDelay: 30_000,
@@ -36,6 +44,10 @@ export class TailcatLink {
   #store;
   #handler = null;
   #notifyHandler = null;
+  #transferHandler = null;
+  #sessionEnded = new Deferred();
+  #exchanges;
+  #sender;
   #channels = new Map();
   #session = null;
   #connected = new Deferred();
@@ -53,6 +65,35 @@ export class TailcatLink {
     this.#source = source;
     this.#store = store;
     this.events = new EventTarget();
+
+    // On the link, not the session: what arrived before a session died is
+    // exactly what the next session carries on from.
+    this.#exchanges = new ExchangeRegistry({
+      requests: () => asHandler(this.#handler),
+      notifications: () => asHandler(this.#notifyHandler) ?? asHandler(this.#handler),
+      transfers: () =>
+        this.#transferHandler &&
+        (async (content) => {
+          await this.#transferHandler(content);
+          return null;
+        }),
+      retentionMs: EXCHANGE_RETENTION_MS,
+      ackPatienceMs: options.requestTimeout,
+      // Named and measured rather than decoded: a request of any size would
+      // otherwise become a string of the same size only to sit in an event.
+      answered: (request, answer) =>
+        this.#emit("answered", { name: request.name, requestLength: request.length, length: answer.length }),
+      unheardFailure: (error) => this.#emit("answer-failed", error),
+    });
+    this.#sender = new ExchangeSender({
+      sessions: {
+        current: () => this.#sessionAsync(),
+        ended: () => this.#sessionEnded.promise,
+        stopping: this.#closing.signal,
+        fatal: () => this.#fatal,
+      },
+      minReconnectDelay: options.minReconnectDelay,
+    });
   }
 
   /// Brings up the end that connects to a host. The invitation code is needed
@@ -108,15 +149,29 @@ export class TailcatLink {
     await store.remove(appName);
   }
 
-  /// Answers whatever the host asks. A notification arrives here too, as a
-  /// request whose answer is thrown away.
+  /// Answers whatever the host asks, of whatever size. A notification arrives
+  /// here too, as a request whose answer is thrown away.
+  ///
+  /// The handler is given `(text, bytes, content)`: the request as text, as
+  /// bytes, and as the content it arrived as, with the name, content type and
+  /// metadata the host sent beside it. It may answer with text, bytes, or a
+  /// `LinkContent` carrying its own. It runs once per request, however many
+  /// sessions the request takes to arrive.
   onRequest(handler) {
     this.#handler = handler;
   }
 
-  /// Called for messages the host sent without expecting an answer.
+  /// Called for messages the host sent without expecting an answer, with the
+  /// same `(text, bytes, content)` a request handler is given.
   onNotify(handler) {
     this.#notifyHandler = handler;
+  }
+
+  /// Takes what the host sends as transfers — content kept apart from
+  /// requests, finished for the host once this handler has returned. The
+  /// handler is given the content, whole. A link without one refuses them.
+  onTransfer(handler) {
+    this.#transferHandler = handler;
   }
 
   /// Takes the channels the host opens under `name`. The handler is given the
@@ -159,15 +214,42 @@ export class TailcatLink {
     }
   }
 
-  async request(message, { timeout } = {}) {
-    const payload = typeof message === "string" ? utf8(message) : message;
-    const answer = await this.#exchange(FrameKind.Request, payload, timeout);
-    return typeof message === "string" ? str(answer) : answer;
+  /// Sends a request of any size and resolves with the answer, waiting through
+  /// as many reconnections as it takes and carrying on from where each end got
+  /// to. The host's handler runs once.
+  ///
+  /// Text is answered with text and bytes with bytes. A `LinkContent` is
+  /// answered with the content the answer arrived as — its `text`, `bytes`,
+  /// `contentType` and `metadata` — which is how a request says more about
+  /// itself than its bytes.
+  ///
+  /// @param timeout how long nothing may move before the request is given up
+  ///   on. Silence, not a deadline on the whole, so a request that keeps
+  ///   moving is never given up on however large it is.
+  async request(message, { timeout, signal } = {}) {
+    if (message instanceof LinkContent) {
+      return this.#sender.request(message, timeout ?? this.#options.transferStallTimeout, signal);
+    }
+    const answer = await this.#sender.request(bytesOf(message), timeout ?? this.#options.requestDeadline, signal);
+    return typeof message === "string" ? answer.text : answer.bytes;
   }
 
-  async notify(message, { timeout } = {}) {
-    const payload = typeof message === "string" ? utf8(message) : message;
-    await this.#exchange(FrameKind.Notify, payload, timeout, { expectAnswer: false });
+  /// Sends a message the host is not expected to answer. It is delivered once,
+  /// through reconnections, and resolves when the host has all of it.
+  async notify(message, { timeout, signal } = {}) {
+    const patience = message instanceof LinkContent ? this.#options.transferStallTimeout : this.#options.requestDeadline;
+    await this.#sender.deliver(bytesOf(message), ExchangeFlags.AckOnDelivery, timeout ?? patience, signal);
+  }
+
+  /// Sends content to the host's transfer handler, and resolves once that
+  /// handler has finished with it.
+  async send(message, { timeout, signal } = {}) {
+    await this.#sender.deliver(
+      bytesOf(message),
+      ExchangeFlags.Transfer,
+      timeout ?? this.#options.transferStallTimeout,
+      signal,
+    );
   }
 
   /// Stops the link, but not before the answers already produced have left.
@@ -182,39 +264,9 @@ export class TailcatLink {
     const session = this.#session;
     await session?.drain(drainTimeout);
     session?.close(new LinkClosedError("the link was closed"));
-  }
-
-  // ---- the exchange, across as many sessions as it takes ---------------
-
-  async #exchange(kind, payload, timeout, { expectAnswer = true } = {}) {
-    const exchange = newExchange(); // Kept across retries; that is the point.
-    const deadline = Date.now() + (timeout ?? this.#options.requestDeadline);
-
-    let lastError;
-    for (;;) {
-      if (this.#stopped) throw this.#fatal ?? new LinkClosedError("the link is closed");
-      if (Date.now() > deadline) {
-        throw new LinkTimeoutError(
-          `the host did not answer within the deadline${lastError ? `: ${lastError.message}` : ""}`,
-        );
-      }
-
-      let session;
-      try {
-        session = await withTimeout(this.#sessionAsync(), Math.max(1, deadline - Date.now()), "the host");
-      } catch (error) {
-        lastError = error;
-        continue;
-      }
-
-      try {
-        return await session.exchange(kind, exchange, payload, { expectAnswer });
-      } catch (error) {
-        // A handler that failed is an answer: retrying would only run it again.
-        if (error instanceof RemoteHandlerError) throw error;
-        lastError = error;
-      }
-    }
+    // Nobody will come back for them, and a timer each would otherwise hold
+    // them for the whole retention window.
+    this.#exchanges.expireAll();
   }
 
   async #sessionAsync() {
@@ -252,6 +304,10 @@ export class TailcatLink {
 
       this.#session?.close();
       this.#session = null;
+      // Wakes every exchange that was waiting for this session to end before
+      // trying again, so the next attempt meets the next session.
+      this.#sessionEnded.resolve();
+      this.#sessionEnded = new Deferred();
       // Not after a refusal: that rejection is the answer every waiter is
       // owed, and replacing it with a fresh Deferred would park them instead.
       if (this.#connected.settled && !this.#fatal) this.#connected = new Deferred();
@@ -274,6 +330,7 @@ export class TailcatLink {
       notifyHandler: () => this.#notifyHandler,
       channels: (name) => this.#channels.get(name) ?? null,
       ledger: this.#ledger,
+      exchanges: this.#exchanges,
       options: this.#options,
       emit: (name, detail) => this.#emit(name, detail),
     });
@@ -301,6 +358,17 @@ export class TailcatLink {
   #emit(name, detail) {
     this.events.dispatchEvent(new CustomEvent(name, { detail }));
   }
+}
+
+// A page's handler, as the registry runs it: given the content, returning content.
+function asHandler(handler) {
+  return handler ? async (content) => asContent(await handler(content.text, content.bytes, content)) : null;
+}
+
+// Text, bytes or content, as content.
+function bytesOf(message) {
+  if (message instanceof LinkContent) return message;
+  return LinkContent.fromBytes(typeof message === "string" ? utf8(message) : message);
 }
 
 // `withTimeout` speaks in plain Errors, because bytes.js knows nothing about

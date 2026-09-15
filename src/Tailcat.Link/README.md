@@ -53,6 +53,25 @@ await using IncomingTransfer answer = await link.RequestAsync(LinkContent.FromFi
 Console.WriteLine(await answer.ReadAllTextAsync());
 ```
 
+Content can say what it is — a name, a content type and metadata of your own,
+which the receiving handler reads before the content arrives:
+
+```csharp
+await using IncomingTransfer answer = await link.RequestAsync(
+    LinkContent.FromFile(@"D:\recordings\kitchen.mp4") with
+    {
+        ContentType = "video/mp4",
+        Metadata = JsonSerializer.SerializeToUtf8Bytes(new Recording("kitchen", DateTimeOffset.Now)),
+    });
+
+link.OnRequest(async (request, ct) =>
+{
+    Recording? recording = JsonSerializer.Deserialize<Recording>(request.Metadata.Span);
+    await request.SaveToAsync(Path.Combine(inbox, recording!.Camera, request.SuggestedFileName), null, ct);
+    return LinkContent.FromString($"saved {request.BytesReceived} bytes");
+});
+```
+
 `RequestAsync(byte[])` and `NotifyAsync(byte[])` are the same thing with the
 content in memory, and have no limit either. A file handed over as a file, or
 content as a stream, is never held in memory by the link.
@@ -162,6 +181,48 @@ await audio.SendAsync(frame);
 
 A name nothing is listening for is refused rather than swallowed.
 
+## State, errors and options
+
+```csharp
+link.StateChanged += (_, e) => Console.WriteLine($"link is {e.State}");
+
+try
+{
+    await link.RequestAsync("restart the service");
+}
+catch (RemoteHandlerException ex)   // the other machine's handler threw
+{
+    Console.WriteLine(ex.Message);
+}
+catch (LinkTimeoutException)        // nothing moved for too long
+{
+}
+
+await using ILink configured = await TailcatLink.HostAsync("my-app", new LinkOptions
+{
+    Store = new FileLinkStore(@"D:\my-app\state"),
+    LoggerFactory = loggerFactory,
+    RequestDeadline = TimeSpan.FromMinutes(1),          // silence a request may go through
+    TransferStallTimeout = TimeSpan.FromMinutes(2),     // the same for files and LinkContent
+});
+```
+
+## Testing without a network
+
+`Tailcat.TestSupport` stands both ends up against an in-memory relay:
+
+```csharp
+await using FakeDerpRelay relay = new();
+var gateways = new FakeRelayGatewayFactory(relay);
+LinkOptions Offline() => new() { Gateway = gateways, Store = new InMemoryLinkStore() };
+
+await using ILink host = await TailcatLink.HostAsync("test", Offline());
+host.OnRequest(text => text.ToUpperInvariant());
+
+await using ILink client = await TailcatLink.JoinAsync("test", host.InvitationCode.Value, Offline());
+Assert.Equal("PING", await client.RequestAsync("ping"));
+```
+
 ## What it handles for you
 
 - **A pairing that survives a restart.** The identity key is generated once
@@ -185,7 +246,7 @@ A name nothing is listening for is refused rather than swallowed.
   comes back on a later session continues into it rather than starting a
   second one.
 - **Pairing that cannot be stolen.** The code carries a secret that expires,
-  and the first machine to use it is pinned — everyone after it is refused.
+  and a machine without it is refused, however well it knows the address.
 
 ## Where it sits
 
@@ -205,9 +266,8 @@ and the session stays on the relay, slower but no different to use. See
 A browser can hold one of these links too, over the same `relay1`: the host
 is written exactly as above and never learns which arrived. The JavaScript
 client lives in the repository under `clients/browser` and is not published
-on npm. Requests and notifications are the same on either end; transfers are
-.NET to .NET for now, and a browser refuses one rather than leaving the
-sender waiting.
+on npm. Requests, notifications, content and transfers work the same on
+either end, resuming in both directions.
 
 `Tailcat.Net` and the two layers under it are not published separately; their
 assemblies ship inside this package, so one reference is the whole thing.

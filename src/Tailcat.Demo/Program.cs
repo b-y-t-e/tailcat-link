@@ -491,6 +491,11 @@ static async Task<int> HostAsync(bool forget, CancellationToken ct)
         Console.WriteLine($"  <- {(command.Length > 48 ? command[..48] + "..." : command)}  ({command.Length} B)");
         return command.ToUpperInvariant();
     });
+    link.OnTransfer(async (transfer, ct) =>
+    {
+        byte[] received = await transfer.ReadAllBytesAsync(ct);
+        Console.WriteLine($"  <- transfer \"{transfer.Name}\" ({transfer.ContentType}, {transfer.Metadata.Length} B of metadata): {received.Length} B");
+    });
 
     Console.WriteLine();
     Console.WriteLine("Give this to the other end, once:");
@@ -508,6 +513,7 @@ static async Task<int> HostAsync(bool forget, CancellationToken ct)
             await link.WaitUntilConnectedAsync(ct);
             await Task.Delay(TimeSpan.FromSeconds(3), ct);
             Console.WriteLine($"  -> the peer answered: {await link.RequestAsync("what time is it there?", ct)}");
+            await SendDemoTransferAsync(link, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -523,4 +529,26 @@ static async Task<int> HostAsync(bool forget, CancellationToken ct)
     {
     }
     return 0;
+}
+
+// Longer than one block, so a peer receiving it has to take the blocks in
+// order; clients/browser/test/interop.mjs checks what arrives against this.
+static async Task SendDemoTransferAsync(ILink link, CancellationToken ct)
+{
+    const int Length = 600_000;
+    byte[] content = new byte[Length];
+    for (int i = 0; i < Length; i++)
+    {
+        content[i] = (byte)(i % 251);
+    }
+
+    using MemoryStream stream = new(content);
+    await link.SendAsync(stream, new TransferOffer
+    {
+        Name = "from-host.bin",
+        ContentType = "application/octet-stream",
+        Length = Length,
+        Metadata = "interop"u8.ToArray(),
+    }, cancellationToken: ct);
+    Console.WriteLine($"  -> the peer took a transfer of {Length} B");
 }

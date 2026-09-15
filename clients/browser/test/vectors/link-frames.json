@@ -3,7 +3,8 @@
   "limits": {
     "maxDisplayNameBytes": 256,
     "maxChannelNameBytes": 256,
-    "helloFrameBytes": 4096
+    "helloFrameBytes": 4096,
+    "blockBytes": 262144
   },
   "helloVersionByte": 2,
   "hellos": [
@@ -75,12 +76,12 @@
         "capabilities": 0
       },
       {
-        "name": "the browser client: frames of any size, but no exchanges",
+        "name": "a machine that takes frames of any size, but no exchanges",
         "answerHex": "01",
         "capabilities": 1
       },
       {
-        "name": "the .NET library: frames of any size, and exchanges",
+        "name": "the .NET library and the browser client: frames of any size, and exchanges",
         "answerHex": "03",
         "capabilities": 3
       },
@@ -153,6 +154,35 @@
       "contentType": "",
       "metadataHex": "ff",
       "encodedHex": "01ffffffffffffffff0000000000000001ff"
+    }
+  ],
+  "exchangeOffsets": [
+    {
+      "name": "nothing here yet",
+      "offset": 0,
+      "encodedHex": "0000000000000000"
+    },
+    {
+      "name": "one block in",
+      "offset": 262144,
+      "encodedHex": "0000000000040000"
+    },
+    {
+      "name": "past what 32 bits can count",
+      "offset": 21474836480,
+      "encodedHex": "0000000500000000"
+    }
+  ],
+  "exchangeBlocks": [
+    {
+      "name": "content that fits one block, and the empty block that ends it",
+      "contentHex": "616263",
+      "encodedHex": "0000000361626300000000"
+    },
+    {
+      "name": "no content at all is still ended",
+      "contentHex": "",
+      "encodedHex": "00000000"
     }
   ]
 }

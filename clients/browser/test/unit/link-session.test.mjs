@@ -68,7 +68,7 @@ test("a ping is answered with what this client can take", async () => {
   try {
     const stream = host.openStream();
     await writeFrame(stream, FrameKind.Ping, newExchange(), new Uint8Array(0));
-    assert.equal(hex((await readFrame(stream)).payload), hex(encodeCapabilities(Capabilities.LargeFrames)));
+    assert.equal(hex((await readFrame(stream)).payload), hex(encodeCapabilities(Capabilities.LargeFrames | Capabilities.Exchanges)));
   } finally {
     session.close();
   }

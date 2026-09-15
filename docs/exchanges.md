@@ -36,7 +36,8 @@ for as long as the session lasts.
 | sender → receiver | what is sent |
 | --- | --- |
 | 0.5 → 0.5 | exchanges, no size limit, resumable |
-| 0.5 → browser (`LargeFrames`) | single `Request` and `Notify` frames, no size limit, not resumable; a transfer is refused |
+| .NET ↔ browser | exchanges, both ways, exactly as between two .NET machines |
+| → a machine with `LargeFrames` alone | single `Request` and `Notify` frames, no size limit, not resumable; a transfer is refused |
 
 Compatibility with 0.4 is not a goal: no 0.4 machine is in use. A machine that
 answers with nothing is sent nothing at all — every exchange to it is refused at

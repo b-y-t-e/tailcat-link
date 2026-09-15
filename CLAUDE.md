@@ -19,7 +19,7 @@ dotnet build
 dotnet test                       # unit tests only
 TAILCAT_LIVE_TESTS=1 dotnet test  # also end-to-end tests over public DERP relays
 
-# The two-machine demo (see README). "connect" runs the interactive side,
+# The two-machine demo (see docs/internals.md). "connect" runs the interactive side,
 # "ping" the one that only measures, "host" runs a Tailcat.Link pairing —
 # which is what the browser client joins:
 dotnet run --project src/Tailcat.Demo -- listen [--relay-only]
@@ -85,7 +85,8 @@ relay, against `tailcat-demo host`. The vectors in
 `clients/browser/test/vectors/` are read by both sides, so the wire formats
 cannot drift apart without a build failing: `relay1-records.json` covers the
 transport (`Relay1VectorTests` is the .NET half) and `link-frames.json` what
-`Tailcat.Link` writes on top of it — the hello and the channel frame
+`Tailcat.Link` writes on top of it — the hello, the channel frame, the
+capability byte, both exchange headers, the offset and the blocks
 (`LinkVectorTests`, and `link-frames.test.mjs`). Add to those files when you
 change a format, and put the hex there rather than in a test of one side: two
 literals that agree today are two literals, not a vector.
@@ -115,7 +116,9 @@ line, new files do not. `LICENSE` explains the split and ships in the package.
 
 ## Things that will bite you
 
-These were each found the hard way; the README explains them at length.
+These were each found the hard way; `docs/internals.md` explains them at
+length. The README is for users and stays short and non-technical: what the
+library is, roughly how the relays work, and examples that compile.
 
 - **`SslStream` cannot talk to a DERP relay.** The relay appends a self-signed
   Ed25519 "meta certificate" to its chain and Schannel rejects the whole chain
@@ -158,8 +161,12 @@ These were each found the hard way; the README explains them at length.
 - **A machine says what it can take in its answer to a ping.** One byte,
   because every version answers a ping and ignores what the answer carries,
   and a host refuses a hello it does not recognise. `clients/browser` says
-  `LargeFrames` and not `Exchanges`, so it gets single request and notify
-  frames with no limit and no resuming, and a transfer to it is refused.
+  the same as the .NET library, and speaks exchanges the same way:
+  `outbound-exchange.js` and `incoming-exchange.js` mirror `ExchangeSender`,
+  `ExchangeAttempt`, `OutboundExchange`, `IncomingExchange` and
+  `ExchangeRegistry`. The one difference is how a page is handed content — whole,
+  once it has all arrived, rather than as a stream — which changes nothing on
+  the wire.
 - **Bytes moving are a heartbeat.** On a link saturated by a large exchange a
   ping's answer queues behind the very bytes that prove the peer is there, and
   a session condemned for that ended the upload keeping it busy — at 0%, over
@@ -242,8 +249,8 @@ These were each found the hard way; the README explains them at length.
 
 Interop with the Go implementation (this uses QUIC, not WireGuard), the SSH
 server, Go's js/wasm build (a browser gets `clients/browser` instead), and a
-userspace TCP/IP stack. The README's "What
-was not ported, and why" is the authority; keep it honest when scope changes.
+userspace TCP/IP stack. "What was not ported, and why" in
+`docs/internals.md` is the authority; keep it honest when scope changes.
 
 **Hole punching between two different NATs is verified** — a home connection
 to an LTE carrier NAT, 69 ms relayed down to 30 ms direct, using
@@ -253,7 +260,7 @@ answer no STUN so no node learned its public address; region ranking
 therefore measured nothing and every node chose New York; punching ran for
 five seconds once and was never retried; and on Windows `SIO_UDP_CONNRESET`
 let one bounced probe abort the receive a peer's answer was arriving on. The
-README tells the whole story. `ITailcatObserver.DirectProbeSent` and
+`docs/internals.md` tells the whole story. `ITailcatObserver.DirectProbeSent` and
 `DatagramArrived` are what made it diagnosable — reach for them first when a
 path will not form, because a failed punch looks exactly like a peer that is
 switched off.

@@ -8,10 +8,13 @@
 
 import { concat, delay, str, utf8 } from "./bytes.js";
 import { LinkTimeoutError, RemoteHandlerError } from "./errors.js";
+import { IncomingContent } from "./incoming-content.js";
+import { asContent } from "./link-content.js";
 import {
   FrameKind,
   FrameStatus,
   THIS_CLIENT,
+  decodeCapabilities,
   encodeCapabilities,
   newExchange,
   readFrame,
@@ -38,6 +41,11 @@ export class LinkSession {
   #open = new Set();
   #beating = false;
   #lastMoved = Date.now();
+  #exchanges;
+  #capabilities = null;
+  // Aborted the moment the session stops carrying anything, which is what an
+  // exchange attempt riding on it has to hear.
+  #alive = new AbortController();
 
   /// @param handler read on every inbound request rather than captured, so an
   ///   application that sets its handler after connecting still answers.
@@ -46,8 +54,11 @@ export class LinkSession {
   ///   the same reason the request handler is.
   /// @param ledger shared with every other session of the same link, because
   ///   that is where a request retried after this session dies will arrive.
-  constructor({ connection, handler, notifyHandler, channels, ledger, options, emit }) {
+  /// @param exchanges shared for the same reason, and for longer: an exchange
+  ///   resumed on a later session carries on from what arrived on this one.
+  constructor({ connection, handler, notifyHandler, channels, ledger, exchanges = null, options, emit }) {
     this.#connection = connection;
+    this.#exchanges = exchanges;
     this.#handler = handler;
     this.#notifyHandler = notifyHandler;
     this.#channels = channels ?? (() => null);
@@ -73,6 +84,56 @@ export class LinkSession {
       }
     } finally {
       this.#beating = false;
+      this.#alive.abort(new Error("the session ended"));
+    }
+  }
+
+  /// What one exchange attempt needs of this session. `ExchangeAttempt.cs`
+  /// calls the same thing a carrier.
+  get carrier() {
+    return {
+      alive: this.#alive.signal,
+      openStream: () => this.#watch(this.#connection.openStream()),
+      failUnlessBusy: (reason, silence) => this.failUnlessBusy(reason, silence),
+    };
+  }
+
+  /// Ends the session for a failed attempt, unless what failed was one
+  /// exchange's silence on a session still moving other bytes: that says
+  /// nothing about the host, and every other exchange on the session would be
+  /// ended for it.
+  failUnlessBusy(reason, silence) {
+    if (silence && this.#movedWithin(this.#options.requestTimeout)) return;
+    this.close(new Error(reason));
+  }
+
+  /// What the host can take, asked once per session and only when something
+  /// needs to know. `PeerCapabilitiesQuery.cs` is the .NET half.
+  async capabilities() {
+    this.#capabilities ??= this.#askCapabilities();
+    try {
+      return await this.#capabilities;
+    } catch (error) {
+      // Asked again rather than remembered: a failure remembered would fail
+      // every exchange on this session for the rest of its life.
+      this.#capabilities = null;
+      throw error;
+    }
+  }
+
+  // A ping outpaced by the session's own bytes is asked again rather than
+  // failed: on a saturated link that is the normal case, and failing it would
+  // stop every exchange from starting until the link went quiet.
+  async #askCapabilities() {
+    for (;;) {
+      try {
+        return await this.#ping();
+      } catch (error) {
+        if (error instanceof LinkTimeoutError && this.#movedWithin(this.#options.requestTimeout) && !this.closed) {
+          continue;
+        }
+        throw error;
+      }
     }
   }
 
@@ -178,6 +239,7 @@ export class LinkSession {
 
   close(error = new Error("the session was closed")) {
     this.#beating = false;
+    this.#alive.abort(new Error(error.message));
     this.#endChannels(error.message).catch(() => {});
     this.#connection.close(error);
   }
@@ -216,9 +278,19 @@ export class LinkSession {
           case FrameKind.Notify: {
             // No answer, for the same reason this end does not wait for one.
             const handler = this.#notifyHandler() ?? this.#handler();
-            await handler?.(str(payload), payload);
+            await handler?.(str(payload), payload, IncomingContent.whole(exchange, payload));
             break;
           }
+          case FrameKind.Exchange:
+            // Not through the ledger: what makes an exchange arrive once is the
+            // registry, which keeps its content, its handler's run and its
+            // answer across sessions.
+            if (!this.#exchanges) {
+              await writeFrame(stream, FrameStatus.Failed, exchange, utf8("this browser takes no exchanges"));
+              break;
+            }
+            await this.#exchanges.deliver(exchange, payload, stream, this.#alive.signal);
+            break;
           case FrameKind.Channel:
             await this.#serveChannel(stream, exchange, payload);
             break;
@@ -226,13 +298,15 @@ export class LinkSession {
             // Through the ledger, so that a request the host is retrying after
             // a session died is answered from what its first arrival produced
             // rather than run a second time.
-            const answer = await this.#ledger.answer(exchange, () => this.#runHandler(payload));
+            const answer = await this.#ledger.answer(exchange, () => this.#runHandler(exchange, payload));
             await writeFrame(stream, answer.status, exchange, answer.payload);
             // Announced here rather than where the handler returned, so that
             // it says what it appears to say: the answer left this end. A
             // write that throws reaches "answer-failed" below instead, which
             // it could not if the handler had already claimed success.
-            this.#emit("answered", { request: str(payload), length: answer.payload.length });
+            // The same shape an exchange's answer is announced in, so a page
+            // reads one event whichever frame the host happened to send.
+            this.#emit("answered", { name: "", requestLength: payload.length, length: answer.payload.length });
             break;
           }
           default:
@@ -277,13 +351,12 @@ export class LinkSession {
   /// Runs the application's handler and turns whatever it does into an answer.
   /// Everything it can produce, a refusal included, is an answer the ledger
   /// remembers: a retry is told the same thing rather than running again.
-  async #runHandler(payload) {
+  async #runHandler(exchange, payload) {
     try {
       const handler = this.#handler();
       if (!handler) throw new Error("this browser answers no requests");
-      const answer = await handler(str(payload), payload);
-      const bytes = answer instanceof Uint8Array ? answer : utf8(answer ?? "");
-      return { status: FrameStatus.Ok, payload: bytes };
+      const answer = await handler(str(payload), payload, IncomingContent.whole(exchange, payload));
+      return { status: FrameStatus.Ok, payload: asContent(answer).bytes };
     } catch (error) {
       // Application code threw. The host is waiting and deserves to be told
       // why rather than left to time out, and this link must survive its own
@@ -300,7 +373,7 @@ export class LinkSession {
     try {
       stream = this.#connection.openStream();
       await writeFrame(stream, FrameKind.Ping, newExchange(), new Uint8Array(0), idle);
-      await readFrame(stream, idle);
+      return decodeCapabilities((await readFrame(stream, idle)).payload);
     } catch (error) {
       throw idle.expired ? new LinkTimeoutError(`the host sent nothing for ${idle.limitMs} ms`) : error;
     } finally {
@@ -371,7 +444,9 @@ export class LinkSession {
         if (!this.#beating || this.closed) return;
 
         try {
-          await this.#ping();
+          const said = await this.#ping();
+          // A heartbeat that got there first saves the next exchange its ping.
+          this.#capabilities ??= Promise.resolve(said);
         } catch (error) {
           // The one exchange whose silence does condemn the session: a ping is
           // answered by the peer's frame loop rather than by application code,

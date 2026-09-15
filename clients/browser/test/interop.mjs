@@ -12,7 +12,7 @@
 // unchanged. What differs from a browser is the TLS stack — Node uses
 // OpenSSL — and IndexedDB, which the in-memory store stands in for.
 
-import { TailcatLink } from "../src/index.js";
+import { LinkContent, TailcatLink } from "../src/index.js";
 import { memoryStore } from "../src/store.js";
 
 const [code, relayOrMap] = process.argv.slice(2);
@@ -71,6 +71,12 @@ link.onRequest((text) => {
   return `the browser answered: ${text}`;
 });
 
+// The host sends a transfer after its question: the direction that used to be
+// refused, and the one that proves the blocks are read in the order .NET writes
+// them. `SendDemoTransferAsync` in tailcat-demo is what this expects.
+const transferred = Promise.withResolvers();
+link.onTransfer((content) => transferred.resolve(content));
+
 const started = Date.now();
 await link.waitUntilConnected();
 check("pairs and connects", true, `${Date.now() - started} ms`);
@@ -91,6 +97,18 @@ check("five at once", many.join() === "ONE,TWO,THREE,FOUR,FIVE", many.join(" "))
 await link.notify("just so you know");
 check("notify returns without an answer", true);
 
+// Past one 256 KiB block and carrying what content says about itself, so the
+// header, the offset and every block after the first cross to .NET and back.
+const described = LinkContent.fromString("y".repeat(600_000), { name: "question.txt", metadata: new Uint8Array([1, 2, 3]) });
+const answer = await link.request(described);
+check("content request in blocks", answer.text === "Y".repeat(600_000), `${answer.bytesReceived} B`);
+
+await link.notify(described);
+check("content notify delivered", true);
+
+await link.send(LinkContent.fromBytes(new Uint8Array(600_000), { name: "from-browser.bin" }));
+check("transfer to the host finished by its handler", true);
+
 const within = (promise, ms) =>
   Promise.race([promise.catch(() => null), new Promise((resolve) => setTimeout(() => resolve(null), ms))]);
 
@@ -102,8 +120,21 @@ check("host can ask this end", question !== null, question ?? "nothing arrived i
 const written = await within(answered.promise, 15_000);
 check("the answer to it is written", written != null, written ? `${written.length} B` : "the write failed");
 
+const incoming = await within(transferred.promise, 30_000);
+check(
+  "transfer from the host arrives whole",
+  incoming !== null && incoming.name === "from-host.bin" && isDemoTransfer(incoming.bytes),
+  incoming ? `${incoming.bytesReceived} B` : "nothing arrived in 30 s",
+);
+
 await link.close();
 check("closes cleanly", true);
 
 console.log(failures ? `\n${failures} failed` : "\nall good");
+
+// What SendDemoTransferAsync writes: 600 kB counting modulo 251, so a block
+// taken out of order or twice cannot come out equal.
+function isDemoTransfer(bytes) {
+  return bytes.length === 600_000 && bytes.every((b, i) => b === i % 251);
+}
 process.exit(failures ? 1 : 0);

@@ -1,6 +1,7 @@
 // The public surface. Everything else in this folder is how it is done.
 
 export { TailcatLink } from "./link.js";
+export { LinkContent } from "./link-content.js";
 export {
   LinkClosedError,
   LinkError,
