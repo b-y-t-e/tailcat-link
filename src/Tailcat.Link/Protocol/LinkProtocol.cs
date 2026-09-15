@@ -66,4 +66,18 @@ internal static class LinkProtocol
     /// </remarks>
     public static readonly TimeSpan LongestTransferStall =
         TransferRetention - TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// The most a host reads of the first frame from a machine it does not yet
+    /// know, and the most the machine that dialled reads of the answer.
+    /// </summary>
+    /// <remarks>
+    /// The one bound on anything a peer sends, and it is not on data. The
+    /// hello is read before the session is known to belong to a paired machine,
+    /// and a host's address is visible to anyone on the relay it uses: without
+    /// this, a stranger could make a host allocate whatever it cared to
+    /// announce before being turned away. A hello is a token and a name, a few
+    /// hundred bytes, so this is generous rather than tight.
+    /// </remarks>
+    public const int HelloFrameBytes = 4 * 1024;
 }

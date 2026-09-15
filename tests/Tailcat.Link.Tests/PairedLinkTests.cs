@@ -333,14 +333,14 @@ public class PairedLinkTests
     }
 
     /// <summary>
-    /// A payload over the frame cap is the caller's own mistake: no session
-    /// would ever carry it, so it is refused at once and by its real name
-    /// rather than retried until the deadline and reported as silence.
+    /// A request past the sixteen megabytes messages used to stop at goes
+    /// through, and so does an answer that size, as bytes in memory on both
+    /// ends — the only limit left is the machine's.
     /// </summary>
     [Fact]
-    public async Task AMessageTooLargeToSendIsRefusedAtOnce()
+    public async Task AMessageLargerThanTheOldCapGoesThrough()
     {
-        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(2));
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(3));
         CancellationToken ct = cts.Token;
 
         await using FakeDerpRelay relay = new();
@@ -348,25 +348,24 @@ public class PairedLinkTests
 
         await using ILink host = await TailcatLink.HostAsync(
             "demo", OptionsFor(gateways, new InMemoryLinkStore()), ct);
-        host.OnRequest(_ => "pong");
+        host.OnRequest((request, _) =>
+        {
+            // Answers with the request reversed, so an answer that is merely
+            // the request echoed back, or cut short, cannot pass.
+            byte[] reversed = request.ToArray();
+            Array.Reverse(reversed);
+            return Task.FromResult<ReadOnlyMemory<byte>>(reversed);
+        });
         await using ILink operatorSide = await TailcatLink.JoinAsync(
             "demo", host.InvitationCode.Value, OptionsFor(gateways, new InMemoryLinkStore()), ct);
-        Assert.Equal("pong", await operatorSide.RequestAsync("ping", ct));
 
-        byte[] tooBig = new byte[LinkFrame.MaxPayloadBytes + 1];
-        long startedAt = Stopwatch.GetTimestamp();
+        byte[] large = new byte[(16 * 1024 * 1024) + 4096];
+        Random.Shared.NextBytes(large);
 
-        LinkException refused = await Assert.ThrowsAsync<LinkException>(
-            () => operatorSide.RequestAsync(tooBig, ct));
-        Assert.Contains($"{LinkFrame.MaxPayloadBytes} bytes", refused.Message, StringComparison.Ordinal);
+        byte[] answer = await operatorSide.RequestAsync(large, ct);
 
-        LinkException refusedNotify = await Assert.ThrowsAsync<LinkException>(
-            () => operatorSide.NotifyAsync(tooBig, ct));
-        Assert.Contains($"{LinkFrame.MaxPayloadBytes} bytes", refusedNotify.Message, StringComparison.Ordinal);
-
-        // Both refusals together must cost far less than the one request
-        // deadline a retry loop would have burned through.
-        Assert.True(Stopwatch.GetElapsedTime(startedAt) < TimeSpan.FromSeconds(10));
+        Array.Reverse(large);
+        Assert.Equal(large, answer);
     }
 
     /// <summary>

@@ -50,34 +50,76 @@ public class LinkFrameTests
         Assert.Equal("second"u8.ToArray(), (await LinkFrame.ReadAsync(stream, idle: null, ct)).Payload);
     }
 
-    /// <summary>A message beyond the limit is refused before it is sent.</summary>
+    /// <summary>
+    /// A message larger than the sixteen megabytes frames used to be capped at
+    /// is written and read like any other.
+    /// </summary>
     [Fact]
-    public async Task AnOversizedMessageIsRefused()
+    public async Task AMessageHasNoSizeLimit()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
+        byte[] large = new byte[(16 * 1024 * 1024) + 12345];
+        Random.Shared.NextBytes(large);
         using MemoryStream stream = new();
-        byte[] tooBig = new byte[LinkFrame.MaxPayloadBytes + 1];
 
-        await Assert.ThrowsAsync<LinkException>(
-            () => LinkFrame.WriteAsync(stream, (byte)LinkFrameKind.Request, Guid.NewGuid(), tooBig, idle: null, ct));
+        await LinkFrame.WriteAsync(stream, (byte)LinkFrameKind.Request, Guid.NewGuid(), large, idle: null, ct);
+        stream.Position = 0;
+
+        Assert.Equal(large, (await LinkFrame.ReadAsync(stream, idle: null, ct)).Payload);
     }
 
     /// <summary>
-    /// A peer claiming a length nobody could send is refused before the memory
-    /// is allocated — which is the point of having a limit at all.
+    /// A length that reads negative is past what one array can hold, and is
+    /// said to be rather than attempted.
     /// </summary>
-    [Theory]
-    [InlineData(int.MaxValue)]
-    [InlineData(-1)]
-    public async Task AnImpossibleLengthIsRefused(int announced)
+    [Fact]
+    public async Task ALengthNoArrayCanHoldIsRefused()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        byte[] header = new byte[LinkFrame.HeaderLength];
-        header[0] = (byte)LinkFrameKind.Request;
-        BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(LinkFrame.HeaderLength - 4), announced);
-        using MemoryStream stream = new(header);
+        using MemoryStream stream = new(HeaderAnnouncing(-1));
 
         await Assert.ThrowsAsync<LinkException>(() => LinkFrame.ReadAsync(stream, idle: null, ct));
+    }
+
+    /// <summary>
+    /// A peer announcing gigabytes and sending nothing costs what it sent, not
+    /// what it announced — which is what used to need the cap.
+    /// </summary>
+    [Fact]
+    public async Task AnAnnouncedLengthIsNotAllocatedOnTheAnnouncement()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using MemoryStream stream = new(HeaderAnnouncing(int.MaxValue));
+
+        // A MemoryStream answers synchronously, so the whole read happens on
+        // this thread and is what this counter sees.
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        await Assert.ThrowsAsync<EndOfStreamException>(() => LinkFrame.ReadAsync(stream, idle: null, ct));
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.True(allocated < 1024 * 1024, $"announcing two gigabytes allocated {allocated} bytes");
+    }
+
+    /// <summary>
+    /// The one bounded read — the hello from a machine not yet known — refuses
+    /// more than its bound before reading any of it.
+    /// </summary>
+    [Fact]
+    public async Task ABoundedReadRefusesMoreThanItsBound()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using MemoryStream stream = new(HeaderAnnouncing(LinkProtocol.HelloFrameBytes + 1));
+
+        await Assert.ThrowsAsync<LinkException>(
+            () => LinkFrame.ReadAsync(stream, LinkProtocol.HelloFrameBytes, idle: null, ct));
+    }
+
+    private static byte[] HeaderAnnouncing(int length)
+    {
+        byte[] header = new byte[LinkFrame.HeaderLength];
+        header[0] = (byte)LinkFrameKind.Request;
+        BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(LinkFrame.HeaderLength - 4), length);
+        return header;
     }
 
     /// <summary>A peer that stopped mid-frame ends the read, rather than returning half a message.</summary>

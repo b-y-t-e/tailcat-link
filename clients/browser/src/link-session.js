@@ -6,9 +6,17 @@
 // two apart is what makes either of them understandable. `LinkSession.cs` is
 // the .NET half.
 
-import { delay, str, utf8 } from "./bytes.js";
+import { concat, delay, str, utf8 } from "./bytes.js";
 import { LinkTimeoutError, RemoteHandlerError } from "./errors.js";
-import { FrameKind, FrameStatus, newExchange, readFrame, writeFrame } from "./link-frame.js";
+import {
+  FrameKind,
+  FrameStatus,
+  THIS_CLIENT,
+  encodeCapabilities,
+  newExchange,
+  readFrame,
+  writeFrame,
+} from "./link-frame.js";
 import {
   ChannelCloseReason,
   ChannelReader,
@@ -29,6 +37,7 @@ export class LinkSession {
   #answering = new Set();
   #open = new Set();
   #beating = false;
+  #lastMoved = Date.now();
 
   /// @param handler read on every inbound request rather than captured, so an
   ///   application that sets its handler after connecting still answers.
@@ -76,7 +85,7 @@ export class LinkSession {
     const idle = new IdleTimeout(this.#options.requestTimeout);
     let stream;
     try {
-      stream = this.#connection.openStream();
+      stream = this.#watch(this.#connection.openStream());
       idle.restart();
       await writeFrame(stream, FrameKind.Channel, newExchange(), encodeChannelName(name), idle);
 
@@ -109,7 +118,7 @@ export class LinkSession {
     // broken session rather than thrown at the application.
     let stream;
     try {
-      stream = this.#connection.openStream();
+      stream = this.#watch(this.#connection.openStream());
       idle.restart();
       await writeFrame(stream, kind, exchange, payload, idle);
       // A notification is not answered — the far end runs the handler and
@@ -190,14 +199,19 @@ export class LinkSession {
     this.#open.clear();
   }
 
-  #answer(stream) {
+  #answer(accepted) {
+    // The host's ping is not counted, for the reason this client's own is not:
+    // it must never excuse a ping's silence.
+    const stream = this.#watch(accepted, (tag) => tag !== FrameKind.Ping);
     // Held so that drain() can wait for it.
     const answering = (async () => {
       try {
         const { tag, exchange, payload } = await readFrame(stream);
         switch (tag) {
           case FrameKind.Ping:
-            await writeFrame(stream, FrameStatus.Ok, exchange, new Uint8Array(0));
+            // Answered with what this client can take. An older host reads
+            // the answer and ignores what is in it, as it always has.
+            await writeFrame(stream, FrameStatus.Ok, exchange, encodeCapabilities(THIS_CLIENT));
             break;
           case FrameKind.Notify: {
             // No answer, for the same reason this end does not wait for one.
@@ -278,26 +292,95 @@ export class LinkSession {
     }
   }
 
+  /// One ping, on a stream nobody counts as movement: the ping itself must
+  /// never be taken for the other bytes that would excuse its silence.
+  async #ping() {
+    const idle = new IdleTimeout(this.#options.requestTimeout);
+    let stream;
+    try {
+      stream = this.#connection.openStream();
+      await writeFrame(stream, FrameKind.Ping, newExchange(), new Uint8Array(0), idle);
+      await readFrame(stream, idle);
+    } catch (error) {
+      throw idle.expired ? new LinkTimeoutError(`the host sent nothing for ${idle.limitMs} ms`) : error;
+    } finally {
+      idle.stop();
+      await stream?.close().catch(() => {});
+    }
+  }
+
+  /// Whether bytes moved on any stream of this session within `windowMs`.
+  #movedWithin(windowMs) {
+    return Date.now() - this.#lastMoved < windowMs;
+  }
+
+  /// The same stream, telling this session whenever bytes move on it.
+  ///
+  /// Writes count only once the host has sent something on this same stream:
+  /// relay1 credit is per stream, so every new one has a window a host that has
+  /// gone never granted, and sending into it would look like traffic.
+  /// `countsStreamStartingWith` decides from the first byte the host sends
+  /// whether the stream counts at all. `MovingStream.cs` is the .NET half.
+  #watch(stream, countsStreamStartingWith = () => true) {
+    let heardFromPeer = false;
+    let ignored = false;
+    const moved = () => {
+      if (!ignored) this.#lastMoved = Date.now();
+    };
+    const heard = (chunk) => {
+      if (!chunk.length) return;
+      if (!heardFromPeer) {
+        heardFromPeer = true;
+        ignored = !countsStreamStartingWith(chunk[0]);
+      }
+      moved();
+    };
+    return {
+      write: async (payload, signal) => {
+        await stream.write(payload, signal);
+        if (heardFromPeer) moved();
+      },
+      read: async (signal, limit) => {
+        const chunk = await stream.read(signal, limit);
+        heard(chunk);
+        return chunk;
+      },
+      // A chunk at a time, as the stream underneath reads it, so that one
+      // large frame arriving slowly still counts as movement all the way in.
+      readExactly: async (count, signal) => {
+        const parts = [];
+        let have = 0;
+        while (have < count) {
+          const chunk = await stream.read(signal, count - have);
+          if (!chunk.length) throw new Error(`the peer stopped after ${have} of ${count} bytes`);
+          heard(chunk);
+          parts.push(chunk);
+          have += chunk.length;
+        }
+        return concat(...parts);
+      },
+      finish: () => stream.finish(),
+      close: () => stream.close(),
+    };
+  }
+
   #startHeartbeat() {
     (async () => {
       while (this.#beating && !this.closed) {
         await delay(this.#options.heartbeatInterval);
         if (!this.#beating || this.closed) return;
 
-        const idle = new IdleTimeout(this.#options.requestTimeout);
-        let stream;
         try {
-          stream = this.#connection.openStream();
-          await writeFrame(stream, FrameKind.Ping, newExchange(), new Uint8Array(0), idle);
-          await readFrame(stream, idle);
+          await this.#ping();
         } catch (error) {
           // The one exchange whose silence does condemn the session: a ping is
           // answered by the peer's frame loop rather than by application code,
-          // so nothing legitimate can make it slow.
+          // so nothing legitimate slows it — except the session's own bytes.
+          // On a link saturated by a large message the answer queues behind
+          // them, and those bytes are as good a sign of life as the answer.
+          // Closing here is what used to end the upload that kept it busy.
+          if (error instanceof LinkTimeoutError && this.#movedWithin(this.#options.requestTimeout)) continue;
           this.close(error);
-        } finally {
-          idle.stop();
-          await stream?.close().catch(() => {});
         }
       }
     })();

@@ -49,6 +49,9 @@ internal sealed class OutboundTransfer(
     /// </remarks>
     private int _readAhead;
 
+    /// <summary>Whether the content can be read again from an earlier point.</summary>
+    public bool CanRewind => Content.CanSeek;
+
     /// <summary>How much of it has reached the peer.</summary>
     public long Sent { get; private set; }
 

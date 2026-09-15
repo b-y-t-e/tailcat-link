@@ -32,9 +32,34 @@ public class LinkVectorTests
         IReadOnlyList<HelloVector> Hellos,
         IReadOnlyList<HelloVector> LegacyHellos,
         IReadOnlyList<ChannelNameVector> ChannelNames,
-        IReadOnlyList<ChannelFrameVector> ChannelFrames);
+        IReadOnlyList<ChannelFrameVector> ChannelFrames,
+        CapabilityVectors Capabilities,
+        FlagVector ExchangeFlags,
+        IReadOnlyList<ExchangeHeaderVector> ExchangeHeaders,
+        IReadOnlyList<AnswerHeaderVector> AnswerHeaders);
 
-    private sealed record LimitVector(int MaxDisplayNameBytes, int MaxChannelNameBytes, int MaxChannelFrameBytes);
+    private sealed record LimitVector(
+        int MaxDisplayNameBytes,
+        int MaxChannelNameBytes,
+        int HelloFrameBytes);
+
+    private sealed record CapabilityVectors(byte LargeFrames, byte Exchanges, IReadOnlyList<PingAnswerVector> PingAnswers);
+
+    private sealed record PingAnswerVector(string Name, string AnswerHex, byte Capabilities);
+
+    private sealed record FlagVector(byte Answer, byte Transfer, byte Pipelined, byte AckOnDelivery);
+
+    private sealed record ExchangeHeaderVector(
+        string Name,
+        byte Flags,
+        long? Length,
+        long AnswerOffset,
+        string ContentName,
+        string ContentType,
+        string MetadataHex,
+        string EncodedHex);
+
+    private sealed record AnswerHeaderVector(string Name, long? Length, string ContentType, string MetadataHex, string EncodedHex);
 
     private sealed record HelloVector(string Name, string PairingToken, string? DisplayName, string EncodedHex);
 
@@ -151,16 +176,85 @@ public class LinkVectorTests
     }
 
     /// <summary>
-    /// The caps are part of the format: one side bounding a frame at a size
-    /// the other will not accept is a peer refused for no visible reason.
+    /// The bounds that are left are part of the format: one side bounding a
+    /// name at a size the other will not accept is a peer refused for no
+    /// visible reason.
     /// </summary>
     [Fact]
-    public void BothSidesBoundANameAndAFrameAtTheSameSize()
+    public void BothSidesAgreeOnTheBoundsThatAreLeft()
     {
         LimitVector limits = Load().Limits;
 
         Assert.Equal(LinkHello.MaxDisplayNameBytes, limits.MaxDisplayNameBytes);
         Assert.Equal(ChannelFrame.MaxNameBytes, limits.MaxChannelNameBytes);
-        Assert.Equal(ChannelFrame.MaxFrameBytes, limits.MaxChannelFrameBytes);
+        Assert.Equal(LinkProtocol.HelloFrameBytes, limits.HelloFrameBytes);
+    }
+
+    /// <summary>
+    /// A ping answer reads the same on both sides, including the empty one
+    /// every older machine sends and the bits of a newer one that are ignored.
+    /// </summary>
+    [Fact]
+    public void PingAnswersMatchTheSharedVectors()
+    {
+        CapabilityVectors capabilities = Load().Capabilities;
+        Assert.Equal((byte)PeerCapabilities.LargeFrames, capabilities.LargeFrames);
+        Assert.Equal((byte)PeerCapabilities.Exchanges, capabilities.Exchanges);
+
+        foreach (PingAnswerVector vector in capabilities.PingAnswers)
+        {
+            Assert.Equal(
+                (PeerCapabilities)vector.Capabilities,
+                PeerCapabilitiesCodec.Decode(Convert.FromHexString(vector.AnswerHex)));
+        }
+        Assert.Equal("03", Convert.ToHexStringLower(PeerCapabilitiesCodec.Encode(PeerCapabilitiesCodec.ThisBuild)));
+    }
+
+    /// <summary>An exchange header is written byte for byte as specified, and read back.</summary>
+    [Fact]
+    public void ExchangeHeadersMatchTheSharedVectors()
+    {
+        LinkVectors vectors = Load();
+        Assert.Equal((byte)ExchangeFlags.Answer, vectors.ExchangeFlags.Answer);
+        Assert.Equal((byte)ExchangeFlags.Transfer, vectors.ExchangeFlags.Transfer);
+        Assert.Equal((byte)ExchangeFlags.Pipelined, vectors.ExchangeFlags.Pipelined);
+        Assert.Equal((byte)ExchangeFlags.AckOnDelivery, vectors.ExchangeFlags.AckOnDelivery);
+
+        foreach (ExchangeHeaderVector vector in vectors.ExchangeHeaders)
+        {
+            ExchangeHeader header = new(
+                (ExchangeFlags)vector.Flags,
+                vector.Length,
+                vector.AnswerOffset,
+                vector.ContentName,
+                vector.ContentType,
+                Convert.FromHexString(vector.MetadataHex));
+
+            Assert.Equal(vector.EncodedHex, Convert.ToHexStringLower(ExchangeFrame.EncodeHeader(header)));
+
+            ExchangeHeader read = ExchangeFrame.DecodeHeader(Convert.FromHexString(vector.EncodedHex));
+            Assert.Equal(header.Flags, read.Flags);
+            Assert.Equal(header.Length, read.Length);
+            Assert.Equal(header.AnswerOffset, read.AnswerOffset);
+            Assert.Equal(header.Name, read.Name);
+            Assert.Equal(header.ContentType, read.ContentType);
+            Assert.Equal(vector.MetadataHex, Convert.ToHexStringLower(read.Metadata.Span));
+        }
+    }
+
+    /// <summary>An answer header is written byte for byte as specified, and read back.</summary>
+    [Fact]
+    public void AnswerHeadersMatchTheSharedVectors()
+    {
+        foreach (AnswerHeaderVector vector in Load().AnswerHeaders)
+        {
+            AnswerHeader header = new(vector.Length, vector.ContentType, Convert.FromHexString(vector.MetadataHex));
+            Assert.Equal(vector.EncodedHex, Convert.ToHexStringLower(ExchangeFrame.EncodeAnswer(header)));
+
+            AnswerHeader read = ExchangeFrame.DecodeAnswer(Convert.FromHexString(vector.EncodedHex));
+            Assert.Equal(header.Length, read.Length);
+            Assert.Equal(header.ContentType, read.ContentType);
+            Assert.Equal(vector.MetadataHex, Convert.ToHexStringLower(read.Metadata.Span));
+        }
     }
 }

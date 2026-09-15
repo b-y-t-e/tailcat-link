@@ -27,7 +27,7 @@ namespace Tailcat.Link.Json;
 public static class LinkJsonExtensions
 {
     /// <summary>Sends <paramref name="request"/> as JSON and reads the answer back.</summary>
-    /// <exception cref="LinkException">As <see cref="ILink.RequestAsync"/>, or if the answer is not that shape.</exception>
+    /// <exception cref="LinkException">As <see cref="ILink.RequestAsync(ReadOnlyMemory{byte}, CancellationToken)"/>, or if the answer is not that shape.</exception>
     public static Task<TResponse> RequestAsync<TRequest, TResponse>(
         this ILink link,
         TRequest request,

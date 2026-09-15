@@ -98,17 +98,18 @@ What it adds on top of `Tailcat.Net`, and why each part is needed:
   handler that threw on the other machine comes back as a failure
   (`RemoteHandlerException`), because retrying that would only replace a
   clear error with a timeout.
-- **A transfer that is not a request.** A request is a message and is capped
-  at sixteen megabytes, because both machines hold all of one at once.
-  `SendAsync` takes a stream instead — a 20 GB file is an ordinary use of it
-  — and cuts it into blocks that neither machine holds more than a few of.
-  What that buys is not size but resumption: a session that dies mid-file is
-  answered by asking the other machine where it got to and carrying on from
-  exactly there, into the same handler, which never learns that anything
-  happened. The receiving end sets the pace, so sending to a slow disk costs
-  memory on neither machine, and `SendAsync` returns only once the receiving
-  handler has finished with the content. The wire format is
-  [docs/transfers.md](docs/transfers.md).
+- **One way to send anything, of any size.** A kilobyte of JSON and a 20 GB
+  file go the same way: `RequestAsync(LinkContent)` cuts the content into
+  blocks that neither machine holds more than a few of, and the answer comes
+  back the same way. There is no size limit of the library's own — content
+  larger than a machine can hold fails the way that machine fails. What the
+  blocks buy is resumption: a session that dies mid-content is answered by
+  asking the other machine where it got to and carrying on from exactly
+  there, in both directions, into the same handler, which runs once and never
+  learns that anything happened. The receiving end sets the pace, so sending
+  to a slow disk costs memory on neither machine. `RequestAsync(bytes)`,
+  `NotifyAsync` and `SendAsync` are the same exchange in other shapes. The
+  wire format is [docs/exchanges.md](docs/exchanges.md).
 - **A channel, for what is neither.** Realtime frames — audio, telemetry,
   input events — are a round trip and a ledger entry per frame as requests,
   and a promise of durability that is actively wrong as transfers.
@@ -588,8 +589,8 @@ arrived. See [clients/browser](clients/browser/README.md).
 - **QUIC session resumption.** The relay reconnects and paths fail over, but
   a QUIC connection that dies must be re-established by the caller.
 - **Transfers in the browser client.** `SendAsync` is .NET on both ends for
-  now; a browser answers a transfer with a refusal rather than a hang, and
-  requests between the two are unaffected. `docs/transfers.md` is the wire
+  now; a transfer to a browser is refused at once rather than left to hang, and
+  requests between the two are unaffected. `docs/exchanges.md` is the wire
   format to implement it against.
 - **Throughput measurement.** Nothing here says what the relay path or a
   direct path actually sustains.

@@ -127,6 +127,12 @@ internal sealed class DurableLink : ILink
     }
 
     /// <inheritdoc/>
+    public void OnRequest(LinkContentHandler handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        _host.SetRequestHandler((_, request, ct) => handler(request, ct));
+    }
+
     public void OnTransfer(LinkTransferHandler handler)
     {
         ArgumentNullException.ThrowIfNull(handler);
@@ -142,10 +148,24 @@ internal sealed class DurableLink : ILink
     }
 
     /// <inheritdoc/>
+    public async Task<IncomingTransfer> RequestAsync(LinkContent request, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ILinkPeer peer = await ThePeerAsync(_options.TransferStallTimeout, cancellationToken).ConfigureAwait(false);
+        return await peer.RequestAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task NotifyAsync(ReadOnlyMemory<byte> message, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ILinkPeer peer = await ThePeerAsync(_options.RequestDeadline, cancellationToken).ConfigureAwait(false);
+        await peer.NotifyAsync(message, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task NotifyAsync(LinkContent message, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ILinkPeer peer = await ThePeerAsync(_options.TransferStallTimeout, cancellationToken).ConfigureAwait(false);
         await peer.NotifyAsync(message, cancellationToken).ConfigureAwait(false);
     }
 

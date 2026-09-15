@@ -41,12 +41,11 @@ public class TransferTests
     }
 
     /// <summary>
-    /// The size a request cannot be. A transfer is a different thing from a
-    /// message and the limit that makes a message safe — both machines hold
-    /// all of it — is exactly what a transfer is designed not to need.
+    /// Twenty megabytes, more than a message could once be, arrives at the
+    /// transfer handler whole and in order, with progress reported per block.
     /// </summary>
     [Fact]
-    public async Task ContentTooLargeToBeARequestIsAnOrdinaryTransfer()
+    public async Task ContentLargerThanAMessageOnceCouldBeIsAnOrdinaryTransfer()
     {
         using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(2));
         CancellationToken ct = cts.Token;
@@ -77,12 +76,6 @@ public class TransferTests
 
             Assert.Equal("recording.bin", await named.Task.WaitAsync(ct));
             Assert.Equal(Digest(content), Digest(await arrived.Task.WaitAsync(ct)));
-
-            // The same bytes as a request are refused before they are sent:
-            // a message that large is what this API exists instead of.
-            LinkException tooLarge = await Assert.ThrowsAsync<LinkException>(
-                async () => await peer.RequestAsync(content, ct));
-            Assert.Contains("at most", tooLarge.Message, StringComparison.Ordinal);
 
             // Progress is per block and ends at the whole of it.
             Assert.NotEmpty(reported);

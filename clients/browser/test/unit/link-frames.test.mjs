@@ -10,13 +10,19 @@ import test from "node:test";
 
 import { str, utf8 } from "../../src/bytes.js";
 import {
-  MAX_CHANNEL_FRAME_BYTES,
   MAX_CHANNEL_NAME_BYTES,
   ChannelReader,
   ChannelWriter,
   decodeChannelName,
   encodeChannelName,
 } from "../../src/link-channel.js";
+import {
+  Capabilities,
+  HELLO_FRAME_BYTES,
+  THIS_CLIENT,
+  decodeCapabilities,
+  encodeCapabilities,
+} from "../../src/link-frame.js";
 import { MAX_DISPLAY_NAME_BYTES, decodeLinkHello, encodeLinkHello } from "../../src/link-hello.js";
 import { hex, linkVectors, unhex } from "./vectors.mjs";
 
@@ -106,10 +112,29 @@ test("a channel frame is read back as the .NET side wrote it", async () => {
   assert.deepEqual(read, carrying.map((vector) => vector.payloadHex));
 });
 
-test("both sides bound a name and a frame at the same size", () => {
+test("both sides agree on the bounds that are left", () => {
   assert.equal(MAX_DISPLAY_NAME_BYTES, linkVectors.limits.maxDisplayNameBytes);
   assert.equal(MAX_CHANNEL_NAME_BYTES, linkVectors.limits.maxChannelNameBytes);
-  assert.equal(MAX_CHANNEL_FRAME_BYTES, linkVectors.limits.maxChannelFrameBytes);
+  assert.equal(HELLO_FRAME_BYTES, linkVectors.limits.helloFrameBytes);
+});
+
+test("a ping answer reads as the shared vectors say, and this client says only large frames", () => {
+  assert.equal(Capabilities.LargeFrames, linkVectors.capabilities.largeFrames);
+  assert.equal(Capabilities.Exchanges, linkVectors.capabilities.exchanges);
+  for (const vector of linkVectors.capabilities.pingAnswers) {
+    assert.equal(decodeCapabilities(unhex(vector.answerHex)), vector.capabilities, vector.name);
+  }
+  // This client takes frames of any size and does not speak exchanges, which
+  // is what keeps a .NET host from sending it one.
+  assert.equal(hex(encodeCapabilities(THIS_CLIENT)), "01");
+});
+
+test("a channel frame has no limit of its own", async () => {
+  const frame = new Uint8Array(1024 * 1024);
+
+  const out = sink();
+  await new ChannelWriter("video", out).send(frame);
+  assert.equal(out.written.reduce((total, bytes) => total + bytes.length, 0), 4 + frame.length);
 });
 
 test("a name at the limit fits and one byte past it does not", () => {

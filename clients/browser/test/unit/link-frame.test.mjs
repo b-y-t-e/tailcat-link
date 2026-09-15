@@ -7,8 +7,7 @@ import test from "node:test";
 import { concat, str, utf8 } from "../../src/bytes.js";
 import {
   FrameKind,
-  MAX_PAYLOAD_BYTES,
-  ensureSendable,
+  HELLO_FRAME_BYTES,
   newExchange,
   readFrame,
   writeFrame,
@@ -61,17 +60,20 @@ test("a payload written in several chunks arrives as one", async () => {
   assert.deepEqual((await readFrame(stream)).payload, payload);
 });
 
-test("a payload over the cap is refused by the sender, with no session involved", () => {
-  assert.throws(() => ensureSendable(new Uint8Array(MAX_PAYLOAD_BYTES + 1)), /at most/);
-  ensureSendable(new Uint8Array(MAX_PAYLOAD_BYTES));
+test("an announced length costs nothing until the bytes behind it arrive", async () => {
+  const stream = new LoopbackStream();
+  // A header claiming 4 GiB with three bytes behind it: a reader that trusted
+  // the length would allocate it, and one that reads as bytes come ends when
+  // they stop.
+  await stream.write(concat(new Uint8Array([FrameKind.Request]), newExchange(), Uint8Array.of(255, 255, 255, 255)));
+  await stream.write(Uint8Array.of(1, 2, 3));
+  await assert.rejects(readFrame(stream), /stopped after 3/);
 });
 
-test("an announced length over the cap is refused before anything is allocated for it", async () => {
+test("a read with a limit, which only the hello's answer has, refuses more than it", async () => {
   const stream = new LoopbackStream();
-  // A header claiming 4 GiB, which no honest peer sends and which a reader
-  // that trusted it would wait for.
-  await stream.write(concat(new Uint8Array([FrameKind.Request]), newExchange(), Uint8Array.of(255, 255, 255, 255)));
-  await assert.rejects(readFrame(stream), /the limit is/);
+  await writeFrame(stream, FrameKind.Hello, newExchange(), new Uint8Array(HELLO_FRAME_BYTES + 1));
+  await assert.rejects(readFrame(stream, undefined, { limit: HELLO_FRAME_BYTES }), /at most/);
 });
 
 test("a peer that stops mid-payload is reported, not waited on for good", async () => {

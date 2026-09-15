@@ -285,6 +285,10 @@ internal sealed class LinkHostProxy(LinkHostSource source) : ILinkHost, IDisposa
         source.Register(host => host.SetRequestHandler(handler));
 
     /// <inheritdoc/>
+    public void SetRequestHandler(LinkPeerContentHandler handler) =>
+        source.Register(host => host.SetRequestHandler(handler));
+
+    /// <inheritdoc/>
     public void SetTransferHandler(LinkPeerTransferHandler handler) =>
         source.Register(host => host.SetTransferHandler(handler));
 

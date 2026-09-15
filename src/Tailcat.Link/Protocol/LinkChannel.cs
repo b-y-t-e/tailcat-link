@@ -29,14 +29,6 @@ internal delegate Task LinkChannelServe(Stream stream, CancellationToken cancell
 /// </remarks>
 internal static class ChannelFrame
 {
-    /// <summary>The most one frame may carry.</summary>
-    /// <remarks>
-    /// A quarter of a megabyte, the same as a transfer block: large enough
-    /// that no realtime frame comes near it, small enough that a peer cannot
-    /// make this side allocate on its say-so.
-    /// </remarks>
-    public const int MaxFrameBytes = 256 * 1024;
-
     /// <summary>The length prefix in front of every frame.</summary>
     public const int HeaderLength = 4;
 
@@ -70,14 +62,32 @@ internal static class ChannelFrame
 
     /// <summary>Writes one frame, or the marker that ends the channel.</summary>
     /// <remarks>
+    /// <para>
     /// The prefix and the body go out as one write. Written separately, a send
     /// cancelled between the two would leave a length prefix on a stream every
     /// later frame of this channel shares, and the peer would read the next
     /// frame as this one's body — misframed and silent from there on. A
     /// request cannot suffer that, because each one has a stream to itself.
+    /// </para>
+    /// <para>
+    /// A frame larger than a block goes out as the prefix and then the frame,
+    /// rather than copied whole into one buffer first. That gives up nothing:
+    /// a channel's writes are cancelled only by its session ending, and a
+    /// channel whose session has ended is over whatever state its stream is in.
+    /// </para>
     /// </remarks>
     public static async Task WriteAsync(Stream stream, ReadOnlyMemory<byte> frame, CancellationToken ct)
     {
+        if (frame.Length > TransferFrame.BlockBytes)
+        {
+            byte[] prefix = new byte[HeaderLength];
+            BinaryPrimitives.WriteInt32BigEndian(prefix, frame.Length);
+            await stream.WriteAsync(prefix, ct).ConfigureAwait(false);
+            await stream.WriteAsync(frame, ct).ConfigureAwait(false);
+            await stream.FlushAsync(ct).ConfigureAwait(false);
+            return;
+        }
+
         int length = HeaderLength + frame.Length;
         byte[] buffer = ArrayPool<byte>.Shared.Rent(length);
         try
@@ -94,24 +104,25 @@ internal static class ChannelFrame
     }
 
     /// <summary>Reads one frame, or null once the other end has closed the channel.</summary>
-    /// <exception cref="LinkException">If the peer announced an impossible length.</exception>
+    /// <remarks>
+    /// Of any length. Memory follows the bytes that arrive rather than the
+    /// length announced, which is what used to need a cap.
+    /// </remarks>
+    /// <exception cref="LinkException">If the peer announced a length no array can hold.</exception>
     public static async Task<byte[]?> ReadAsync(Stream stream, CancellationToken ct)
     {
         byte[] header = new byte[HeaderLength];
         await stream.ReadExactlyAsync(header, ct).ConfigureAwait(false);
         int length = BinaryPrimitives.ReadInt32BigEndian(header);
-        if (length < 0 || length > MaxFrameBytes)
+        if (length < 0)
         {
-            throw new LinkException($"the peer announced a {length}-byte channel frame; the limit is {MaxFrameBytes}");
+            throw new LinkException($"the peer announced a {(uint)length}-byte channel frame, which no single array can hold");
         }
         if (length == 0)
         {
             return null;
         }
-
-        byte[] frame = new byte[length];
-        await stream.ReadExactlyAsync(frame, ct).ConfigureAwait(false);
-        return frame;
+        return await LinkFrame.ReadPayloadAsync(stream, length, idle: null, ct).ConfigureAwait(false);
     }
 }
 
@@ -229,10 +240,11 @@ internal sealed class OutgoingChannel(
     /// <inheritdoc/>
     public async Task SendAsync(ReadOnlyMemory<byte> frame, CancellationToken cancellationToken = default)
     {
-        if (frame.Length is 0 or > ChannelFrame.MaxFrameBytes)
+        if (frame.IsEmpty)
         {
-            throw new LinkException(
-                $"a channel frame must be 1 to {ChannelFrame.MaxFrameBytes} bytes, this one is {frame.Length}");
+            // Not a limit: a frame of no bytes is what ends a channel on the
+            // wire, so one cannot be sent as data.
+            throw new LinkException("a channel frame must carry at least one byte");
         }
         if (!IsOpen)
         {

@@ -19,12 +19,11 @@ public enum ChannelCloseReason
 /// <summary>What a channel is, whichever way it runs.</summary>
 /// <remarks>
 /// <para>
-/// A channel is the third shape this library carries, between a message and a
-/// file. <see cref="ILink.RequestAsync"/> is a message: one frame, a round
-/// trip, an entry in the ledger. <see cref="ILink.SendAsync"/> is a file:
-/// seekable, resumed across sessions, paced by the receiver. A channel is
-/// neither — it is the stream of the moment, for audio, telemetry or input
-/// events.
+/// A channel is the other shape this library carries.
+/// <see cref="ILink.RequestAsync(LinkContent, CancellationToken)"/> is content
+/// of any size that must arrive: resumed across sessions, paced by the
+/// receiver, handled once. A channel is not that — it is the stream of the
+/// moment, for audio, telemetry or input events.
 /// </para>
 /// <para>
 /// The contract, stated outright because it is the whole point of it being a

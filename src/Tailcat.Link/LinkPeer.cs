@@ -25,7 +25,11 @@ namespace Tailcat.Link;
 internal interface ILinkHandlers
 {
     /// <summary>What answers requests, or null if nothing does.</summary>
-    LinkPeerRequestHandler? Request { get; }
+    /// <remarks>
+    /// Always as content: a handler set as bytes is wrapped into one when it
+    /// is set, so there is one slot and setting either kind replaces the other.
+    /// </remarks>
+    LinkPeerContentHandler? Request { get; }
 
     /// <summary>What takes transfers, or null if nothing does.</summary>
     LinkPeerTransferHandler? Transfer { get; }
@@ -52,7 +56,7 @@ internal interface ILinkHandlers
 /// application does not need its own retry loop on top of this one.
 /// </para>
 /// </remarks>
-internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
+internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
 {
     private readonly PairingRecord _pairing;
     private readonly NodeHolder _node;
@@ -62,7 +66,8 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
     private readonly LinkLog _log;
     private readonly bool _dials;
     private readonly ExchangeLedger _ledger;
-    private readonly TransferRegistry _transfers;
+    private readonly ExchangeRegistry _exchanges;
+    private readonly ExchangeSender _sender;
     private readonly Lock _mu = new();
     private readonly CancellationTokenSource _cts = new();
 
@@ -119,8 +124,14 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
         // For the same reason as the ledger, over the window a transfer needs:
         // what a resumed transfer joins is on this side of the session that
         // died, so it lives on the peer rather than on the session.
-        _transfers = new TransferRegistry(
-            CurrentTransferHandler, LinkProtocol.TransferRetention, options.TimeProvider, _cts.Token);
+        _exchanges = new ExchangeRegistry(
+            CurrentContentHandler,
+            CurrentTransferHandler,
+            LinkProtocol.TransferRetention,
+            options.RequestTimeout,
+            options.TimeProvider,
+            _cts.Token);
+        _sender = new ExchangeSender(this, options);
     }
 
     /// <inheritdoc/>
@@ -236,105 +247,57 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
     public async Task<byte[]> RequestAsync(ReadOnlyMemory<byte> request, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        // Before the retry loop, because a payload over the cap is refused by
-        // every session alike: inside the loop it would be retried until the
-        // deadline and reported as silence rather than as the caller's own
-        // mistake.
-        LinkFrame.EnsureSendable(request);
 
-        using CancellationTokenSource expiry = new(_options.RequestDeadline, _options.TimeProvider);
-        using CancellationTokenSource deadline =
-            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token, expiry.Token);
-
-        // One id for the request, not for each attempt: it is what tells the
-        // peer that a retry is the same request it may already have run.
-        Guid exchange = Guid.NewGuid();
-        Exception? last = null;
         // Around the retries rather than inside them: the id belongs to the
         // request, so a span per attempt would show one reconnection as
         // several unrelated requests.
         using Activity? span = LinkTelemetry.StartRequest();
-        while (!deadline.IsCancellationRequested)
+        LinkTelemetry.Sent("request", request.Length);
+        try
         {
-            // Taken before the attempt: a session that dies during it is
-            // reported by the supervisor afterwards, and this still catches it.
-            Task ended = CurrentSessionEnded();
-            LinkSession? attempted = null;
-            try
+            IncomingTransfer answer = await _sender.StartRequestAsync(
+                    LinkContent.FromBytes(request), _options.RequestDeadline, cancellationToken)
+                .ConfigureAwait(false);
+            await using (answer.ConfigureAwait(false))
             {
-                attempted = await CurrentSessionAsync(deadline.Token).ConfigureAwait(false);
-                LinkTelemetry.Sent("request", request.Length);
-                byte[] answer =
-                    await attempted.RequestAsync(exchange, request, deadline.Token).ConfigureAwait(false);
-                LinkTelemetry.Received("request", answer.Length);
+                byte[] whole = await answer.ReadAllBytesAsync(cancellationToken).ConfigureAwait(false);
+                LinkTelemetry.Received("request", whole.Length);
                 LinkTelemetry.RequestEnded("answered");
-                return answer;
-            }
-            catch (RemoteHandlerException)
-            {
-                // The peer answered; it just did not like the request. That is
-                // an answer, and the caller gets it rather than a retry.
-                LinkTelemetry.RequestEnded("refused");
-                throw;
-            }
-            catch (LinkException ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                last = ex;
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                break;
-            }
-
-            if (attempted is not null && !attempted.Ended.IsCompleted)
-            {
-                // The session is still up, so the attempt ran out of time
-                // rather than fell over — a handler slower than one request
-                // window. Asking again on the same session re-joins the run
-                // already under way there, and that attempt spends another
-                // whole window waiting, so this is patience rather than a spin.
-                continue;
-            }
-
-            try
-            {
-                // The dying session is still the one this peer hands out until
-                // the supervisor has finished tearing it down, so retrying at
-                // once would spin on it for as long as QUIC takes to close.
-                await ended.WaitAsync(deadline.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                break;
+                return whole;
             }
         }
-
-        // After the two below, so that a caller who changed its mind is not
-        // counted as a peer that went silent.
-        cancellationToken.ThrowIfCancellationRequested();
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        LinkTelemetry.RequestEnded("unanswered");
-        throw new LinkTimeoutException($"no answer within {_options.RequestDeadline}", last);
+        catch (RemoteHandlerException)
+        {
+            // The peer answered; it just did not like the request. That is
+            // an answer, and the caller gets it rather than a retry.
+            LinkTelemetry.RequestEnded("refused");
+            throw;
+        }
+        catch (LinkTimeoutException)
+        {
+            LinkTelemetry.RequestEnded("unanswered");
+            throw;
+        }
     }
 
     /// <inheritdoc/>
-    public async Task NotifyAsync(ReadOnlyMemory<byte> message, CancellationToken cancellationToken = default)
+    public Task<IncomingTransfer> RequestAsync(LinkContent request, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        // Said now rather than after waiting for a session it could never be
-        // sent on anyway.
-        LinkFrame.EnsureSendable(message);
-
-        using CancellationTokenSource expiry = new(_options.RequestDeadline, _options.TimeProvider);
-        using CancellationTokenSource deadline =
-            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token, expiry.Token);
-
-        LinkSession session = await CurrentSessionAsync(deadline.Token).ConfigureAwait(false);
-        await session.NotifyAsync(message, deadline.Token).ConfigureAwait(false);
+        return _sender.StartRequestAsync(request, _options.TransferStallTimeout, cancellationToken);
     }
 
     /// <inheritdoc/>
-    public async Task SendAsync(
+    public Task NotifyAsync(ReadOnlyMemory<byte> message, CancellationToken cancellationToken = default) =>
+        DeliverAsync(
+            LinkContent.FromBytes(message), ExchangeFlags.AckOnDelivery, _options.RequestDeadline, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task NotifyAsync(LinkContent message, CancellationToken cancellationToken = default) =>
+        DeliverAsync(message, ExchangeFlags.AckOnDelivery, _options.TransferStallTimeout, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task SendAsync(
         Stream content,
         TransferOffer offer,
         IProgress<TransferProgress>? progress = null,
@@ -342,86 +305,29 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(content);
         ArgumentNullException.ThrowIfNull(offer);
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        EnsureLengthMatches(content, offer);
 
-        using CancellationTokenSource deadline =
-            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
-
-        // The id, and where the content has got to, belong to the transfer
-        // rather than to any one attempt at it: that is what lets the next
-        // session carry on from where this one stopped.
-        OutboundTransfer transfer = new(offer, content, progress, _options.TimeProvider);
-        Exception? last = null;
-        while (!deadline.IsCancellationRequested)
+        // The length as announced, not as worked out from the stream: a
+        // transfer that says nothing about its length is one whose receiver is
+        // not told, which is the sender's choice to make.
+        LinkContent sending = LinkContent.FromStream(content, leaveOpen: true) with
         {
-            Task ended = CurrentSessionEnded();
-            try
-            {
-                LinkSession session = await CurrentSessionAsync(deadline.Token).ConfigureAwait(false);
-                await session.SendTransferAsync(transfer, deadline.Token).ConfigureAwait(false);
-                return;
-            }
-            catch (RemoteHandlerException)
-            {
-                // The other machine has decided about this transfer. Sending
-                // it again would reach the same decision.
-                throw;
-            }
-            catch (LinkException ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                last = ex;
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                break;
-            }
+            Name = offer.Name,
+            ContentType = offer.ContentType,
+            Metadata = offer.Metadata,
+            Length = offer.Length,
+            Progress = progress,
+        };
+        return DeliverAsync(sending, ExchangeFlags.Transfer, _options.TransferStallTimeout, cancellationToken);
+    }
 
-            if (!content.CanSeek && transfer.Sent > 0)
-            {
-                // Nothing can be resumed from a stream that only goes
-                // forwards, and the receiver will ask for an offset that is
-                // now behind this one. Said plainly rather than retried into
-                // the same wall until the stall timeout.
-                throw new LinkException(
-                    $"the transfer stopped after {transfer.Sent} bytes and its content cannot be rewound",
-                    last);
-            }
-
-            // Deliberately not a deadline on the transfer: twenty gigabytes
-            // through a relay is hours, and any total limit would be a limit
-            // on how large a file this library can send. What is bounded is
-            // silence — a transfer that is still moving is never given up on,
-            // and one that has stopped is given up on in bounded time.
-            if (transfer.Stalled >= _options.TransferStallTimeout)
-            {
-                break;
-            }
-
-            // Never straight round again. Usually the session is already
-            // ending — a failed transfer condemns it — and waiting for that
-            // is what stops the next attempt from spinning on a connection
-            // that is still being torn down; the pause bounds the case where
-            // the session survived whatever the attempt ran into.
-            try
-            {
-                await ended.WaitAsync(_options.MinReconnectDelay, _options.TimeProvider, deadline.Token)
-                    .ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                break;
-            }
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
+    private Task DeliverAsync(
+        LinkContent content,
+        ExchangeFlags flags,
+        TimeSpan patience,
+        CancellationToken cancellationToken)
+    {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        throw new LinkTimeoutException(
-            $"the transfer moved nothing for {_options.TransferStallTimeout}, after {transfer.Sent} bytes",
-            last);
+        return _sender.DeliverAsync(content, flags, patience, cancellationToken);
     }
 
     /// <inheritdoc/>
@@ -455,21 +361,8 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
         await CurrentSessionAsync(linked.Token).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Catches the commonest way to announce a length that is not the one
-    /// being sent, before a byte of it has crossed the network.
-    /// </summary>
-    private static void EnsureLengthMatches(Stream content, TransferOffer offer)
-    {
-        if (offer.Length is long announced && content.CanSeek && content.Length - content.Position != announced)
-        {
-            throw new LinkException(
-                $"the transfer announces {announced} bytes and its content has "
-                + $"{content.Length - content.Position}");
-        }
-    }
-
-    private Task<LinkSession> CurrentSessionAsync(CancellationToken ct)
+    /// <inheritdoc/>
+    public Task<LinkSession> CurrentSessionAsync(CancellationToken ct)
     {
         TaskCompletionSource<LinkSession> ready;
         lock (_mu)
@@ -479,13 +372,17 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
         return ready.Task.WaitAsync(ct);
     }
 
-    private Task CurrentSessionEnded()
+    /// <inheritdoc/>
+    public Task CurrentSessionEnded()
     {
         lock (_mu)
         {
             return _sessionEnded.Task;
         }
     }
+
+    /// <inheritdoc/>
+    public CancellationToken Stopping => _cts.Token;
 
     /// <summary>Wakes everyone who was waiting for the current session to end.</summary>
     private void ReleaseSessionEnded()
@@ -526,9 +423,9 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
                     CurrentHandler,
                     ChannelServing,
                     _ledger,
-                    _transfers,
+                    _exchanges,
+                    _options.AdvertisedCapabilities,
                     _options.RequestTimeout,
-                    _options.TransferStallTimeout,
                     _options.TimeProvider,
                     // Handlers are bound to the peer, not to this session, so
                     // one that is running when the session drops finishes and
@@ -630,6 +527,12 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
             try
             {
                 await session.PingAsync(ct).ConfigureAwait(false);
+            }
+            catch (SessionBusyException)
+            {
+                // Outpaced by the session's own traffic, which is as good an
+                // answer as the ping would have been. Ending the session here
+                // is what used to end the upload that was keeping it busy.
             }
             catch (LinkException ex)
             {
@@ -782,7 +685,22 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// The request handler as a machine sending messages in one frame needs
+    /// it: bytes in, bytes out, whole.
+    /// </summary>
     private LinkRequestHandler? CurrentHandler() =>
+        CurrentContentHandler() is { } answer
+            ? async (request, ct) =>
+            {
+                IncomingTransfer whole = IncomingTransfer.FromBytes(
+                    Guid.NewGuid(), request, string.Empty, _options.TimeProvider);
+                LinkContent reply = await answer(whole, ct).ConfigureAwait(false) ?? LinkContent.Empty;
+                return await reply.ReadAllAsync(ct).ConfigureAwait(false);
+            }
+            : null;
+
+    private LinkContentHandler? CurrentContentHandler() =>
         _handlers.Request is { } answer
             ? (request, ct) => answer(this, request, ct)
             : null;
@@ -853,7 +771,7 @@ internal sealed class LinkPeer : ILinkPeer, IAsyncDisposable
         // Before waiting on anything: a handler still reading a half-delivered
         // transfer is holding the supervisor's shutdown up until it is told
         // that no more of it is coming.
-        _transfers.ExpireAll();
+        _exchanges.ExpireAll();
         Task? supervisor;
         lock (_mu)
         {

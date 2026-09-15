@@ -24,18 +24,19 @@ internal enum LinkFrameKind : byte
     Hello = 4,
 
     /// <summary>
-    /// The offer that opens a transfer, with the content following it on the
-    /// same stream rather than inside the frame.
-    /// </summary>
-    /// <seealso cref="TransferFrame"/>
-    Transfer = 5,
-
-    /// <summary>
     /// The frame that opens a channel, naming which of the peer's channel
     /// handlers it is for. The frames follow it on the same stream.
     /// </summary>
     /// <seealso cref="ChannelFrame"/>
     Channel = 6,
+
+    /// <summary>
+    /// Content of any size, going either way and resuming across sessions: a
+    /// request with its answer, a notification, or a transfer. Only sent to a
+    /// machine that said <see cref="PeerCapabilities.Exchanges"/>.
+    /// </summary>
+    /// <seealso cref="ExchangeFrame"/>
+    Exchange = 7,
 }
 
 /// <summary>How a request turned out.</summary>
@@ -68,16 +69,18 @@ internal readonly record struct LinkAnswer(LinkFrameStatus Status, ReadOnlyMemor
 /// of the original, which is how the receiver recognises it as the same
 /// request rather than a second one.
 /// </para>
+/// <para>
+/// There is no cap on the length. There used to be one, sixteen megabytes,
+/// and it was a limit on what an application could send rather than a defence:
+/// what it defended against — a peer announcing gigabytes and this side
+/// allocating them on its word — is answered by allocating as bytes arrive
+/// instead of as they are announced. The one frame that is still bounded is
+/// the hello a host reads before it knows who is calling; see
+/// <see cref="LinkProtocol.HelloFrameBytes"/>.
+/// </para>
 /// </remarks>
 internal static class LinkFrame
 {
-    /// <summary>The largest payload either side will send or accept.</summary>
-    /// <remarks>
-    /// A cap is not a preference but a defence: without it, a peer claiming a
-    /// two-gigabyte frame makes this side allocate it.
-    /// </remarks>
-    public const int MaxPayloadBytes = 16 * 1024 * 1024;
-
     /// <summary>Tag, exchange id, length.</summary>
     public const int HeaderLength = 1 + 16 + 4;
 
@@ -94,22 +97,15 @@ internal static class LinkFrame
     /// </remarks>
     private const int ProgressChunkBytes = 64 * 1024;
 
-    /// <summary>Checks a payload against the cap before anything is attempted with it.</summary>
+    /// <summary>
+    /// What a read starts with before it has seen any of the payload.
+    /// </summary>
     /// <remarks>
-    /// Separate from <see cref="WriteAsync"/> so a sender can find out that a
-    /// message is too large without a session: this failure is the caller's,
-    /// not the link's, and retrying it on a fresh session would fail exactly
-    /// the same way.
+    /// The buffer then doubles as bytes arrive, up to the announced length, so
+    /// memory follows what the peer has actually sent. A length is free to
+    /// announce and bytes are not.
     /// </remarks>
-    /// <exception cref="LinkException">If the payload is over <see cref="MaxPayloadBytes"/>.</exception>
-    public static void EnsureSendable(ReadOnlyMemory<byte> payload)
-    {
-        if (payload.Length > MaxPayloadBytes)
-        {
-            throw new LinkException(
-                $"a message may be at most {MaxPayloadBytes} bytes, this one is {payload.Length}");
-        }
-    }
+    private const int FirstReadBytes = 64 * 1024;
 
     /// <summary>Writes one frame.</summary>
     /// <remarks>
@@ -125,8 +121,6 @@ internal static class LinkFrame
         IdleTimeout? idle,
         CancellationToken cancellationToken)
     {
-        EnsureSendable(payload);
-
         byte[] header = new byte[HeaderLength];
         header[0] = tag;
         // Big-endian so the bytes on the wire read as the printed form of the
@@ -144,15 +138,35 @@ internal static class LinkFrame
         await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Reads one frame.</summary>
+    /// <summary>Reads one frame, of whatever length the peer sends.</summary>
     /// <remarks>
     /// <c>idle</c> is as for <see cref="WriteAsync"/>: told about every chunk
     /// that arrives.
     /// </remarks>
     /// <exception cref="EndOfStreamException">If the peer stopped mid-frame.</exception>
-    /// <exception cref="LinkException">If the peer announced an impossible length.</exception>
-    public static async Task<(byte Tag, Guid Exchange, byte[] Payload)> ReadAsync(
+    /// <exception cref="LinkException">If the peer announced a length no array can hold.</exception>
+    public static Task<(byte Tag, Guid Exchange, byte[] Payload)> ReadAsync(
         Stream stream,
+        IdleTimeout? idle,
+        CancellationToken cancellationToken) =>
+        ReadCoreAsync(stream, limit: null, idle, cancellationToken);
+
+    /// <summary>
+    /// Reads one frame from a machine that has not yet been shown to be a
+    /// paired one, refusing anything longer than <paramref name="limit"/>.
+    /// </summary>
+    /// <exception cref="EndOfStreamException">If the peer stopped mid-frame.</exception>
+    /// <exception cref="LinkException">If the peer announced more than <paramref name="limit"/>.</exception>
+    public static Task<(byte Tag, Guid Exchange, byte[] Payload)> ReadAsync(
+        Stream stream,
+        int limit,
+        IdleTimeout? idle,
+        CancellationToken cancellationToken) =>
+        ReadCoreAsync(stream, limit, idle, cancellationToken);
+
+    private static async Task<(byte Tag, Guid Exchange, byte[] Payload)> ReadCoreAsync(
+        Stream stream,
+        int? limit,
         IdleTimeout? idle,
         CancellationToken cancellationToken)
     {
@@ -160,15 +174,42 @@ internal static class LinkFrame
         await stream.ReadExactlyAsync(header, cancellationToken).ConfigureAwait(false);
         idle?.Restart();
 
+        // Signed on purpose: the wire carries an unsigned length, and one past
+        // two gigabytes reads negative here, which is also exactly where one
+        // .NET array stops being able to hold it.
         int length = BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(LengthOffset));
-        if (length < 0 || length > MaxPayloadBytes)
+        if (length < 0)
         {
-            throw new LinkException($"the peer announced a {length}-byte message; the limit is {MaxPayloadBytes}");
+            throw new LinkException(
+                $"the peer announced a {(uint)length}-byte message, which no single array can hold");
+        }
+        if (limit is int most && length > most)
+        {
+            throw new LinkException($"the peer announced a {length}-byte message here; at most {most} is read");
         }
 
-        byte[] payload = new byte[length];
+        byte[] payload = await ReadPayloadAsync(stream, length, idle, cancellationToken).ConfigureAwait(false);
+        return (header[0], new Guid(header.AsSpan(ExchangeOffset, 16), bigEndian: true), payload);
+    }
+
+    /// <summary>
+    /// Reads <paramref name="length"/> bytes, growing the buffer as they arrive
+    /// rather than allocating what was announced.
+    /// </summary>
+    /// <exception cref="EndOfStreamException">If the peer stopped before all of them.</exception>
+    public static async Task<byte[]> ReadPayloadAsync(
+        Stream stream,
+        int length,
+        IdleTimeout? idle,
+        CancellationToken cancellationToken)
+    {
+        byte[] payload = new byte[Math.Min(length, FirstReadBytes)];
         for (int read = 0; read < length;)
         {
+            if (read == payload.Length)
+            {
+                Array.Resize(ref payload, (int)Math.Min(length, (long)payload.Length * 2));
+            }
             int arrived = await stream.ReadAsync(payload.AsMemory(read), cancellationToken).ConfigureAwait(false);
             if (arrived == 0)
             {
@@ -178,6 +219,6 @@ internal static class LinkFrame
             read += arrived;
             idle?.Restart();
         }
-        return (header[0], new Guid(header.AsSpan(ExchangeOffset, 16), bigEndian: true), payload);
+        return payload;
     }
 }

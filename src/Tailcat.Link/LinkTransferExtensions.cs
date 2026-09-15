@@ -58,12 +58,12 @@ public static class LinkTransferExtensions
         }
     }
 
-    /// <summary>Sends bytes already in memory, however many there are.</summary>
+    /// <summary>Sends bytes already in memory to the transfer handler, however many there are.</summary>
     /// <remarks>
-    /// For anything past a megabyte or two this is the method to reach for
-    /// rather than <see cref="ILink.NotifyAsync"/>: a notification is a
-    /// message, capped and held whole at both ends, while this is a stream
-    /// and has no size limit at all.
+    /// The transfer-handler counterpart of
+    /// <see cref="ILink.NotifyAsync(LinkContent, CancellationToken)"/>: neither
+    /// has a size limit, and this one finishes when the other machine's
+    /// transfer handler has.
     /// </remarks>
     /// <param name="link">The link to send them over.</param>
     /// <param name="content">The bytes to send. Not copied.</param>

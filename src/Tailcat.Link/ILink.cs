@@ -16,6 +16,29 @@ public delegate Task<ReadOnlyMemory<byte>> LinkRequestHandler(
     CancellationToken cancellationToken);
 
 /// <summary>
+/// Answers a request of any size, as content rather than as bytes in memory.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The one handler that is not bounded by memory: <paramref name="request"/>
+/// arrives as a stream, resuming across reconnections without the handler
+/// knowing, and the answer goes back as content — bytes, a file, or a stream —
+/// resumed the same way.
+/// </para>
+/// <para>
+/// It runs once per request, however many times a session dies under it: a
+/// request that arrives again is joined to the run already under way, and its
+/// answer is sent again rather than made again.
+/// </para>
+/// </remarks>
+/// <param name="request">What the other machine sent.</param>
+/// <param name="cancellationToken">Cancelled when the link closes, not when a session drops.</param>
+/// <returns>The answer, or <see cref="LinkContent.Empty"/> for none.</returns>
+public delegate Task<LinkContent> LinkContentHandler(
+    IncomingTransfer request,
+    CancellationToken cancellationToken);
+
+/// <summary>
 /// A link between two machines that stays up: it re-establishes itself after
 /// a network change, a relay outage, or either machine rebooting, without
 /// anybody being there to help.
@@ -60,7 +83,7 @@ public interface ILink : IAsyncDisposable
     /// <summary>Whether a session to the peer is up right now.</summary>
     /// <remarks>
     /// Worth showing in a UI, but not worth branching on before sending:
-    /// <see cref="RequestAsync"/> waits for the link by itself.
+    /// <see cref="RequestAsync(ReadOnlyMemory{byte}, CancellationToken)"/> waits for the link by itself.
     /// </remarks>
     bool IsConnected { get; }
 
@@ -109,39 +132,116 @@ public interface ILink : IAsyncDisposable
 
     /// <summary>
     /// Sets what answers requests from the peer. Replaces any previous
-    /// handler; a link without one refuses requests with an error.
+    /// handler, including one set as content; a link without one refuses
+    /// requests with an error.
     /// </summary>
+    /// <remarks>
+    /// The request arrives whole in memory, which suits a command and not a
+    /// file. <see cref="OnRequest(LinkContentHandler)"/> takes the same
+    /// requests as a stream.
+    /// </remarks>
     void OnRequest(LinkRequestHandler handler);
 
     /// <summary>
-    /// <see cref="OnRequest"/>, under the name <see cref="ILinkHost"/> uses,
-    /// so that moving from one peer to several renames nothing.
+    /// Sets what answers requests from the peer, taking each one as content
+    /// of any size. Replaces any previous handler, including one set as bytes.
+    /// </summary>
+    /// <seealso cref="RequestAsync(LinkContent, CancellationToken)"/>
+    void OnRequest(LinkContentHandler handler);
+
+    /// <summary>
+    /// <see cref="OnRequest(LinkRequestHandler)"/>, under the name
+    /// <see cref="ILinkHost"/> uses, so that moving from one peer to several
+    /// renames nothing.
     /// </summary>
     void SetRequestHandler(LinkRequestHandler handler) => OnRequest(handler);
+
+    /// <summary>
+    /// <see cref="OnRequest(LinkContentHandler)"/>, under the name
+    /// <see cref="ILinkHost"/> uses.
+    /// </summary>
+    void SetRequestHandler(LinkContentHandler handler) => OnRequest(handler);
 
     /// <summary>
     /// Sends a request and waits for the peer's answer, waiting through a
     /// reconnection if one is needed.
     /// </summary>
     /// <remarks>
-    /// A request that has to cross a reconnection is sent again, but it is not
-    /// run again: it carries an id, and a peer that has already answered it
-    /// replies from memory rather than calling its handler a second time. So a
-    /// request that succeeds was handled exactly once. The one case outside
-    /// that promise is the peer's process ending mid-request — nothing on this
-    /// machine can know how far a handler got before the other machine died.
+    /// <para>
+    /// There is no size limit. A request too large for one session to carry
+    /// carries on from where it stopped on the next one, and so does its
+    /// answer. Both are held in memory here because that is the shape of this
+    /// method; <see cref="RequestAsync(LinkContent, CancellationToken)"/> is
+    /// the same request without that.
+    /// </para>
+    /// <para>
+    /// A request that has to cross a reconnection is not run again: it carries
+    /// an id, and a peer that has already answered it sends that answer rather
+    /// than calling its handler a second time. So a request that succeeds was
+    /// handled exactly once. The one case outside that promise is the peer's
+    /// process ending mid-request — nothing on this machine can know how far a
+    /// handler got before the other machine died.
+    /// </para>
     /// </remarks>
     /// <exception cref="LinkException">
-    /// If no answer arrives within <see cref="LinkOptions.RequestDeadline"/>,
-    /// or if the peer's handler failed.
+    /// If nothing moved for <see cref="LinkOptions.RequestDeadline"/>, or if
+    /// the peer's handler failed.
     /// </exception>
     Task<byte[]> RequestAsync(ReadOnlyMemory<byte> request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sends a request of any size and returns the answer as it starts to
+    /// arrive.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The one way to send anything: a kilobyte of JSON and twenty gigabytes of
+    /// video go the same way. Neither machine holds more of either than a few
+    /// megabytes, both directions carry on from where they stopped when a
+    /// session dies, and the peer's handler runs once.
+    /// </para>
+    /// <para>
+    /// It returns once the answer has begun, not once it has all arrived: the
+    /// rest keeps coming through as many reconnections as it takes, and a read
+    /// of <see cref="IncomingTransfer.Content"/> waits for it. Dispose the
+    /// answer when done with it; disposing it early stops asking for the rest.
+    /// <paramref name="cancellationToken"/> covers the whole exchange, the
+    /// answer included.
+    /// </para>
+    /// <para>
+    /// Carrying on after a session dies needs content that can be read again
+    /// from the middle — bytes, a file, a seekable stream — on this machine,
+    /// and for the answer on the other. Content that cannot works until the
+    /// first session dies under it and then fails, rather than arriving with a
+    /// hole in it.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="RemoteHandlerException">
+    /// If the peer's handler failed, or the peer cannot take the request at
+    /// all. Neither is retried.
+    /// </exception>
+    /// <exception cref="LinkException">
+    /// If nothing moved for <see cref="LinkOptions.TransferStallTimeout"/>.
+    /// </exception>
+    Task<IncomingTransfer> RequestAsync(LinkContent request, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Sends a message the peer is not expected to answer. It reaches the
     /// peer's handler like a request, whose answer is discarded.
     /// </summary>
+    /// <remarks>
+    /// Delivered once, through reconnections: it returns when the peer has the
+    /// whole message, and its handler runs once however many sessions that
+    /// took. A peer built before this could recognise a repeat gets it the way
+    /// it always did — once, and lost if the session dies mid-message.
+    /// </remarks>
     Task NotifyAsync(ReadOnlyMemory<byte> message, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// <see cref="NotifyAsync(ReadOnlyMemory{byte}, CancellationToken)"/> for
+    /// content of any size.
+    /// </summary>
+    Task NotifyAsync(LinkContent message, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Sets what takes transfers from the peer. Replaces any previous
@@ -156,12 +256,12 @@ public interface ILink : IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// This is what <see cref="RequestAsync"/> is not for. A request is a
-    /// message: both machines hold all of it at once, and it is capped at
-    /// sixteen megabytes for that reason. A transfer is a stream — twenty
-    /// gigabytes of video is an ordinary use of it — and neither machine ever
-    /// holds more than a few megabytes of it. Nothing here has to be chunked
-    /// by the caller.
+    /// A notification for the transfer handler: the same exchange as
+    /// <see cref="RequestAsync(LinkContent, CancellationToken)"/>, delivered to
+    /// <see cref="OnTransfer"/> rather than to the request handler, and
+    /// finished when that handler has finished. Twenty gigabytes of video is an
+    /// ordinary use of it, and neither machine ever holds more than a few
+    /// megabytes of it. Nothing here has to be chunked by the caller.
     /// </para>
     /// <para>
     /// A transfer survives what the link survives. When a session dies
@@ -215,9 +315,9 @@ public interface ILink : IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The third shape, between <see cref="RequestAsync"/> and
-    /// <see cref="SendAsync"/>. A request is a message and costs a round trip;
-    /// a transfer is a file and promises to survive a reconnection. A channel
+    /// The other shape beside <see cref="RequestAsync(LinkContent, CancellationToken)"/>.
+    /// A request, of whatever size, promises to arrive and to survive a
+    /// reconnection. A channel
     /// is the stream of the moment — audio, telemetry, input events — and
     /// promises neither: <b>ordered within the channel, and not durable</b>.
     /// It ends with the session that carries it, which is correct rather than

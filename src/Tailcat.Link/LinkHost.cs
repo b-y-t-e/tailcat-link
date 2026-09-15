@@ -57,7 +57,7 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
     private readonly Lock _mu = new();
     private readonly CancellationTokenSource _cts = new();
 
-    private LinkPeerRequestHandler? _request;
+    private LinkPeerContentHandler? _request;
     private LinkPeerTransferHandler? _transfer;
     private readonly ConcurrentDictionary<string, LinkChannelHandler> _channels = new(StringComparer.Ordinal);
 
@@ -122,7 +122,7 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
     public event EventHandler<PeerEventArgs>? PeerAppeared;
 
     /// <inheritdoc/>
-    LinkPeerRequestHandler? ILinkHandlers.Request
+    LinkPeerContentHandler? ILinkHandlers.Request
     {
         get
         {
@@ -177,6 +177,20 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
 
     /// <inheritdoc/>
     public void SetRequestHandler(LinkPeerRequestHandler handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        // Wrapped rather than kept beside the other kind: two slots would let
+        // a host answer the same request two different ways depending on how
+        // the other machine happened to send it.
+        SetRequestHandler(async (peer, request, ct) =>
+        {
+            byte[] whole = await request.ReadAllBytesAsync(ct).ConfigureAwait(false);
+            return LinkContent.FromBytes(await handler(peer, whole, ct).ConfigureAwait(false));
+        });
+    }
+
+    /// <inheritdoc/>
+    public void SetRequestHandler(LinkPeerContentHandler handler)
     {
         ArgumentNullException.ThrowIfNull(handler);
         lock (_mu)

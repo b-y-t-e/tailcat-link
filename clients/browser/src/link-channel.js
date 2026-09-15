@@ -9,11 +9,6 @@
 import { concat, readU32be, str, u32be, utf8 } from "./bytes.js";
 import { LinkClosedError, LinkError } from "./errors.js";
 
-/// The most one frame may carry: the same block size a transfer uses, large
-/// enough that no realtime frame comes near it and small enough that a peer
-/// cannot make this side allocate on its say-so.
-export const MAX_CHANNEL_FRAME_BYTES = 256 * 1024;
-
 /// The most a channel name may be, in UTF-8 bytes.
 export const MAX_CHANNEL_NAME_BYTES = 256;
 
@@ -99,8 +94,9 @@ export class ChannelWriter extends Channel {
   #sending = Promise.resolve();
 
   async send(frame) {
-    if (!frame.length || frame.length > MAX_CHANNEL_FRAME_BYTES) {
-      throw new LinkError(`a channel frame must be 1 to ${MAX_CHANNEL_FRAME_BYTES} bytes, this one is ${frame.length}`);
+    if (!frame.length) {
+      // Not a limit: a frame of no bytes is what ends a channel on the wire.
+      throw new LinkError("a channel frame must carry at least one byte");
     }
     if (!this.open) {
       throw new LinkClosedError(`the "${this.name}" channel has ended`);
@@ -175,8 +171,5 @@ async function writeChannelFrame(stream, frame) {
 /// One frame, or null once the other end has closed the channel on purpose.
 async function readChannelFrame(stream) {
   const length = readU32be(await stream.readExactly(4));
-  if (length > MAX_CHANNEL_FRAME_BYTES) {
-    throw new LinkError(`the peer announced a ${length}-byte channel frame; the limit is ${MAX_CHANNEL_FRAME_BYTES}`);
-  }
   return length ? await stream.readExactly(length) : null;
 }

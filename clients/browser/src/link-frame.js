@@ -14,8 +14,8 @@ export const FrameKind = {
   Notify: 2,
   Ping: 3,
   Hello: 4,
-  // 5 is a transfer, which this client does not speak; a frame carrying one
-  // is refused rather than swallowed.
+  // 5 was the transfer before exchanges, which nothing sends any more; a frame
+  // carrying one is refused rather than swallowed.
   Channel: 6,
 };
 
@@ -24,7 +24,31 @@ export const FrameStatus = {
   Failed: 1,
 };
 
-export const MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
+/// What a machine says it can take, in the one byte it answers a ping with.
+/// A machine built before these existed answers with nothing, which is none.
+/// `PeerCapabilities.cs` is the .NET half.
+export const Capabilities = {
+  None: 0,
+  // A message frame or a channel frame of any length.
+  LargeFrames: 1,
+  // The exchange frame (7), which this client does not speak.
+  Exchanges: 2,
+};
+
+/// What this client says it can take.
+export const THIS_CLIENT = Capabilities.LargeFrames;
+
+/// The most the first frame is read at before either end knows the other —
+/// the hello's answer. The one bound on anything a peer sends, and it is not on
+/// data: see `LinkProtocol.HelloFrameBytes`.
+export const HELLO_FRAME_BYTES = 4 * 1024;
+
+export const encodeCapabilities = (capabilities) => Uint8Array.of(capabilities);
+
+/// Bits this client does not know are dropped rather than refused: a newer
+/// machine saying it can do more is no reason to stop talking to it.
+export const decodeCapabilities = (answer) =>
+  answer.length ? answer[0] & (Capabilities.LargeFrames | Capabilities.Exchanges) : Capabilities.None;
 const EXCHANGE_LEN = 16;
 const HEADER_LENGTH = 1 + EXCHANGE_LEN + 4;
 
@@ -37,18 +61,7 @@ const PROGRESS_CHUNK_BYTES = 64 * 1024;
 export const newExchange = () => randomBytes(EXCHANGE_LEN);
 
 export function encodeHeader(tag, exchange, payload) {
-  ensureSendable(payload);
   return concat(new Uint8Array([tag]), exchange, u32be(payload.length));
-}
-
-/// Refuses a payload over the cap before anything is attempted with it. Kept
-/// apart from writeFrame so a sender can find out that a message is too large
-/// without a session: the failure is the caller's, not the link's, and a fresh
-/// session would refuse it in exactly the same way.
-export function ensureSendable(payload) {
-  if (payload.length > MAX_PAYLOAD_BYTES) {
-    throw new Error(`a message may be at most ${MAX_PAYLOAD_BYTES} bytes, this one is ${payload.length}`);
-  }
 }
 
 /// Writes one frame. `idle` is told about every chunk that moves, so that a
@@ -62,17 +75,21 @@ export async function writeFrame(stream, tag, exchange, payload, idle) {
   }
 }
 
-/// Reads one frame. `idle` is as for writeFrame: told about every chunk that
-/// arrives.
-export async function readFrame(stream, idle) {
+/// Reads one frame, of whatever length the peer sends. `idle` is as for
+/// writeFrame: told about every chunk that arrives. `limit` bounds only the
+/// frames read before the other machine is known, which is the hello's answer.
+///
+/// Memory follows the bytes that arrive rather than the length announced, so a
+/// length is free to announce and costs nothing until the bytes behind it come.
+export async function readFrame(stream, idle, { limit } = {}) {
   const header = await stream.readExactly(HEADER_LENGTH, idle?.signal);
   idle?.restart();
 
   const tag = header[0];
   const exchange = header.slice(1, 1 + EXCHANGE_LEN);
   const length = readU32be(header, 1 + EXCHANGE_LEN);
-  if (length < 0 || length > MAX_PAYLOAD_BYTES) {
-    throw new Error(`the peer announced a ${length}-byte message; the limit is ${MAX_PAYLOAD_BYTES}`);
+  if (limit !== undefined && length > limit) {
+    throw new Error(`the peer announced a ${length}-byte message here; at most ${limit} is read`);
   }
   return { tag, exchange, payload: await readPayload(stream, length, idle) };
 }

@@ -157,10 +157,10 @@ dialler are odd, by the host even, starting at 1 and 2 — so neither side has
 to ask before opening one, and they cannot collide.
 
 Flow control is per stream and credit-based: 256 KiB initially, and a
-receiver sends `WINDOW` as it consumes. It is not decoration —
-`LinkFrame.MaxPayloadBytes` is 16 MB, and without credit a sender would push
-that at a relay which drops what it cannot deliver, ending the session
-(above). A sender with no credit stops; it does not buffer past the window.
+receiver sends `WINDOW` as it consumes. It is not decoration — a message
+frame has no size limit, and without credit a sender would push all of one at a
+relay which drops what it cannot deliver, ending the session (above). A sender
+with no credit stops; it does not buffer past the window.
 
 ## Lifetime
 

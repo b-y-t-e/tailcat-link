@@ -418,6 +418,51 @@ public class LinkChannelTests
         Assert.Equal(heard.Distinct().Count(), heard.Count);
     }
 
+    /// <summary>
+    /// A frame larger than the quarter-megabyte channel frames used to stop at
+    /// arrives whole, and the frames either side of it are still told apart.
+    /// </summary>
+    [Fact]
+    public async Task AFrameOfAnySizeArrivesWhole()
+    {
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(2));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        FakeRelayGatewayFactory gateways = new(relay);
+        await using ILinkHost host = await TailcatLink.HostManyAsync(
+            "demo", OptionsFor(gateways, new InMemoryLinkStore()), ct);
+
+        List<byte[]> heard = [];
+        TaskCompletionSource ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.OnChannel("video", async (_, channel, token) =>
+        {
+            await foreach (ReadOnlyMemory<byte> frame in channel.ReadAllAsync(token))
+            {
+                heard.Add(frame.ToArray());
+            }
+            ended.TrySetResult();
+        });
+
+        await using ILink camera = await JoinAsync(gateways, host, ct);
+        byte[] large = new byte[1024 * 1024];
+        Random.Shared.NextBytes(large);
+
+        ILinkChannelWriter video = await camera.OpenChannelAsync("video", ct);
+        await using (video)
+        {
+            await video.SendAsync(Numbered(1), ct);
+            await video.SendAsync(large, ct);
+            await video.SendAsync(Numbered(2), ct);
+        }
+
+        await ended.Task.WaitAsync(ct);
+        Assert.Equal(3, heard.Count);
+        Assert.Equal(Numbered(1), heard[0]);
+        Assert.Equal(large, heard[1]);
+        Assert.Equal(Numbered(2), heard[2]);
+    }
+
     private static byte[] Numbered(int value)
     {
         byte[] frame = new byte[4];

@@ -35,12 +35,32 @@ await using ILink link = await TailcatLink.JoinAsync("my-app");
 Both ends are equal once paired: each can ask, each can answer, and each can
 send a message the other did not ask for (`NotifyAsync`).
 
-## Send a file, whatever its size
+## Send anything, whatever its size
 
-Requests are messages: both machines hold all of one at once, so they are
-capped at sixteen megabytes. A file is not a message. `SendAsync` takes a
-stream of any size — a 20 GB video is an ordinary use of it — and neither
-machine ever holds more than a few megabytes of it.
+There is no size limit. A request of a kilobyte and one of twenty gigabytes
+go the same way, and so do their answers:
+
+```csharp
+// on the machine answering
+link.OnRequest(async (request, ct) =>
+{
+    await request.SaveToAsync(Path.Combine(inbox, request.SuggestedFileName), null, ct);
+    return LinkContent.FromString("saved");
+});
+
+// on the machine asking
+await using IncomingTransfer answer = await link.RequestAsync(LinkContent.FromFile(@"D:\wakacje\film.mkv"));
+Console.WriteLine(await answer.ReadAllTextAsync());
+```
+
+`RequestAsync(byte[])` and `NotifyAsync(byte[])` are the same thing with the
+content in memory, and have no limit either. A file handed over as a file, or
+content as a stream, is never held in memory by the link.
+
+A transfer handler of its own is still there, for an application that wants
+files kept apart from its requests. `SendAsync` takes a stream of any size —
+a 20 GB video is an ordinary use of it — and neither machine ever holds more
+than a few megabytes of it.
 
 On the machine receiving:
 

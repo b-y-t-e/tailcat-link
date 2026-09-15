@@ -69,11 +69,17 @@ public interface ILinkPeer
     /// <summary>Raised whenever <see cref="State"/> changes.</summary>
     event EventHandler<LinkStateChangedEventArgs>? StateChanged;
 
-    /// <inheritdoc cref="ILink.RequestAsync"/>
+    /// <inheritdoc cref="ILink.RequestAsync(ReadOnlyMemory{byte}, CancellationToken)"/>
     Task<byte[]> RequestAsync(ReadOnlyMemory<byte> request, CancellationToken cancellationToken = default);
 
-    /// <inheritdoc cref="ILink.NotifyAsync"/>
+    /// <inheritdoc cref="ILink.RequestAsync(LinkContent, CancellationToken)"/>
+    Task<IncomingTransfer> RequestAsync(LinkContent request, CancellationToken cancellationToken = default);
+
+    /// <inheritdoc cref="ILink.NotifyAsync(ReadOnlyMemory{byte}, CancellationToken)"/>
     Task NotifyAsync(ReadOnlyMemory<byte> message, CancellationToken cancellationToken = default);
+
+    /// <inheritdoc cref="ILink.NotifyAsync(LinkContent, CancellationToken)"/>
+    Task NotifyAsync(LinkContent message, CancellationToken cancellationToken = default);
 
     /// <inheritdoc cref="ILink.SendAsync"/>
     Task SendAsync(

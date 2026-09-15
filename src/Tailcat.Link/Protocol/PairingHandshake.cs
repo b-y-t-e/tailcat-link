@@ -52,8 +52,10 @@ internal static class PairingHandshake
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            (byte status, _, byte[] answer) =
-                await LinkFrame.ReadAsync(stream, idle, cancellationToken).ConfigureAwait(false);
+            // Bounded: this is read before either end knows the other, and the
+            // machine that answers may not be the one the invitation meant.
+            (byte status, _, byte[] answer) = await LinkFrame
+                .ReadAsync(stream, LinkProtocol.HelloFrameBytes, idle, cancellationToken).ConfigureAwait(false);
             if (status != (byte)LinkFrameStatus.Ok)
             {
                 throw new PairingRefusedException(
@@ -80,8 +82,12 @@ internal static class PairingHandshake
         Stream stream = await connection.AcceptStreamAsync(cancellationToken).ConfigureAwait(false);
         await using (stream.ConfigureAwait(false))
         {
-            (byte tag, Guid exchange, byte[] payload) =
-                await LinkFrame.ReadAsync(stream, idle, cancellationToken).ConfigureAwait(false);
+            // The one read in this library with a limit on what a peer may
+            // send, and the reason is who the peer might be: nothing is known
+            // about this machine yet, and anyone on the relay can see this
+            // host's address. See LinkProtocol.HelloFrameBytes.
+            (byte tag, Guid exchange, byte[] payload) = await LinkFrame
+                .ReadAsync(stream, LinkProtocol.HelloFrameBytes, idle, cancellationToken).ConfigureAwait(false);
             if (tag != (byte)LinkFrameKind.Hello)
             {
                 await RefuseAsync(stream, exchange, "say hello first", cancellationToken).ConfigureAwait(false);

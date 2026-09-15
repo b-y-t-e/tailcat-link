@@ -2,14 +2,13 @@
 
 The third shape a link carries, between a message and a file.
 
-`ILink.RequestAsync` is a **message**: one frame, held whole at both ends, a
-round trip, an entry in the exchange ledger, capped at 16 MiB.
-`ILink.SendAsync` is a **file**: seekable content, cut into blocks, resumed
-across as many sessions as it takes, paced by the receiver.
+`ILink.RequestAsync` is an **exchange**: content of any size, cut into blocks,
+resumed across as many sessions as it takes, paced by the receiver, handled
+once — see [exchanges.md](exchanges.md).
 
-Neither fits a microphone. Measured against 16 kHz mono 16-bit PCM — about
-32 kB/s in 3 kB frames, which is an ordinary microphone — a request is a round
-trip and a ledger entry per frame, and a transfer promises a durability that
+That does not fit a microphone. Measured against 16 kHz mono 16-bit PCM — about
+32 kB/s in 3 kB frames, which is an ordinary microphone — an exchange is a
+round trip and remembered state per frame, and it promises a durability that
 would be actively wrong: a frame of audio from ten seconds ago is worth
 nothing, and resuming one would be worse than dropping it.
 
@@ -64,10 +63,11 @@ After the answer, the stream carries frames:
 +--------+------------------+
 ```
 
-`length` is big-endian and at most 262144 (256 KiB), the same block size a
-transfer uses. A zero length ends the channel: it is what tells the reading
-end that the frames stopped on purpose rather than with the session, so a
-stream that simply stops is `SessionEnded` and not `PeerClosed`.
+`length` is big-endian and has no limit; the frame's reader allocates as bytes
+arrive, not as the length announces. A zero length
+ends the channel: it is what tells the reading end that the frames stopped on
+purpose rather than with the session, so a stream that simply stops is
+`SessionEnded` and not `PeerClosed`.
 
 Nothing is retried, acknowledged or remembered. That is the whole of it.
 

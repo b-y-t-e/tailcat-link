@@ -103,15 +103,26 @@ public sealed record LinkOptions
     private readonly TimeSpan _pairingWindow = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// How long <see cref="ILink.RequestAsync"/> keeps trying, across as many
-    /// reconnections as fit inside it, before giving up on one request.
+    /// How long a request or notification sent as bytes may go with nothing
+    /// moving — no bytes either way, and no session to move them on — before
+    /// it is given up on.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// It measures silence, so it limits no size: a request of a gigabyte that
+    /// keeps moving is never given up on, while one to a machine that has gone
+    /// away is given up on after this long. For a small request that is the
+    /// same as a deadline on the whole, which is what it was before it was
+    /// this. <see cref="TransferStallTimeout"/> is the same bound for content
+    /// sent as <see cref="LinkContent"/>.
+    /// </para>
+    /// <para>
     /// Bounded by how long the other machine remembers what it answered, less
     /// the time a retry spends on the way there: a retry that arrives after it
     /// has forgotten would run the handler a second time. That window is fixed
     /// by the protocol, so the bound is a property of the library and not of
     /// how the peer was configured.
+    /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">
     /// The deadline is not positive, or is longer than a retry can be
@@ -289,4 +300,12 @@ public sealed record LinkOptions
 
     /// <summary>The clock the link measures with; tests pass their own.</summary>
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
+
+    /// <summary>What this machine tells a peer it can take.</summary>
+    /// <remarks>
+    /// Everything this build can, always, outside tests: a test sets less to
+    /// stand this machine in for an older one, which is the only way to prove
+    /// that a newer machine talks to it on its terms.
+    /// </remarks>
+    internal PeerCapabilities AdvertisedCapabilities { get; init; } = PeerCapabilitiesCodec.ThisBuild;
 }

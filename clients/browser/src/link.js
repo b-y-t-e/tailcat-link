@@ -13,7 +13,7 @@
 import { Deferred, delay, str, utf8, withTimeout } from "./bytes.js";
 import { parseAddress, parseInvitationCode } from "./address.js";
 import { LinkClosedError, LinkError, LinkTimeoutError, PairingRefusedError, RemoteHandlerError } from "./errors.js";
-import { FrameKind, ensureSendable, newExchange } from "./link-frame.js";
+import { FrameKind, newExchange } from "./link-frame.js";
 import { DialingSessionSource, relayDialer } from "./session-source.js";
 import { LinkSession } from "./link-session.js";
 import { ExchangeLedger } from "./exchange-ledger.js";
@@ -187,12 +187,6 @@ export class TailcatLink {
   // ---- the exchange, across as many sessions as it takes ---------------
 
   async #exchange(kind, payload, timeout, { expectAnswer = true } = {}) {
-    // Before the retry loop: a payload over the cap is refused by every
-    // session alike, and inside the loop it would be retried until the
-    // deadline and then reported as silence rather than as the caller's own
-    // mistake.
-    ensureSendable(payload);
-
     const exchange = newExchange(); // Kept across retries; that is the point.
     const deadline = Date.now() + (timeout ?? this.#options.requestDeadline);
 

@@ -13,6 +13,22 @@ public delegate Task<ReadOnlyMemory<byte>> LinkPeerRequestHandler(
     ReadOnlyMemory<byte> request,
     CancellationToken cancellationToken);
 
+/// <summary>
+/// Answers a request of any size from one of a host's peers, as content.
+/// </summary>
+/// <remarks>
+/// <see cref="LinkContentHandler"/> with the peer that asked; everything said
+/// there is true here.
+/// </remarks>
+/// <param name="peer">The machine that sent the request.</param>
+/// <param name="request">What it sent.</param>
+/// <param name="cancellationToken">Cancelled when the host closes, not when a session drops.</param>
+/// <returns>The answer, or <see cref="LinkContent.Empty"/> for none.</returns>
+public delegate Task<LinkContent> LinkPeerContentHandler(
+    ILinkPeer peer,
+    IncomingTransfer request,
+    CancellationToken cancellationToken);
+
 /// <summary>Takes a transfer that arrived from one of the host's peers.</summary>
 /// <param name="peer">Which machine is sending it.</param>
 /// <param name="transfer">The content, as it arrives.</param>
@@ -78,6 +94,12 @@ public interface ILinkHost : IAsyncDisposable
     /// handler. A host without one refuses requests with an error.
     /// </summary>
     void SetRequestHandler(LinkPeerRequestHandler handler);
+
+    /// <summary>
+    /// Sets what answers requests from any peer, taking each one as content of
+    /// any size. Replaces any previous handler, including one set as bytes.
+    /// </summary>
+    void SetRequestHandler(LinkPeerContentHandler handler);
 
     /// <summary>
     /// Sets what takes transfers from any peer, replacing any previous

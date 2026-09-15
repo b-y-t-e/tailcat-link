@@ -140,15 +140,32 @@ These were each found the hard way; the README explains them at length.
   because a relay reached over a WebSocket closes a client that sends more
   than 32 KiB; and a dropped record ends the session outright, since there is
   no retransmission there. `docs/relay1.md` is the specification.
-- **A transfer is not a big request.** `ILink.RequestAsync`/`NotifyAsync` are
-  messages: one frame, held whole at both ends, capped at 16 MiB.
-  `ILink.SendAsync`/`OnTransfer` are the stream API for anything larger — a
-  20 GB file is the case it is designed for — and they resume mid-content
-  when a session dies, into the handler that is already reading it.
-  `docs/transfers.md` is the specification; `clients/browser` does not speak
-  it yet, and refuses a transfer rather than hanging. Everything about a
-  transfer that outlives a session lives in `TransferRegistry` and
-  `IncomingTransfer` on the link, never in `LinkSession`.
+- **There is one exchange, and no size limit.** `RequestAsync`, `NotifyAsync`
+  and `SendAsync`, in bytes or as `LinkContent`, are all the `Exchange` frame
+  (7) with different flags: content of any size in blocks, resumed in both
+  directions from where each end got to, handled once. `docs/exchanges.md` is
+  the specification. Nothing a paired peer sends is capped — reads allocate as
+  bytes arrive, never as a length announces — and a machine with too little
+  memory fails the way it fails. The one bounded read is the hello a host
+  reads before it knows who is calling (`LinkProtocol.HelloFrameBytes`),
+  because anyone on the relay can see a host's address. Everything about an
+  exchange that outlives a session lives in `ExchangeRegistry`,
+  `IncomingExchange` and `OutboundExchange` on the link, never in
+  `LinkSession`.
+- **Compatibility with 0.4 does not matter.** No 0.4 machine is in use; the
+  library is still being tried out. Do not keep code, tests or wire formats
+  alive for it, and do not let it constrain a design.
+- **A machine says what it can take in its answer to a ping.** One byte,
+  because every version answers a ping and ignores what the answer carries,
+  and a host refuses a hello it does not recognise. `clients/browser` says
+  `LargeFrames` and not `Exchanges`, so it gets single request and notify
+  frames with no limit and no resuming, and a transfer to it is refused.
+- **Bytes moving are a heartbeat.** On a link saturated by a large exchange a
+  ping's answer queues behind the very bytes that prove the peer is there, and
+  a session condemned for that ended the upload keeping it busy — at 0%, over
+  and over. `MovingStream` records when any bytes last moved; a ping or an
+  exchange that falls silent while others move does not end the session. A
+  ping goes on an uncounted stream so it can never excuse itself.
 - **A channel is not a transfer and not a message.** `OpenChannelAsync` is
   ordered within the channel and *not durable*: it ends with the session and
   is never resumed, which is the point rather than a gap. `docs/channels.md`
