@@ -254,8 +254,9 @@ tco2FwWCDRh1raQ5-4WVvjPImw4tL9B4-mZ-oadOTh4vSXitOjeWFrWCCcfd76PYE76USuQsZKyf8eCU
 The address also carries the node's *disco* public key, derived from its node
 key by an HMAC (`DiscoPrivate.ForNode`) so that only the node key is worth
 persisting. The two are deliberately unlinkable: a disco key is shown in the
-clear on a direct path, while the node key is the unguessable part of the
-address. Tailcat originally reused the node key's bytes as its disco key and
+clear on a direct path, which would otherwise tie a direct path to the address.
+The node key is *not* a secret, though — the relay routes by it, so anyone
+running or watching a relay learns it. Tailcat originally reused the node key's bytes as its disco key and
 [fixed that](https://github.com/tailscale/tailcat/commit/cb1e0d753) after
 release; this port follows, and — unlike Go, whose whole data plane is
 disco-based — still accepts an address written before the split, because it
@@ -288,6 +289,14 @@ session stays on the relay and keeps working.
   fingerprint, in both directions.
 - **The traffic itself is QUIC**, so encryption, reliability, and stream
   multiplexing come from a TLS 1.3 stack rather than anything hand-rolled.
+- **Knowing an address is not being let in.** A relay sees node public keys,
+  so anyone can seal a hello to a host. `Tailcat.Link` admits a peer only with
+  the pairing token from its invitation, or as one already paired. Go reached
+  the same point
+  [differently](https://github.com/tailscale/tailcat/commit/522df6f59): it puts
+  a random WireGuard pre-shared key into every address. This port parses and
+  re-encodes that field (`ConnInfo.PresharedKey`, CBOR `q`) so a Go address
+  keeps it, but never writes one or uses it.
 
 ### Seeing what it did
 

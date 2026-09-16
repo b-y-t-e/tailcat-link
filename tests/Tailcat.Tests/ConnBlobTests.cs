@@ -36,6 +36,14 @@ public class ConnBlobTests
         return DiscoPublic.FromRaw32(a);
     }
 
+    private static PresharedKey TestPresharedKey()
+    {
+        byte[] a = new byte[PresharedKey.RawLen];
+        a[0] = 7;
+        a[31] = 6;
+        return PresharedKey.FromRaw32(a);
+    }
+
     public static TheoryData<string, ConnInfo, string, ConnInfo?> Cases() => new()
     {
         {
@@ -159,6 +167,20 @@ public class ConnBlobTests
                 RegionID = 10,
             },
             "tco2FwWCAAAQIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH2FrWCAJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAGFpCg",
+            null
+        },
+        {
+            // Go writes a pre-shared key into every address since 522df6f59;
+            // it has to survive the round trip, or re-encoding strips it.
+            "key_with_preshared_key",
+            new ConnInfo
+            {
+                ServerPublic = TestKey(),
+                ServerDiscoPublic = TestDiscoKey(),
+                PresharedKey = TestPresharedKey(),
+                RegionID = 10,
+            },
+            "",
             null
         },
     };
@@ -290,5 +312,54 @@ public class ConnBlobTests
 
         Assert.NotNull(w.Region);
         Assert.Null(Assert.Single(w.Region));
+    }
+
+    /// <summary>
+    /// Port of TestAddrPresharedKey's address half: the key sits in field "q"
+    /// between "k" and "r", and an address without one is shorter.
+    /// </summary>
+    [Fact]
+    public void PresharedKeyIsCarriedInFieldQAndOnlyWhenSet()
+    {
+        ConnInfo ci = new()
+        {
+            ServerPublic = TestKey(),
+            PresharedKey = PresharedKey.New(),
+            RegionID = 10,
+        };
+        ConnBlob withKey = ci.ToConnBlob();
+
+        Assert.Equal(ci.PresharedKey, withKey.ParseRaw().PresharedKey);
+        Assert.Equal(ci.PresharedKey, withKey.Parse().PresharedKey);
+
+        ci.PresharedKey = default;
+        ConnBlob without = ci.ToConnBlob();
+        Assert.True(without.Parse().PresharedKey.IsZero);
+        Assert.True(without.Value.Length < withKey.Value.Length);
+        // The field is omitted, not written as zero: the golden region_id blob.
+        Assert.Equal("tcomFwWCAAAQIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH2FpCg", without.Value);
+    }
+
+    /// <summary>
+    /// Port of TestParseAddrMalformedPresharedKey: a key of the wrong length is
+    /// a malformed address, not a crash.
+    /// </summary>
+    [Theory]
+    [InlineData(PresharedKey.RawLen - 1)]
+    [InlineData(PresharedKey.RawLen + 1)]
+    public void ParseRejectsAPresharedKeyOfTheWrongLength(int length)
+    {
+        ConnBlob blob = Blob(w =>
+        {
+            w.WriteStartMap(2);
+            w.WriteTextString("p");
+            w.WriteByteString(TestKey().Raw32());
+            w.WriteTextString("q");
+            w.WriteByteString(new byte[length]);
+            w.WriteEndMap();
+        });
+
+        Assert.Throws<TailcatException>(() => blob.Parse());
+        Assert.False(blob.TryParse(out _));
     }
 }

@@ -52,6 +52,9 @@ public readonly record struct ConnBlob(string Value)
         {
             ServerPublic = w.ServerPublic,
             ServerDiscoPublic = w.ServerDiscoPublic,
+            // Kept so that ResolveAsync, which re-encodes, hands a Go address
+            // back with the key its server requires.
+            PresharedKey = w.PresharedKey,
             RegionID = w.RegionID,
         };
         List<WireRegion?> regions = w.Region ?? [];

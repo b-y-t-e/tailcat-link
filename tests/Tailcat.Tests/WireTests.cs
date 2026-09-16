@@ -24,6 +24,7 @@ public class WireTests
     {
         ["p"] = "ServerPublic",
         ["k"] = "ServerDiscoPublic",
+        ["q"] = "PresharedKey",
         ["r"] = "Region",
         ["i"] = "RegionID",
         ["c"] = "RegionCode",

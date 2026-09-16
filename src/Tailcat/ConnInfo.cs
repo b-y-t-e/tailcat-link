@@ -36,6 +36,20 @@ public sealed class ConnInfo : IEquatable<ConnInfo>
     public DiscoPublic ServerDiscoPublic { get; set; }
 
     /// <summary>
+    /// The WireGuard pre-shared key Go mixes into its handshake, or zero for
+    /// none.
+    /// </summary>
+    /// <remarks>
+    /// Go puts an independent random key in every address it writes, so that a
+    /// relay operator who observes node public keys cannot join the tunnel;
+    /// such an address is a secret as a whole. This port never uses the key —
+    /// a Tailcat.Link host admits peers by its pairing token instead — and
+    /// writes none into its own addresses, but carries one it parses so that
+    /// re-encoding a Go address does not strip it.
+    /// </remarks>
+    public PresharedKey PresharedKey { get; set; }
+
+    /// <summary>
     /// If non-empty, lists the regions of a DERP map. Either
     /// <see cref="Region"/> or <see cref="RegionID"/> must be set. If Region
     /// is set the client can avoid doing a lookup to discover the DERP map,
@@ -74,6 +88,8 @@ public sealed class ConnInfo : IEquatable<ConnInfo>
         {
             ServerPublic = ServerPublic,
             ServerDiscoPublic = ServerDiscoPublic,
+            // Omitted when zero, so this port's own addresses do not change.
+            PresharedKey = PresharedKey,
             RegionID = RegionID,
         };
         foreach (DerpRegion r in Region)
@@ -206,6 +222,7 @@ public sealed class ConnInfo : IEquatable<ConnInfo>
         other is not null &&
         ServerPublic == other.ServerPublic &&
         ServerDiscoPublic == other.ServerDiscoPublic &&
+        PresharedKey == other.PresharedKey &&
         RegionID == other.RegionID &&
         Region.SequenceEqual(other.Region);
 
@@ -216,6 +233,7 @@ public sealed class ConnInfo : IEquatable<ConnInfo>
         HashCode h = new();
         h.Add(ServerPublic);
         h.Add(ServerDiscoPublic);
+        h.Add(PresharedKey);
         h.Add(RegionID);
         foreach (DerpRegion r in Region)
         {

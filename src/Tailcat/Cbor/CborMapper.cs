@@ -16,7 +16,7 @@ namespace Tailcat.Cbor;
 /// <remarks>
 /// It supports exactly what the wire types use: <see cref="int"/>,
 /// <see cref="string"/>, <see cref="bool"/>, <see cref="NodePublic"/> and
-/// <see cref="DiscoPublic"/> (as byte strings, matching Go's
+/// <see cref="DiscoPublic"/> and <see cref="PresharedKey"/> (as byte strings, matching Go's
 /// BinaryMarshaler), and lists of other wire types. Fields are written in <see cref="CborPropertyAttribute.Order"/>
 /// order, which is the wire format; unknown map keys are skipped on decode,
 /// as Go's decoder does.
@@ -100,6 +100,10 @@ public static class CborMapper
                 writer.WriteByteString(k.Raw32());
                 break;
             case DiscoPublic k:
+                writer.WriteByteString(k.Raw32());
+                break;
+            // A byte string of 32, as Go's PresharedKey.MarshalBinary writes it.
+            case PresharedKey k:
                 writer.WriteByteString(k.Raw32());
                 break;
             case IList list:
@@ -202,6 +206,12 @@ public static class CborMapper
         {
             return DiscoPublic.FromRaw32(reader.ReadByteString());
         }
+        // A wrong length throws ArgumentException, which ConnBlob turns into a
+        // malformed-address error, as Go's UnmarshalBinary does.
+        if (type == typeof(PresharedKey))
+        {
+            return PresharedKey.FromRaw32(reader.ReadByteString());
+        }
         if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>))
         {
             Type elem = type.GetGenericArguments()[0];
@@ -232,6 +242,8 @@ public static class CborMapper
         IList list => list.Count == 0,
         NodePublic k => k.IsZero,
         DiscoPublic k => k.IsZero,
+        // Zero means no key, so an address without one stays as short as before.
+        PresharedKey k => k.IsZero,
         _ => false,
     };
 }

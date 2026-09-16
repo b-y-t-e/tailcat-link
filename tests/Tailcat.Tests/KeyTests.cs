@@ -113,6 +113,22 @@ public class KeyTests
     }
 
     /// <summary>
+    /// A new pre-shared key is never zero, since zero means "no key", and it
+    /// prints in Go's "psk:" text form.
+    /// </summary>
+    [Fact]
+    public void NewPresharedKeyIsNonZeroAndPrintsAsGoDoes()
+    {
+        PresharedKey k = PresharedKey.New();
+
+        Assert.False(k.IsZero);
+        Assert.True(default(PresharedKey).IsZero);
+        Assert.Equal(k, PresharedKey.FromRaw32(k.Raw32()));
+        Assert.NotEqual(k, PresharedKey.New());
+        Assert.Matches("^psk:[0-9a-f]{64}$", k.ToString());
+    }
+
+    /// <summary>
     /// The tunnel address lives in Tailscale's ULA range with the low 80 bits
     /// taken from the node key, so it is a pure function of the key.
     /// </summary>

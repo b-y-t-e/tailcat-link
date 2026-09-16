@@ -42,17 +42,26 @@ public sealed class WireConnInfo
     public DiscoPublic ServerDiscoPublic { get; set; }
 
     /// <summary>
+    /// The WireGuard pre-shared key. Absent from addresses written without
+    /// one, which includes every address this port writes itself.
+    /// </summary>
+    [CborProperty("q", 2, OmitEmpty = true)]
+    [JsonPropertyName("PresharedKey")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public PresharedKey PresharedKey { get; set; }
+
+    /// <summary>
     /// The embedded DERP regions, if any. An element is null when the blob
     /// carried a CBOR null there; <see cref="ConnBlob.Parse"/> rejects those,
     /// while <see cref="ConnBlob.ParseRaw"/> keeps them for display.
     /// </summary>
-    [CborProperty("r", 2, OmitEmpty = true)]
+    [CborProperty("r", 3, OmitEmpty = true)]
     [JsonPropertyName("Region")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public List<WireRegion?>? Region { get; set; }
 
     /// <summary>The DERP region ID, when no region is embedded.</summary>
-    [CborProperty("i", 3, OmitEmpty = true)]
+    [CborProperty("i", 4, OmitEmpty = true)]
     [JsonPropertyName("RegionID")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int RegionID { get; set; }
