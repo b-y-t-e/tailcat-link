@@ -125,6 +125,14 @@ PeerMessageType.Relay1Record = 0x07
 - **The counter must arrive strictly in sequence.** A gap means the relay
   dropped a record, and there is no way to recover the stream it belonged to,
   so the session is closed. See *Cost*.
+- **A counter already seen is ignored**, not treated as a gap. A sender whose
+  relay connection dies resends what it sent shortly before the connection's
+  last sign of life, on the new connection and ahead of anything new, because
+  it cannot know which of those records arrived. Records sent while no
+  connection is up are held and go out with them. Ignoring the copies is what
+  lets that repair a cut instead of ending the session. The sender holds a
+  bounded amount (16 MiB in the .NET implementation); past it the oldest are
+  dropped, which the receiver sees as a gap.
 - **Size**: at most 32256 bytes of plaintext. Not sized against DERP's 64 KiB
   packet limit, which is the obvious mistake and was made here first: a relay
   reached over a WebSocket closes a client that sends a message larger than

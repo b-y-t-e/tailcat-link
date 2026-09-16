@@ -1,8 +1,10 @@
 // Copyright (c) Andrzej Ból and contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using Sodium;
 using Tailcat.Derp;
@@ -27,6 +29,7 @@ public sealed class FakeDerpRelay : IAsyncDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly Lock _mu = new();
     private readonly Dictionary<NodePublic, DerpFrameStream> _clients = [];
+    private readonly HashSet<DerpFrameStream> _frozen = [];
     private readonly List<Socket> _sockets = [];
     private readonly Task _acceptLoop;
 
@@ -114,12 +117,18 @@ public sealed class FakeDerpRelay : IAsyncDisposable
         NodePublic? registered = null;
         try
         {
-            NodePublic clientKey = await LoginAsync(frames, ct);
+            NodePublic clientKey = await ReadLoginAsync(frames, ct);
+
+            // Registered before the client hears ServerInfo. That is when its
+            // DerpConnection counts as reconnected and a test may freeze it or
+            // send to it; registered after, either could still reach the
+            // entry of the connection being replaced.
             lock (_mu)
             {
                 _clients[clientKey] = frames;
             }
             registered = clientKey;
+            await SendServerInfoAsync(frames, clientKey, ct);
             Log?.Invoke($"{Short(clientKey)} logged in");
             await RouteAsync(frames, clientKey, ct);
         }
@@ -159,7 +168,7 @@ public sealed class FakeDerpRelay : IAsyncDisposable
         }
     }
 
-    private async Task<NodePublic> LoginAsync(DerpFrameStream frames, CancellationToken ct)
+    private async Task<NodePublic> ReadLoginAsync(DerpFrameStream frames, CancellationToken ct)
     {
         // Greet with the magic and our public key.
         byte[] greeting = new byte[DerpProtocol.MagicLen + DerpProtocol.KeyLen];
@@ -178,7 +187,11 @@ public sealed class FakeDerpRelay : IAsyncDisposable
         byte[] box = info.Payload.Span[(DerpProtocol.KeyLen + DerpProtocol.NonceLen)..].ToArray();
         byte[] json = PublicKeyBox.Open(box, nonce, _privateKey.Raw32(), clientKey.Raw32());
         LastClientInfo = JsonSerializer.Deserialize<DerpClientInfo>(json);
+        return clientKey;
+    }
 
+    private async Task SendServerInfoAsync(DerpFrameStream frames, NodePublic clientKey, CancellationToken ct)
+    {
         // Answer with our own sealed info.
         byte[] replyJson = JsonSerializer.SerializeToUtf8Bytes(ServerInfo);
         byte[] replyNonce = PublicKeyBox.GenerateNonce();
@@ -187,8 +200,6 @@ public sealed class FakeDerpRelay : IAsyncDisposable
         replyNonce.CopyTo(reply, 0);
         replyBox.CopyTo(reply, replyNonce.Length);
         await frames.WriteFrameAsync(DerpFrameType.ServerInfo, reply, ct);
-
-        return clientKey;
     }
 
     private async Task RouteAsync(DerpFrameStream frames, NodePublic clientKey, CancellationToken ct)
@@ -196,6 +207,10 @@ public sealed class FakeDerpRelay : IAsyncDisposable
         while (!ct.IsCancellationRequested)
         {
             DerpFrame frame = await frames.ReadFrameAsync(ct);
+            if (IsFrozen(frames))
+            {
+                continue; // a black hole reads and says nothing
+            }
             switch (frame.Type)
             {
                 case DerpFrameType.SendPacket:
@@ -206,6 +221,10 @@ public sealed class FakeDerpRelay : IAsyncDisposable
                     lock (_mu)
                     {
                         _clients.TryGetValue(dst, out peer);
+                    }
+                    if (peer is not null && IsFrozen(peer))
+                    {
+                        break; // swallowed on the way, and nobody is told
                     }
                     if (peer is null)
                     {
@@ -234,6 +253,10 @@ public sealed class FakeDerpRelay : IAsyncDisposable
                     }
                     break;
 
+                case DerpFrameType.Ping:
+                    await frames.WriteFrameAsync(DerpFrameType.Pong, frame.Payload, ct).ConfigureAwait(false);
+                    break;
+
                 case DerpFrameType.Pong:
                     break;
 
@@ -256,15 +279,38 @@ public sealed class FakeDerpRelay : IAsyncDisposable
     }
 
     /// <summary>Sends a ping the client is expected to echo back.</summary>
-    public async Task PingAsync(NodePublic client, byte[] payload, CancellationToken ct = default)
+    public async Task PingAsync(NodePublic client, byte[] payload, CancellationToken ct = default) =>
+        await FramesOf(client).WriteFrameAsync(DerpFrameType.Ping, payload, ct);
+
+    /// <summary>
+    /// Tells <paramref name="client"/> what is wrong with its connection, as a
+    /// real relay does when, say, a second client logs in with the same key.
+    /// An empty <paramref name="problem"/> clears it.
+    /// </summary>
+    public async Task SendHealthAsync(NodePublic client, string problem, CancellationToken ct = default)
     {
-        DerpFrameStream? frames;
+        ArgumentNullException.ThrowIfNull(problem);
+        await FramesOf(client).WriteFrameAsync(DerpFrameType.Health, Encoding.UTF8.GetBytes(problem), ct);
+    }
+
+    /// <summary>Tells <paramref name="client"/> this relay is restarting.</summary>
+    public async Task SendRestartingAsync(
+        NodePublic client, TimeSpan reconnectIn, TimeSpan tryFor, CancellationToken ct = default)
+    {
+        byte[] payload = new byte[8];
+        BinaryPrimitives.WriteUInt32BigEndian(payload, (uint)reconnectIn.TotalMilliseconds);
+        BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(4), (uint)tryFor.TotalMilliseconds);
+        await FramesOf(client).WriteFrameAsync(DerpFrameType.Restarting, payload, ct);
+    }
+
+    private DerpFrameStream FramesOf(NodePublic client)
+    {
         lock (_mu)
         {
-            _clients.TryGetValue(client, out frames);
+            return _clients.TryGetValue(client, out DerpFrameStream? frames)
+                ? frames
+                : throw new ArgumentException($"no client {client} is logged in", nameof(client));
         }
-        ArgumentNullException.ThrowIfNull(frames);
-        await frames.WriteFrameAsync(DerpFrameType.Ping, payload, ct);
     }
 
     /// <summary>
@@ -282,6 +328,31 @@ public sealed class FakeDerpRelay : IAsyncDisposable
             }
         }
         _ = frames.DisposeAsync().AsTask();
+    }
+
+    /// <summary>
+    /// Makes one client's current connection a black hole: the relay keeps it
+    /// open but carries nothing on it in either direction and answers nothing,
+    /// as a firewall that lost track of the flow does. A reconnection under the
+    /// same key is a new connection and works normally.
+    /// </summary>
+    public void Freeze(NodePublic client)
+    {
+        lock (_mu)
+        {
+            if (_clients.TryGetValue(client, out DerpFrameStream? frames))
+            {
+                _frozen.Add(frames);
+            }
+        }
+    }
+
+    private bool IsFrozen(DerpFrameStream frames)
+    {
+        lock (_mu)
+        {
+            return _frozen.Contains(frames);
+        }
     }
 
     /// <summary>How many clients are logged in right now.</summary>

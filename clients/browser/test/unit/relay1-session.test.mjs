@@ -37,13 +37,19 @@ async function sessionKeys() {
 
 /// Two sessions wired to each other. `drop` decides which records the relay
 /// loses, which is the one failure relay1 has no answer to.
-async function connectedPair({ drop = () => false } = {}) {
+async function connectedPair({ drop = () => false, repeat = () => false } = {}) {
   const keys = await sessionKeys();
   const sent = { dialer: 0, host: 0 };
 
   const relayTo = (peer, from) => ({
     sendPacket: (_peerPublic, record) => {
-      if (drop(from, sent[from]++)) return;
+      const index = sent[from]++;
+      if (drop(from, index)) return;
+      // Handed over twice, as the other end's resend after a dead relay
+      // connection delivers a record that had already arrived.
+      if (repeat(from, index)) {
+        peer.queue = (peer.queue ?? Promise.resolve()).then(() => peer.session.handleRecord(record));
+      }
       // Records reach the far end in the order they were handed over, which is
       // the only ordering guarantee relay1 has and the one its counter checks.
       peer.queue = (peer.queue ?? Promise.resolve()).then(() => peer.session.handleRecord(record));
@@ -154,6 +160,24 @@ test("a dropped record ends the session rather than leaving a hole in a stream",
   // in the middle of a message is not something the layer above can be handed.
   const accepted = await host.accepted.next();
   await assert.rejects(accepted.read(), /one was dropped/);
+});
+
+test("a record that arrives twice is ignored rather than taken for a gap", async () => {
+  // A relay connection that died makes the far end resend what it sent just
+  // before, not knowing what got through. The session has to come out of that
+  // intact; Relay1Connection.HandleRecord does the same on the .NET side.
+  const { dialer, host, settled } = await connectedPair({ repeat: (from, index) => from === "dialer" && index === 1 });
+
+  const out = dialer.openStream();
+  await out.write(utf8("one "));
+  await out.write(utf8("two "));
+  await out.write(utf8("three"));
+  await out.finish();
+  await settled();
+
+  assert.equal(host.closed, false);
+  const accepted = await host.accepted.next();
+  assert.equal(await readAll(accepted), "one two three");
 });
 
 test("a session that ends takes its open streams with it", async () => {

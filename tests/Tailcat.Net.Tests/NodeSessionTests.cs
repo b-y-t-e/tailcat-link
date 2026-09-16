@@ -48,6 +48,8 @@ public class NodeSessionTests
     {
         public ConcurrentQueue<(NodePublic Peer, string Reason)> Failures { get; } = new();
 
+        public ConcurrentQueue<string> RelayNotices { get; } = new();
+
         public void RelayConnected(int regionId)
         {
         }
@@ -73,6 +75,15 @@ public class NodeSessionTests
         public void EndpointsDiscovered(IReadOnlyList<IPEndPoint> endpoints)
         {
         }
+
+        public void RelayPeerGone(int regionId, NodePublic peer, DerpPeerGoneReason reason) =>
+            RelayNotices.Enqueue($"{regionId} gone {peer} {reason}");
+
+        public void RelayHealth(int regionId, string problem) =>
+            RelayNotices.Enqueue($"{regionId} health {problem}");
+
+        public void RelayRestarting(int regionId, TimeSpan reconnectIn, TimeSpan tryFor) =>
+            RelayNotices.Enqueue($"{regionId} restarting {reconnectIn.TotalMilliseconds} {tryFor.TotalMilliseconds}");
     }
 
     private const int RegionId = 900;
@@ -247,6 +258,49 @@ public class NodeSessionTests
 
         // Exactly one, and the one they share — not the peer's first choice.
         Assert.Equal([PeerTransport.Quic], ack.Transports);
+    }
+
+    /// <summary>
+    /// What the relay says about a peer and about this node's own connection
+    /// reaches the observer, with the region it came from.
+    /// </summary>
+    /// <remarks>
+    /// A dialler handshaking with a machine that is not on the relay used to
+    /// hear nothing until its timeout; a session whose peer kept dropping off
+    /// the relay looked like a peer that had stopped answering. The relay says
+    /// which in both cases, and that is what this passes on.
+    /// </remarks>
+    [Fact]
+    public async Task WhatTheRelaySaysReachesTheObserver()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        RecordingObserver observer = new();
+        await using TailcatNode node = await NodeAsync(relay, ct, observer: observer);
+        await relay.WaitForClientAsync(node.PublicKey, ct);
+
+        await relay.SendHealthAsync(node.PublicKey, "Something else is connected with this key", ct);
+        await relay.SendRestartingAsync(node.PublicKey, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(30), ct);
+
+        NodePublic nobody = NodePrivate.NewKey().Public();
+        using (CancellationTokenSource giveUp = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            Task<ITailcatConnection> dialling = node.ConnectAsync(nobody, RegionId, giveUp.Token);
+            while (!observer.RelayNotices.Any(n => n.Contains("gone", StringComparison.Ordinal)))
+            {
+                await Task.Delay(20, ct);
+            }
+            await giveUp.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => dialling);
+        }
+
+        Assert.Contains($"{RegionId} health Something else is connected with this key", observer.RelayNotices);
+        Assert.Contains($"{RegionId} restarting 2000 30000", observer.RelayNotices);
+        Assert.Contains($"{RegionId} gone {nobody} {DerpPeerGoneReason.NotHere}", observer.RelayNotices);
     }
 
     /// <summary>

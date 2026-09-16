@@ -30,8 +30,15 @@ public sealed class DerpFrameStream(Stream stream) : IAsyncDisposable
     private const uint MaxFrameLen = (DerpProtocol.MaxPacketSize + 1024);
 
     private readonly Stream _stream = stream ?? throw new ArgumentNullException(nameof(stream));
+    // Never disposed. Disposing a SemaphoreSlim does not wake its waiters, so
+    // a writer queued behind a write stuck on a dead connection waited for
+    // good once the stream was closed, and the holder's Release threw as well.
+    // It has no wait handle, so there is nothing to free.
     private readonly SemaphoreSlim _writeMu = new(1, 1);
-    private bool _disposed;
+
+    // Cancelled on dispose, which is what wakes the writers queued on _writeMu.
+    private readonly CancellationTokenSource _closed = new();
+    private volatile bool _disposed;
 
     /// <summary>The underlying stream, exposed for connection setup.</summary>
     public Stream Stream => _stream;
@@ -81,7 +88,7 @@ public sealed class DerpFrameStream(Stream stream) : IAsyncDisposable
             throw new ArgumentException($"frame payload of {payload.Length} bytes exceeds the {MaxFrameLen} limit", nameof(payload));
         }
 
-        await _writeMu.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await AcquireWriteAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             // Pooled: every packet a relay carries passes through here, and a
@@ -122,7 +129,41 @@ public sealed class DerpFrameStream(Stream stream) : IAsyncDisposable
         }
     }
 
+    // Waits for the write lock, or fails as a closed stream does once the
+    // stream is disposed: ObjectDisposedException is what callers already treat
+    // as a connection that is gone, where a cancellation would be one nobody
+    // asked for.
+    private async Task AcquireWriteAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (cancellationToken.CanBeCanceled)
+            {
+                using CancellationTokenSource either = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _closed.Token);
+                await _writeMu.WaitAsync(either.Token).ConfigureAwait(false);
+            }
+            else
+            {
+                await _writeMu.WaitAsync(_closed.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new ObjectDisposedException(nameof(DerpFrameStream));
+        }
+
+        if (_disposed)
+        {
+            _writeMu.Release();
+            throw new ObjectDisposedException(nameof(DerpFrameStream));
+        }
+    }
+
     /// <summary>Disposes the underlying stream.</summary>
+    /// <remarks>
+    /// A write in progress fails as the stream closes under it, and writers
+    /// waiting their turn fail with <see cref="ObjectDisposedException"/>.
+    /// </remarks>
     public async ValueTask DisposeAsync()
     {
         if (_disposed)
@@ -131,7 +172,10 @@ public sealed class DerpFrameStream(Stream stream) : IAsyncDisposable
         }
         _disposed = true;
 
-        _writeMu.Dispose();
+        // Not disposed afterwards: a writer that read _disposed just before it
+        // was set may still ask for the token, and must find it cancelled
+        // rather than gone. With no timer and no linked parent it holds nothing.
+        await _closed.CancelAsync().ConfigureAwait(false);
         await _stream.DisposeAsync().ConfigureAwait(false);
     }
 }

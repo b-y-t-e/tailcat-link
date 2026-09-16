@@ -43,6 +43,13 @@ public sealed class FakeRelayGatewayFactory(
     /// </remarks>
     public ITailcatObserver Observer { get; init; } = NullTailcatObserver.Instance;
 
+    /// <summary>
+    /// Whether nodes may form direct paths. True by default. Everything on one
+    /// machine punches through loopback at once, so a test that breaks the
+    /// relay turns this off to be sure its traffic is on the relay it breaks.
+    /// </summary>
+    public bool DirectPaths { get; init; } = true;
+
     /// <inheritdoc/>
     public async Task<INodeGateway> CreateAsync(
         NodePrivate privateKey,
@@ -74,6 +81,7 @@ public sealed class FakeRelayGatewayFactory(
                 // that is not there would only cost the handshake its timeout.
                 StunServers = [],
                 Observer = Observer,
+                AdvertiseEndpoints = DirectPaths,
                 HandshakeTimeout = TimeSpan.FromSeconds(8),
                 ConnectRelay = async (_, token) => await DerpClient.ConnectOverStreamAsync(
                     await relay.DialAsync(token), privateKey, relay.PublicKey, token),

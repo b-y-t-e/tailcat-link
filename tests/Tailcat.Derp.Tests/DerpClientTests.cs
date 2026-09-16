@@ -1,6 +1,7 @@
 // Copyright (c) Andrzej Ból and contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
+using System.Collections.Concurrent;
 using System.Text;
 using Tailcat.Keys;
 
@@ -125,6 +126,101 @@ public class DerpClientTests
         DerpReceivedPacket got = await received;
         Assert.Equal(b.PublicKey, got.Source);
         Assert.Equal("the real packet", Encoding.UTF8.GetString(got.Payload.Span));
+    }
+
+    /// <summary>
+    /// A relay saying a peer is not there reaches the caller, naming the peer
+    /// and why, instead of being read and thrown away.
+    /// </summary>
+    [Fact]
+    public async Task PeerGoneIsReportedWithThePeerAndTheReason()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using FakeDerpRelay relay = new();
+
+        await using DerpClient a = await ConnectAsync(relay, NodePrivate.NewKey(), ct);
+        await using DerpClient b = await ConnectAsync(relay, NodePrivate.NewKey(), ct);
+        await relay.WaitForClientAsync(b.PublicKey, ct);
+
+        TaskCompletionSource<DerpNotice> heard = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        a.Notice += notice => heard.TrySetResult(notice);
+        Task<DerpReceivedPacket> received = a.ReceiveAsync(ct);
+
+        NodePublic nobody = NodePrivate.NewKey().Public();
+        await a.SendAsync(nobody, "into the void"u8.ToArray(), ct);
+
+        DerpNotice notice = await heard.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+        Assert.Equal(new DerpPeerGone(nobody, DerpPeerGoneReason.NotHere), notice);
+
+        // Still only a notice: the packet that follows is what the read returns.
+        await b.SendAsync(a.PublicKey, "the real packet"u8.ToArray(), ct);
+        Assert.Equal("the real packet", Encoding.UTF8.GetString((await received).Payload.Span));
+    }
+
+    /// <summary>
+    /// The relay's word on this connection's health, and on its own restart,
+    /// reaches the caller too.
+    /// </summary>
+    [Fact]
+    public async Task HealthAndRestartingAreReported()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using FakeDerpRelay relay = new();
+
+        await using DerpClient a = await ConnectAsync(relay, NodePrivate.NewKey(), ct);
+        await using DerpClient b = await ConnectAsync(relay, NodePrivate.NewKey(), ct);
+        await relay.WaitForClientAsync(a.PublicKey, ct);
+        await relay.WaitForClientAsync(b.PublicKey, ct);
+
+        ConcurrentQueue<DerpNotice> heard = new();
+        a.Notice += heard.Enqueue;
+        Task<DerpReceivedPacket> received = a.ReceiveAsync(ct);
+
+        await relay.SendHealthAsync(a.PublicKey, "Something else is connected with this key", ct);
+        await relay.SendHealthAsync(a.PublicKey, "", ct);
+        await relay.SendRestartingAsync(a.PublicKey, TimeSpan.FromMilliseconds(1500), TimeSpan.FromSeconds(60), ct);
+        await b.SendAsync(a.PublicKey, "after the notices"u8.ToArray(), ct);
+        await received;
+
+        Assert.Equal(
+            [
+                new DerpHealth("Something else is connected with this key"),
+                new DerpHealth(""),
+                new DerpServerRestarting(TimeSpan.FromMilliseconds(1500), TimeSpan.FromSeconds(60)),
+            ],
+            heard.ToArray());
+        Assert.True(((DerpHealth)heard.ToArray()[1]).IsHealthy);
+    }
+
+    /// <summary>A ping this client sends is answered, and the answer counts as a frame received.</summary>
+    [Fact]
+    public async Task APingIsAnsweredAndTheAnswerIsAFrame()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using FakeDerpRelay relay = new();
+        await using DerpClient a = await ConnectAsync(relay, NodePrivate.NewKey(), ct);
+        await using DerpClient b = await ConnectAsync(relay, NodePrivate.NewKey(), ct);
+        await relay.WaitForClientAsync(a.PublicKey, ct);
+        await relay.WaitForClientAsync(b.PublicKey, ct);
+
+        TaskCompletionSource answered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        a.FrameReceived += () => answered.TrySetResult();
+        Task<DerpReceivedPacket> received = a.ReceiveAsync(ct);
+
+        await a.SendPingAsync(new byte[8], ct);
+        await answered.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+
+        await b.SendAsync(a.PublicKey, "after the pong"u8.ToArray(), ct);
+        Assert.Equal("after the pong", Encoding.UTF8.GetString((await received).Payload.Span));
+    }
+
+    [Fact]
+    public async Task APingThatIsNotEightBytesIsRefused()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using FakeDerpRelay relay = new();
+        await using DerpClient a = await ConnectAsync(relay, NodePrivate.NewKey(), ct);
+        await Assert.ThrowsAsync<ArgumentException>(() => a.SendPingAsync(new byte[3], ct));
     }
 
     [Fact]

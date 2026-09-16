@@ -82,6 +82,12 @@ public sealed class DerpRegionPool : IAsyncDisposable
     public event Action<int, int>? RegionReconnected;
 
     /// <summary>
+    /// Raised for what a region's relay says that is not a packet, with the
+    /// region it came from. See <see cref="DerpNotice"/>.
+    /// </summary>
+    public event Action<int, DerpNotice>? RegionNotice;
+
+    /// <summary>
     /// Connects to <paramref name="homeRegionId"/> and returns a pool that can
     /// reach the other regions in <paramref name="map"/> on demand.
     /// </summary>
@@ -185,6 +191,7 @@ public sealed class DerpRegionPool : IAsyncDisposable
             .ConnectAsync(token => _connect(regionId, token), _time, _cts.Token)
             .ConfigureAwait(false);
         connection.Reconnected += () => RegionReconnected?.Invoke(regionId, connection.ReconnectCount);
+        connection.Notice += notice => RegionNotice?.Invoke(regionId, notice);
 
         _ = Task.Run(() => ForwardPacketsAsync(connection, _cts.Token), CancellationToken.None);
         return connection;

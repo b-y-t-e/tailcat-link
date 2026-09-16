@@ -152,6 +152,36 @@ public class DerpFrameStreamTests
         await frames.DisposeAsync();
     }
 
+    /// <summary>
+    /// Writers queued behind a write stuck on a dead connection fail when the
+    /// stream is closed, instead of waiting for good. Disposing the write lock
+    /// used to strand them: a disposed SemaphoreSlim wakes nobody.
+    /// </summary>
+    [Fact]
+    public async Task WritersQueuedBehindAStuckWriteFailWhenTheStreamCloses()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        StallingStream wire = new(new MemoryStream());
+        wire.Stall();
+        DerpFrameStream frames = new(wire);
+
+        Task stuck = frames.WriteFrameAsync(DerpFrameType.SendPacket, new byte[8], ct);
+        Task queued = frames.WriteFrameAsync(DerpFrameType.SendPacket, new byte[8], ct);
+        // Deliberately without a token: that path waits on the close alone.
+#pragma warning disable xUnit1051
+        Task queuedWithoutToken = frames.WriteFrameAsync(DerpFrameType.SendPacket, new byte[8]);
+#pragma warning restore xUnit1051
+        Assert.False(queued.IsCompleted);
+
+        await frames.DisposeAsync();
+
+        // The timeout only stops a regression from hanging the run.
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => stuck.WaitAsync(TimeSpan.FromSeconds(10), ct));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => queued.WaitAsync(TimeSpan.FromSeconds(10), ct));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => queuedWithoutToken.WaitAsync(TimeSpan.FromSeconds(10), ct));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => frames.WriteFrameAsync(DerpFrameType.SendPacket, new byte[8], ct));
+    }
+
     /// <summary>A wire that accepts a few bytes and then breaks, as a dropped
     /// TCP connection does mid-frame.</summary>
     private sealed class FailingStream(int failAfter) : MemoryStream

@@ -1,6 +1,7 @@
 // Copyright (c) Andrzej Ból and contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -118,6 +119,37 @@ public sealed class DerpClient : IAsyncDisposable
     }
 
     /// <summary>
+    /// Raised, on the receiving task, for what the relay says that is not a
+    /// packet. See <see cref="DerpNotice"/>.
+    /// </summary>
+    public event Action<DerpNotice>? Notice;
+
+    /// <summary>
+    /// Raised, on the receiving task, for every frame the relay sends — a
+    /// packet, a keepalive, a pong, anything. It is the only proof that the
+    /// connection still carries bytes this way.
+    /// </summary>
+    public event Action? FrameReceived;
+
+    /// <summary>
+    /// Asks the relay to answer with a pong carrying <paramref name="payload"/>.
+    /// </summary>
+    /// <remarks>
+    /// What the answer proves is that the whole round trip still works, which
+    /// a successful send never does: bytes written into a connection a
+    /// middlebox has quietly stopped carrying are accepted all the same.
+    /// </remarks>
+    /// <exception cref="ArgumentException">If the payload is not 8 bytes.</exception>
+    public Task SendPingAsync(ReadOnlyMemory<byte> payload, CancellationToken cancellationToken = default)
+    {
+        if (payload.Length != 8)
+        {
+            throw new ArgumentException("a DERP ping carries exactly 8 bytes", nameof(payload));
+        }
+        return _frames.WriteFrameAsync(DerpFrameType.Ping, payload, cancellationToken);
+    }
+
+    /// <summary>
     /// Sends <paramref name="packet"/> to the node with public key
     /// <paramref name="destination"/>. Delivery is best effort.
     /// </summary>
@@ -148,6 +180,7 @@ public sealed class DerpClient : IAsyncDisposable
         while (true)
         {
             DerpFrame frame = await _frames.ReadFrameAsync(cancellationToken).ConfigureAwait(false);
+            FrameReceived?.Invoke();
             switch (frame.Type)
             {
                 case DerpFrameType.RecvPacket:
@@ -164,12 +197,18 @@ public sealed class DerpClient : IAsyncDisposable
                     await _frames.WriteFrameAsync(DerpFrameType.Pong, frame.Payload, cancellationToken).ConfigureAwait(false);
                     break;
 
-                case DerpFrameType.KeepAlive:
-                case DerpFrameType.Pong:
                 case DerpFrameType.PeerGone:
-                case DerpFrameType.PeerPresent:
                 case DerpFrameType.Health:
                 case DerpFrameType.Restarting:
+                    if (ParseNotice(frame) is { } notice)
+                    {
+                        Notice?.Invoke(notice);
+                    }
+                    break;
+
+                case DerpFrameType.KeepAlive:
+                case DerpFrameType.Pong:
+                case DerpFrameType.PeerPresent:
                     // Bookkeeping the caller doesn't need in order to receive.
                     break;
 
@@ -182,6 +221,34 @@ public sealed class DerpClient : IAsyncDisposable
 
     /// <summary>Closes the connection to the relay.</summary>
     public ValueTask DisposeAsync() => _frames.DisposeAsync();
+
+    // A notice is advice, not protocol: one too short to read is skipped
+    // rather than allowed to end a connection that is otherwise working.
+    private static DerpNotice? ParseNotice(DerpFrame frame)
+    {
+        ReadOnlySpan<byte> payload = frame.Payload.Span;
+        switch (frame.Type)
+        {
+            case DerpFrameType.PeerGone when payload.Length >= DerpProtocol.KeyLen:
+                // Relays older than the reason byte send the key alone, and
+                // what they meant then was that the peer had disconnected.
+                DerpPeerGoneReason reason = payload.Length > DerpProtocol.KeyLen
+                    ? (DerpPeerGoneReason)payload[DerpProtocol.KeyLen]
+                    : DerpPeerGoneReason.Disconnected;
+                return new DerpPeerGone(NodePublic.FromRaw32(payload[..DerpProtocol.KeyLen]), reason);
+
+            case DerpFrameType.Health:
+                return new DerpHealth(Encoding.UTF8.GetString(payload));
+
+            case DerpFrameType.Restarting when payload.Length >= 8:
+                return new DerpServerRestarting(
+                    TimeSpan.FromMilliseconds(BinaryPrimitives.ReadUInt32BigEndian(payload)),
+                    TimeSpan.FromMilliseconds(BinaryPrimitives.ReadUInt32BigEndian(payload[4..])));
+
+            default:
+                return null;
+        }
+    }
 
     private static async Task<Socket> DialAsync(DerpNode node, CancellationToken cancellationToken)
     {

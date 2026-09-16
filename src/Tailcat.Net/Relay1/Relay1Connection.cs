@@ -181,8 +181,16 @@ internal sealed class Relay1Connection : ITailcatConnection
             return false;
         }
 
-        // Strictly in sequence. A gap is a record the relay dropped, and
-        // nothing here can recover the stream it belonged to; carrying on
+        // A record seen before is one the other end sent again after its relay
+        // connection died, not knowing whether the first copy arrived. It
+        // opened, so it is genuine; it is simply not news.
+        if (counter < _expectedCounter)
+        {
+            return true;
+        }
+
+        // Otherwise strictly in sequence. A gap is a record the relay dropped,
+        // and nothing here can recover the stream it belonged to; carrying on
         // would hand the layer above a hole in the middle of a message.
         if (counter != _expectedCounter)
         {

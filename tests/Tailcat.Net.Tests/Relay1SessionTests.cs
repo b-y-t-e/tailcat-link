@@ -454,6 +454,178 @@ public class Relay1SessionTests
     }
 
     /// <summary>
+    /// A record that arrives a second time is ignored rather than taken for a
+    /// gap. That is what a peer's relay connection dying looks like from here:
+    /// it resends what it sent just before, not knowing what got through, and
+    /// the session has to come out of that intact.
+    /// </summary>
+    [Fact]
+    public async Task ARecordThatArrivesTwiceIsIgnored()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        NodePrivate dialerKey = NodePrivate.NewKey();
+        NodePrivate hostKey = NodePrivate.NewKey();
+        Relay1Ephemeral dialerHalf = new();
+        Relay1Ephemeral hostHalf = new();
+        Relay1Keys dialerKeys = dialerHalf.Derive(hostHalf.PublicKey, 9, dialerKey.Public(), hostKey.Public());
+        Relay1Keys hostKeys = hostHalf.Derive(dialerHalf.PublicKey, 9, dialerKey.Public(), hostKey.Public());
+
+        List<byte[]> records = [];
+        await using Relay1Connection dialer = new(
+            hostKey.Public(), dialerKeys, isDialer: true,
+            (record, _) => { lock (records) { records.Add(record.ToArray()); } return Task.CompletedTask; });
+        await using Relay1Connection host = new(
+            dialerKey.Public(), hostKeys, isDialer: false, (_, _) => Task.CompletedTask);
+
+        await using (Stream stream = await dialer.OpenStreamAsync(ct))
+        {
+            await stream.WriteAsync("one "u8.ToArray(), ct);
+            await stream.WriteAsync("two "u8.ToArray(), ct);
+            await stream.WriteAsync("three"u8.ToArray(), ct);
+        }
+
+        // Delivered with the first two again after the third, as a resend
+        // following a dead relay connection would deliver them.
+        byte[][] delivered = [records[0], records[1], records[2], records[0], records[1], records[3]];
+        foreach (byte[] record in delivered)
+        {
+            Assert.True(host.HandleRecord(record));
+        }
+
+        await using Stream accepted = await host.AcceptStreamAsync(ct);
+        using StreamReader reader = new(accepted);
+        Assert.Equal("one two three", await reader.ReadToEndAsync(ct));
+    }
+
+    /// <summary>
+    /// A hello repeated because its answer was slow is answered with the same
+    /// key as the first. The repeat used to be answered with no key at all, and
+    /// a dialler that heard that answer first gave up with "the peer agreed to
+    /// relay1 without sending an ephemeral key" — over a slow relay, most
+    /// handshakes.
+    /// </summary>
+    [Fact]
+    public async Task ARepeatedHelloIsAnsweredWithTheKeyOfTheSessionItBuilt()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+        await relay.WaitForClientAsync(listener.PublicKey, ct);
+
+        NodePrivate dialer = NodePrivate.NewKey();
+        await using DerpClient client = await DerpClient.ConnectOverStreamAsync(
+            await relay.DialAsync(ct), dialer, relay.PublicKey, ct);
+
+        byte[] hello = SealedRelay1Hello(sessionId: 7, new Relay1Ephemeral(), dialer, listener.PublicKey);
+
+        await client.SendAsync(listener.PublicKey, hello, ct);
+        PeerHello first = await NextHelloAckAsync(client, dialer, listener.PublicKey, ct);
+
+        await client.SendAsync(listener.PublicKey, hello, ct);
+        PeerHello second = await NextHelloAckAsync(client, dialer, listener.PublicKey, ct);
+
+        Assert.NotNull(first.Ephemeral);
+        Assert.NotNull(second.Ephemeral);
+        Assert.Equal(first.Ephemeral, second.Ephemeral);
+        Assert.Equal(1, listener.SessionCount);
+    }
+
+    /// <summary>
+    /// Two copies of one hello arriving together build one session, and the
+    /// key in either answer is the key that session speaks.
+    /// </summary>
+    /// <remarks>
+    /// Each hello is answered on a task of its own, so both copies used to find
+    /// no session yet and build one each; the second replaced the first under a
+    /// different key. The dialler kept the first answer, and nothing it sent
+    /// ever opened at the other end — a session that came up and then heard
+    /// nothing, which is exactly what a peer that is switched off looks like.
+    /// Several rounds, because the window is a race.
+    /// </remarks>
+    [Fact]
+    public async Task TwoCopiesOfAHelloArrivingTogetherBuildOneSessionBothAnswersAgreeOn()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(2));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+        await relay.WaitForClientAsync(listener.PublicKey, ct);
+
+        for (ulong sessionId = 1; sessionId <= 5; sessionId++)
+        {
+            NodePrivate dialer = NodePrivate.NewKey();
+            await using DerpClient client = await DerpClient.ConnectOverStreamAsync(
+                await relay.DialAsync(ct), dialer, relay.PublicKey, ct);
+
+            Relay1Ephemeral mine = new();
+            byte[] hello = SealedRelay1Hello(sessionId, mine, dialer, listener.PublicKey);
+            await Task.WhenAll(
+                client.SendAsync(listener.PublicKey, hello, ct),
+                client.SendAsync(listener.PublicKey, hello, ct));
+
+            PeerHello first = await NextHelloAckAsync(client, dialer, listener.PublicKey, ct);
+            PeerHello second = await NextHelloAckAsync(client, dialer, listener.PublicKey, ct);
+            Assert.NotNull(first.Ephemeral);
+            Assert.Equal(first.Ephemeral, second.Ephemeral);
+
+            // The proof that matters: a stream sealed with keys derived from the
+            // answer is one the listener can read.
+            Relay1Keys keys = mine.Derive(first.Ephemeral, sessionId, dialer.Public(), listener.PublicKey);
+            await using Relay1Connection session = new(
+                listener.PublicKey,
+                keys,
+                isDialer: true,
+                (record, token) => client.SendAsync(listener.PublicKey, record, token));
+
+            Task<ITailcatConnection> accepted = listener.AcceptConnectionAsync(ct);
+            await using (Stream stream = await session.OpenStreamAsync(ct))
+            {
+                await stream.WriteAsync("opens"u8.ToArray(), ct);
+            }
+
+            await using ITailcatConnection server = await accepted;
+            await using Stream incoming = await server.AcceptStreamAsync(ct);
+            byte[] buffer = new byte[5];
+            await incoming.ReadExactlyAsync(buffer, ct);
+            Assert.Equal("opens", Encoding.ASCII.GetString(buffer));
+        }
+    }
+
+    private static byte[] SealedRelay1Hello(ulong sessionId, Relay1Ephemeral ephemeral, NodePrivate dialer, NodePublic listener)
+    {
+        PeerHello hello = new(
+            sessionId,
+            new byte[PeerHello.FingerprintLen],
+            [],
+            HomeRegionId: RegionId,
+            Transports: [PeerTransport.Relay1],
+            Ephemeral: ephemeral.PublicKey);
+        return PeerMessage.Seal(PeerMessageType.Hello, hello.Encode(), dialer, listener);
+    }
+
+    private static async Task<PeerHello> NextHelloAckAsync(
+        DerpClient client, NodePrivate self, NodePublic from, CancellationToken ct)
+    {
+        while (true)
+        {
+            DerpReceivedPacket packet = await client.ReceiveAsync(ct);
+            if (PeerMessage.TryOpen(packet.Payload.Span, self, from, out PeerMessageType type, out byte[]? payload) &&
+                type == PeerMessageType.HelloAck &&
+                PeerHello.TryDecode(payload, out PeerHello? ack))
+            {
+                return ack;
+            }
+        }
+    }
+
+    /// <summary>
     /// A session the node takes away says what took it, rather than leaving
     /// whoever held it to read "Cannot access a disposed object".
     /// </summary>

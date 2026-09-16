@@ -3,6 +3,7 @@
 
 using System.Diagnostics.Metrics;
 using System.Net;
+using Tailcat.Derp;
 using Tailcat.Keys;
 
 namespace Tailcat.Net;
@@ -61,6 +62,32 @@ public interface ITailcatObserver
 
     /// <summary>A datagram arrived on the node's UDP socket.</summary>
     void DatagramArrived(IPEndPoint from, int bytes, string kind)
+    {
+    }
+
+    /// <summary>A relay said that a peer this node sent to is not connected to it.</summary>
+    /// <remarks>
+    /// Default-implemented, like the probes above. It is the one place a peer
+    /// that has vanished from the relay shows as more than silence: a session
+    /// that comes up and falls quiet, again and again, with this beside it is
+    /// the other machine losing its relay connection — two copies of it
+    /// logged in under one key, or a network that keeps cutting it — rather
+    /// than anything wrong at this end.
+    /// </remarks>
+    void RelayPeerGone(int regionId, NodePublic peer, DerpPeerGoneReason reason)
+    {
+    }
+
+    /// <summary>
+    /// A relay reported a problem with this node's own connection, or that one
+    /// has cleared (<paramref name="problem"/> empty).
+    /// </summary>
+    void RelayHealth(int regionId, string problem)
+    {
+    }
+
+    /// <summary>A relay announced it is restarting, and when to come back.</summary>
+    void RelayRestarting(int regionId, TimeSpan reconnectIn, TimeSpan tryFor)
     {
     }
 }
@@ -151,6 +178,20 @@ public sealed class TextTailcatObserver(Action<string> write) : ITailcatObserver
     /// <inheritdoc/>
     public void DatagramArrived(IPEndPoint from, int bytes, string kind) =>
         _write($"udp <- {from} {bytes} B {kind}");
+
+    /// <inheritdoc/>
+    public void RelayPeerGone(int regionId, NodePublic peer, DerpPeerGoneReason reason) =>
+        _write($"relay: region {regionId} says {Short(peer)} is gone ({reason})");
+
+    /// <inheritdoc/>
+    public void RelayHealth(int regionId, string problem) =>
+        _write(problem.Length == 0
+            ? $"relay: region {regionId} connection healthy again"
+            : $"relay: region {regionId} connection unhealthy: {problem}");
+
+    /// <inheritdoc/>
+    public void RelayRestarting(int regionId, TimeSpan reconnectIn, TimeSpan tryFor) =>
+        _write($"relay: region {regionId} restarting, reconnect in {reconnectIn.TotalSeconds:F1} s, try for {tryFor.TotalSeconds:F0} s");
 
 }
 

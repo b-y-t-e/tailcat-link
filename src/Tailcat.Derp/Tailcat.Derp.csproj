@@ -13,6 +13,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Liveness timings are internal constants; the tests run the same logic on a shorter clock. -->
+    <InternalsVisibleTo Include="Tailcat.Derp.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Tailcat\Tailcat.csproj" />
   </ItemGroup>
 

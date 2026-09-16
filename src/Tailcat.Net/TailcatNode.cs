@@ -117,6 +117,14 @@ public sealed class TailcatNodeOptions
     public IRegionPicker RegionPicker { get; init; } = new StunRegionPicker();
 
     /// <summary>
+    /// Whether the node tells peers the addresses it can be reached at. Always
+    /// true outside tests: without addresses no direct path can form, which is
+    /// how a test on one machine — where loopback always punches — keeps its
+    /// traffic on a relay it is deliberately breaking.
+    /// </summary>
+    internal bool AdvertiseEndpoints { get; init; } = true;
+
+    /// <summary>
     /// How a relay region is dialled. Null dials the region named in the DERP
     /// map, which is what every caller outside a test wants.
     /// </summary>
@@ -194,6 +202,17 @@ public sealed class TailcatNode : IAsyncDisposable
     private bool _disposed;
 
     private readonly ConcurrentDictionary<NodePublic, Session> _sessions = new();
+    private bool _advertiseEndpoints = true;
+
+    // Hellos from one peer are answered one at a time. Each is handled on a
+    // task of its own, and a dialler resends every half second until it hears
+    // back, so over a slow relay two copies of one hello used to be answered
+    // at once: both found no session, both built one, and the second replaced
+    // the first with a different relay1 key — the dialler took whichever
+    // answer came first and its records never opened again. Striped rather
+    // than per peer, so a relay full of strangers cannot grow it.
+    private readonly SemaphoreSlim[] _helloLocks =
+        Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
     private readonly ConcurrentDictionary<IPEndPoint, PeerLink> _linksByEndpoint = new();
     private readonly ConcurrentDictionary<IPEndPoint, PendingAccept> _acceptsByBridge = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<IPEndPoint>> _stunWaiters = new();
@@ -251,6 +270,7 @@ public sealed class TailcatNode : IAsyncDisposable
         // so the node re-discovers them and says so rather than going quiet.
         System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged += OnNetworkAddressChanged;
         _relays.RegionReconnected += OnRegionReconnected;
+        _relays.RegionNotice += OnRegionNotice;
     }
 
     /// <summary>This node's public key: the address peers connect to.</summary>
@@ -388,7 +408,10 @@ public sealed class TailcatNode : IAsyncDisposable
 
             TailcatNode node = new(
                 identity, relays, map, udp, listener, transports, stun, stunFallback,
-                options.HandshakeTimeout, options.Observer, options.TimeProvider);
+                options.HandshakeTimeout, options.Observer, options.TimeProvider)
+            {
+                _advertiseEndpoints = options.AdvertiseEndpoints,
+            };
             ready.SetResult(node);
             options.Observer.RelayConnected(homeRegionId);
             return node;
@@ -575,6 +598,22 @@ public sealed class TailcatNode : IAsyncDisposable
         TailcatMetrics.RelayReconnects.Add(1);
     }
 
+    private void OnRegionNotice(int regionId, DerpNotice notice)
+    {
+        switch (notice)
+        {
+            case DerpPeerGone gone:
+                _observer.RelayPeerGone(regionId, gone.Peer, gone.Reason);
+                break;
+            case DerpHealth health:
+                _observer.RelayHealth(regionId, health.Problem);
+                break;
+            case DerpServerRestarting restarting:
+                _observer.RelayRestarting(regionId, restarting.ReconnectIn, restarting.TryFor);
+                break;
+        }
+    }
+
     private void OnPathChanged(NodePublic peer, PeerPath path)
     {
         _observer.PathChanged(peer, path);
@@ -711,6 +750,11 @@ public sealed class TailcatNode : IAsyncDisposable
     /// </summary>
     public async Task<IReadOnlyList<IPEndPoint>> LocalEndpointsAsync(CancellationToken cancellationToken = default)
     {
+        if (!_advertiseEndpoints)
+        {
+            return [];
+        }
+
         // Discovery costs a network round trip, and every handshake asks for
         // it, so the answer is cached: a NAT mapping doesn't move that often.
         lock (_endpointMu)
@@ -1117,6 +1161,20 @@ public sealed class TailcatNode : IAsyncDisposable
 
     private async Task OnHelloAsync(NodePublic peer, PeerHello hello, CancellationToken ct)
     {
+        SemaphoreSlim gate = _helloLocks[(peer.GetHashCode() & int.MaxValue) % _helloLocks.Length];
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await AnswerHelloAsync(peer, hello, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task AnswerHelloAsync(NodePublic peer, PeerHello hello, CancellationToken ct)
+    {
         // Answer into the region the peer says it listens in, which is only
         // ours when the two nodes happen to be near each other.
         int peerRegion = hello.HomeRegionId != 0 ? hello.HomeRegionId : HomeRegionId;
@@ -1153,14 +1211,26 @@ public sealed class TailcatNode : IAsyncDisposable
 
         // A repeated Hello for a session we already have is just the peer
         // retrying because our answer was lost; answer again, do not restart.
+        // The answer has to be the same answer: for relay1 it carries the key
+        // the session was built with, and one without it made the dialler
+        // give up with "agreed to relay1 without sending an ephemeral key"
+        // whenever the repeat's answer overtook the first.
         if (_sessions.TryGetValue(peer, out Session? existing) && existing.SessionId == hello.SessionId)
         {
-            await SendHelloAckAsync(relay, peer, hello.SessionId, [agreed.Value], ct).ConfigureAwait(false);
+            byte[]? ephemeral = agreed.Value == PeerTransport.Relay1 ? existing.Ephemeral?.PublicKey : null;
+            await SendHelloAckAsync(relay, peer, hello.SessionId, [agreed.Value], ephemeral, ct).ConfigureAwait(false);
             return;
         }
 
         PeerLink link = new(_identity.PrivateKey, peer, hello.SessionId, relay, _udp);
-        Session session = new(link) { Peer = peer, SessionId = hello.SessionId, RegionId = peerRegion };
+        Session session = new(link)
+        {
+            Peer = peer,
+            SessionId = hello.SessionId,
+            RegionId = peerRegion,
+            // Before the session is visible to a repeated hello, not after.
+            Ephemeral = agreed.Value == PeerTransport.Relay1 ? new Relay1Ephemeral() : null,
+        };
         await ReplaceSessionAsync(peer, session).ConfigureAwait(false);
         link.PathChanged += path => OnPathChanged(peer, path);
         link.DirectProbeSent += to => _observer.DirectProbeSent(peer, to);
@@ -1172,8 +1242,6 @@ public sealed class TailcatNode : IAsyncDisposable
 
         if (agreed.Value == PeerTransport.Relay1)
         {
-            Relay1Ephemeral mine = new();
-            session.Ephemeral = mine;
             ITailcatConnection relayed = await StartRelayedAsync(
                     peer, peerRegion, session, relay, hello, isDialer: false, _time.GetTimestamp(), ct)
                 .ConfigureAwait(false);
@@ -1623,6 +1691,7 @@ public sealed class TailcatNode : IAsyncDisposable
 
         System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged -= OnNetworkAddressChanged;
         _relays.RegionReconnected -= OnRegionReconnected;
+        _relays.RegionNotice -= OnRegionNotice;
         await _cts.CancelAsync().ConfigureAwait(false);
         _incoming.Writer.TryComplete();
 

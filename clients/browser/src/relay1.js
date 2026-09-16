@@ -319,6 +319,11 @@ export class Relay1Session {
       return;
     }
 
+    // A record seen before was sent again by the other end after its relay
+    // connection died, not knowing whether the first copy arrived. It opened,
+    // so it is genuine; it is simply not news. Relay1Connection.HandleRecord
+    // does the same.
+    if (counter < this.#expectedCounter) return;
     if (counter !== this.#expectedCounter) {
       this.close(new Error(`record ${counter} arrived where ${this.#expectedCounter} was expected; one was dropped`));
       return;
