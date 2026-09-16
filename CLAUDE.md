@@ -216,13 +216,74 @@ library is, roughly how the relays work, and examples that compile.
   shut down — on both transports, because otherwise
   every one of those reaches an operator's log as "Cannot access a disposed
   object", which names the type that noticed and nothing that happened.
+- **A hello is answered once per session, whatever arrives.** A dialler resends
+  its hello every half second, so over a slow relay copies overlap. They used to
+  be answered on tasks of their own: two copies each built a session under a
+  different relay1 key, and a repeat was answered with no key at all. Either
+  way the dialler got a session nothing it sent could open, or gave up with
+  "agreed to relay1 without sending an ephemeral key". `TailcatNode` now takes
+  a striped per-peer lock around the answer and re-sends the session's own key.
+- **The relay says more than packets.** `PeerGone`, `Health` and `Restarting`
+  were read and dropped; they surface as `DerpNotice` from `DerpClient`,
+  `DerpConnection` and `DerpRegionPool`, and as `ITailcatObserver.RelayPeerGone`,
+  `RelayHealth` and `RelayRestarting`. A link that comes up and falls silent
+  every few seconds, with `RelayPeerGone` beside it, is the other machine losing
+  its relay connection (often two processes logged in under one key), not this end.
+- **A relay connection can die without ending.** A stateful firewall that loses
+  track of the TCP flow (a receive window that closed and reopened was enough in
+  the field) drops everything on it both ways while both ends hold it open, and
+  Windows gives up only after 20+ s of retransmissions. `DerpConnection` pings
+  the relay 1 s after a send that got nothing back (15 s when idle) and abandons
+  the connection if no frame at all arrives within 2 s; an abandoned connection
+  counts as having held, so the reconnect does not back off. Tight on purpose:
+  QUIC gives up on a peer after ~16 s without an acknowledgement, and slow
+  verdicts on two cuts in a row reached it. The timings are internal constants
+  (`DerpLiveness`), not settings.
+- **What a dead relay connection swallowed is sent again.** `RecentlySent` keeps
+  what went out lately; on reconnecting, everything sent from 1 s before the
+  dead connection's last frame goes out first, in order, and only then does the
+  replacement take new sends (`LostPacketResender`). QUIC ignores the copies by
+  packet number and relay1 by record counter (a counter already seen is skipped,
+  in .NET and in `relay1.js`). This is what keeps a QUIC session and its
+  channels alive through cuts every few seconds — `RelayChaosTests` does exactly
+  that with defaults only, and failed without it. Three things follow from how
+  it is built:
+  - While no replacement is in place, a send is *not* written into the dead
+    connection: it is recorded and goes out with the resend. Sends wait for the
+    first attempt at a replacement for at most 2 s, and not at all after that,
+    so a relay that stays down costs a sender nothing but the packet's delay.
+    Once a replacement is up and resending, a send waits at most 500 ms and
+    then goes behind the backlog: `PeerLink` awaits its relay probe before its
+    direct keepalives, and an unbounded wait let a working direct path time out.
+  - The backlog is bounded by memory (16 MiB), not by age: an outage keeps
+    everything sent during it, and the replacement sends all of it first. Past
+    the bound the oldest go, which a relay1 session sees as a gap and ends on;
+    the exchanges above resume from their offsets on the next session.
+  - Each resent packet has `DerpLiveness.Timeout` to go out; missing it fails
+    the attempt like a dropped connection, so a replacement cut straight after
+    its handshake cannot hold the connection lock for good.
+
+  A cut on the *receiving* side is still repaired only by QUIC's own timers.
+- **The relay is for finding each other.** A direct path that stops answering is
+  punched for again at once, then after 5, 10, 20… up to 60 s while it keeps
+  failing (it used to be a flat 30 s). Chaos tests switch direct paths off with
+  `FakeRelayGatewayFactory.DirectPaths = false`, because loopback always punches.
+- **A single-file publish loses msquic.dll.** QUIC then reports itself missing
+  and every session goes through the relay, silently. The package ships
+  `buildTransitive/Tailcat.Link.targets`, which copies it beside the executable
+  on publish; `LinkHost` warns when a Windows that has QUIC reports none; the CI
+  job `single-file-quic` publishes a consumer that way and fails without QUIC.
 - **Half a DERP frame poisons the connection.** A send cancelled after the
   header reached the wire left five bytes the relay took for the next frame's
   header, and every packet after it was misrouted until the process ended —
   which looked exactly like a peer that never answered. `DerpFrameStream`
   writes header and payload as one write and closes the stream when a write
   fails anyway, so the connection is reconnected rather than silently out of
-  step. Anything else framing bytes over a stream owes the same.
+  step. Anything else framing bytes over a stream owes the same. Closing it
+  also fails the writers queued behind a stuck write: its write lock is never
+  disposed, because a disposed `SemaphoreSlim` wakes nobody and they waited
+  for good. The liveness ping's write has a deadline of its own for the same
+  reason — unbounded, the check stopped at the very connection it was for.
 
 ## Conventions
 

@@ -90,7 +90,9 @@ byte[] reply = await link.RequestAsync(new byte[] { 1, 2, 3 });
 ### Send content of any size, with a description
 
 There is no size limit — a kilobyte of JSON and a 20 GB video go the same way.
-`LinkContent` can carry a name, a content type and metadata of your own, which
+Only what you ask for as a byte array has to fit in memory (`RequestAsync(byte[])`,
+`ReadAllBytesAsync`, and a browser, which hands a page content whole), so keep
+large content a file or a stream on both ends. `LinkContent` can carry a name, a content type and metadata of your own, which
 the other side reads before the content itself.
 
 ```csharp
