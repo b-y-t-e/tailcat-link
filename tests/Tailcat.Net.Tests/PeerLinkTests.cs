@@ -360,6 +360,96 @@ public class PeerLinkTests
     }
 
     /// <summary>
+    /// A direct path that stops answering is punched for again at once, not
+    /// half a minute later. Traffic falls back to the relay the moment the
+    /// path goes quiet, and the relay is meant for finding the peer, not for
+    /// carrying the session while a moment's packet loss is waited out.
+    /// </summary>
+    [Fact]
+    public async Task ALostDirectPathIsPunchedForAgainAtOnce()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        FakeTimeProvider time = new(DateTimeOffset.UnixEpoch);
+        await using Harness h = NewLink(sessionId: 7, time: time);
+
+        using Socket peerSocket = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        peerSocket.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        IPEndPoint peerAddr = (IPEndPoint)peerSocket.LocalEndPoint!;
+
+        // The peer: answers every probe while told to, counts them when not.
+        bool answering = true;
+        int unansweredProbes = 0;
+        using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Task peer = Task.Run(async () =>
+        {
+            byte[] buf = new byte[2048];
+            while (!stop.IsCancellationRequested)
+            {
+                SocketReceiveFromResult res;
+                try
+                {
+                    res = await peerSocket.ReceiveFromAsync(buf, SocketFlags.None, new IPEndPoint(IPAddress.Loopback, 0), stop.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                if (!PeerMessage.TryOpen(buf.AsSpan(0, res.ReceivedBytes), h.PeerKey, h.SelfKey.Public(), out PeerMessageType type, out byte[]? payload) ||
+                    type != PeerMessageType.Ping || !PeerPing.TryDecode(payload, out PeerPing ping))
+                {
+                    continue;
+                }
+                if (!Volatile.Read(ref answering))
+                {
+                    Interlocked.Increment(ref unansweredProbes);
+                    continue;
+                }
+                byte[] pong = PeerMessage.Seal(PeerMessageType.Pong, ping.Encode(), h.PeerKey, h.SelfKey.Public());
+                await h.Link.HandlePacketAsync(pong, peerAddr, stop.Token);
+            }
+        }, ct);
+
+        h.Link.AddCandidates([peerAddr]);
+        h.Link.Start();
+
+        async Task AdvanceUntil(Func<bool> done, TimeSpan limit)
+        {
+            for (TimeSpan passed = TimeSpan.Zero; !done() && passed < limit; passed += TimeSpan.FromMilliseconds(250))
+            {
+                time.Advance(TimeSpan.FromMilliseconds(250));
+                await Task.Delay(15, ct);
+            }
+        }
+
+        await AdvanceUntil(() => h.Link.CurrentPath.Kind == PeerPathKind.Direct, TimeSpan.FromSeconds(5));
+        Assert.Equal(PeerPathKind.Direct, h.Link.CurrentPath.Kind);
+
+        // Well past the first burst, so any probing after the loss is a new one.
+        await AdvanceUntil(() => false, TimeSpan.FromSeconds(10));
+
+        Volatile.Write(ref answering, false);
+        await AdvanceUntil(() => h.Link.CurrentPath.Kind == PeerPathKind.Relay, TimeSpan.FromSeconds(15));
+        Assert.Equal(PeerPathKind.Relay, h.Link.CurrentPath.Kind);
+
+        // The loop's own waits run on real time; only "now" is faked. Three
+        // real seconds cover the keepalive wait before the loss is noticed and
+        // leave room for a burst, while the fake clock moves no faster than a
+        // real one — so no half-minute wait could pass unnoticed inside them.
+        Interlocked.Exchange(ref unansweredProbes, 0);
+        for (int i = 0; i < 30; i++)
+        {
+            time.Advance(TimeSpan.FromMilliseconds(100));
+            await Task.Delay(100, ct);
+        }
+
+        // A burst probes every quarter of a second; without one there is nothing at all.
+        Assert.True(Volatile.Read(ref unansweredProbes) >= 3, $"only {unansweredProbes} probes in the three seconds after the loss");
+
+        await stop.CancelAsync();
+        await peer;
+    }
+
+    /// <summary>
     /// A candidate that cannot be sent to must not cost the others their
     /// turn. While punching, a dead address is the normal case — and the one
     /// listed after it may be the only reachable one.

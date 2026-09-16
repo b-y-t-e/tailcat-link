@@ -94,16 +94,20 @@ public sealed class PeerLink : IAsyncDisposable
     // How long to keep punching at a candidate that never answers.
     private static readonly TimeSpan PunchDuration = TimeSpan.FromSeconds(5);
 
-    // How long to wait before trying to punch again, while a session is still
-    // relayed. One burst is not enough: whether a hole opens depends on both
-    // NATs' mappings lining up, and those move — a mapping expires and is
+    // How long to wait, after a burst that found nothing, before the next one.
+    // One burst is not enough: whether a hole opens depends on both NATs'
+    // mappings lining up, and those move — a mapping expires and is
     // reassigned, a peer's network changes, a firewall state entry ages out.
-    // Without this, a pair that failed to punch in its first five seconds
-    // stayed on the relay for the life of the session however long that was,
-    // which for a durable link is measured in days. Verified between two real
-    // NATs, where the first burst overlapped the tail of the relay handshake
-    // and there was never a second one.
-    private static readonly TimeSpan RepunchInterval = TimeSpan.FromSeconds(30);
+    // Without retries a pair that failed to punch in its first five seconds
+    // stayed on the relay for the life of the session, which for a durable
+    // link is measured in days; that was verified between two real NATs.
+    //
+    // The wait starts short and doubles while bursts keep failing, so a path
+    // that was lost to a moment of packet loss is back within seconds while a
+    // pair that simply cannot punch settles at a burst a minute. The relay is
+    // for finding each other; carrying the traffic is its last resort.
+    private static readonly TimeSpan FirstRepunchDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan MaxRepunchDelay = TimeSpan.FromMinutes(1);
 
     // How long a candidate nobody has heard from is kept. Candidates only ever
     // arrived: a peer roaming between networks announces a fresh set each time
@@ -135,6 +139,11 @@ public sealed class PeerLink : IAsyncDisposable
     private PathState? _chosen;
     private PeerPath? _reportedPath;
     private bool _disposed;
+
+    // Probe-loop state only: whether the last pass had a working direct path,
+    // and how long the next failed burst waits.
+    private bool _hadDirect;
+    private TimeSpan _repunchDelay = FirstRepunchDelay;
 
     private DateTimeOffset CandidatesAddedAt
     {
@@ -311,8 +320,10 @@ public sealed class PeerLink : IAsyncDisposable
                 }
                 // The peer moved networks. Its old addresses are probably dead,
                 // but they are left in place to age out on their own: the new
-                // ones simply get probed and win.
+                // ones simply get probed and win. New addresses are a fresh
+                // chance, so the waits between bursts start short again.
                 AddCandidates(update.Endpoints);
+                _repunchDelay = FirstRepunchDelay;
                 break;
 
             default:
@@ -436,11 +447,24 @@ public sealed class PeerLink : IAsyncDisposable
                     }
                 }
 
-                // Nothing direct is working and the burst is spent: start
-                // another. Re-adding the peer's advertised set re-creates any
-                // candidate that was swept as dead and reopens the window.
-                if (!haveDirect && now - candidatesAddedAt >= RepunchInterval)
+                // Nothing direct is working: punch again — at once if a direct
+                // path has only just stopped answering, otherwise once the
+                // last burst and its wait are over. Re-adding the peer's
+                // advertised set re-creates any candidate that was swept as
+                // dead and reopens the window; the path that was lost is still
+                // among the candidates, so it is tried too.
+                bool justLost = _hadDirect && !haveDirect;
+                _hadDirect = haveDirect;
+                if (haveDirect)
                 {
+                    _repunchDelay = FirstRepunchDelay;
+                }
+                else if (justLost || now - candidatesAddedAt >= PunchDuration + _repunchDelay)
+                {
+                    _repunchDelay = justLost
+                        ? FirstRepunchDelay
+                        : TimeSpan.FromTicks(Math.Min(_repunchDelay.Ticks * 2, MaxRepunchDelay.Ticks));
+
                     IReadOnlyList<IPEndPoint> retry;
                     lock (_mu)
                     {
