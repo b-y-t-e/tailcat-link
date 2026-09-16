@@ -1,0 +1,22 @@
+<Project>
+
+  <!--
+    A single-file publish on Windows leaves msquic.dll behind: it is neither
+    bundled into the executable nor copied beside it, so QUIC reports itself
+    unsupported and every session is carried by the relay, with no direct path
+    and no retransmission. The executable finds msquic.dll next to itself, so
+    that is where it goes. Nothing to set: it happens on publish.
+  -->
+  <Target Name="TailcatLinkKeepMsQuicBesideSingleFile"
+          BeforeTargets="_ComputeFilesToBundle"
+          Condition="'$(PublishSingleFile)' == 'true' and '$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.StartsWith('win'))">
+    <ItemGroup>
+      <_TailcatLinkMsQuic Include="@(RuntimePackAsset)" Condition="'%(Filename)%(Extension)' == 'msquic.dll'" />
+      <ResolvedFileToPublish Include="@(_TailcatLinkMsQuic)"
+                             RelativePath="msquic.dll"
+                             CopyToPublishDirectory="PreserveNewest"
+                             ExcludeFromSingleFile="true" />
+    </ItemGroup>
+  </Target>
+
+</Project>

@@ -68,6 +68,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Publish-time fix-ups a consumer should not have to know about - see the
+         file. buildTransitive reaches applications that get this package
+         through another one, build/ the ones that reference it directly. -->
+    <None Include="buildTransitive\Tailcat.Link.targets" Pack="true" PackagePath="buildTransitive\Tailcat.Link.targets" />
+    <None Include="buildTransitive\Tailcat.Link.targets" Pack="true" PackagePath="build\Tailcat.Link.targets" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- DPAPI: on Windows the stored identity key is encrypted to the user
          account, so a readable file is not a usable key. -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" />

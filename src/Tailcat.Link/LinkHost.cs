@@ -87,6 +87,21 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
         _options = options;
         _listens = listens;
         _log = new LinkLog(options.LoggerFactory?.CreateLogger<ILinkHost>(), options.Log);
+        WarnIfQuicIsMissing();
+    }
+
+    // Windows 11 and Server 2022 have QUIC; a process there without it almost
+    // always lost msquic.dll on the way to being published. It still works,
+    // relayed, which is exactly why nobody would notice without being told.
+    private void WarnIfQuicIsMissing()
+    {
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 20348) && !System.Net.Quic.QuicListener.IsSupported)
+        {
+            _log.Warn(
+                "QUIC is not available although this Windows supports it, so every session will go through the relay " +
+                "with no direct path. msquic.dll is probably missing beside the executable; publish with the " +
+                "Tailcat.Link package so it is copied there.");
+        }
     }
 
     /// <inheritdoc/>

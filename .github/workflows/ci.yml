@@ -202,6 +202,66 @@ jobs:
           name: nupkg
           path: artifacts/*.*nupkg
 
+  # A single-file publish on Windows used to lose msquic.dll, which made QUIC
+  # report itself unsupported and put every session on the relay — silently,
+  # because relayed sessions work. The package's buildTransitive targets copy
+  # it beside the executable; this publishes a consumer that way and fails
+  # unless QUIC is really there.
+  single-file-quic:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Pack
+        run: dotnet pack src/Tailcat.Link --configuration Release -o artifacts
+
+      - name: Publish a single-file consumer
+        shell: pwsh
+        run: |
+          # -Filter goes straight to Win32, which knows only * and ? — a
+          # character class would match nothing. The regex is what keeps
+          # Tailcat.Link.Json out.
+          $pkg = Get-ChildItem artifacts -Filter 'Tailcat.Link.*.nupkg' |
+            Where-Object { $_.BaseName -match '^Tailcat\.Link\.\d' } | Select-Object -First 1
+          if (-not $pkg) { throw 'dotnet pack produced no Tailcat.Link package' }
+          $version = $pkg.BaseName.Substring('Tailcat.Link.'.Length)
+          # Outside the checkout, as the consume job does: inside it the repo's
+          # Directory.Packages.props turns on central package management, and
+          # restore refuses a PackageReference that carries a Version (NU1008).
+          $consumer = Join-Path $env:RUNNER_TEMP consumer
+          New-Item -ItemType Directory $consumer | Out-Null
+          Set-Location $consumer
+          @"
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+            <ItemGroup><PackageReference Include="Tailcat.Link" Version="$version" /></ItemGroup>
+          </Project>
+          "@ | Set-Content consumer.csproj
+          @'
+          #pragma warning disable CA1416
+          if (!System.Net.Quic.QuicListener.IsSupported) { Console.WriteLine("QUIC missing"); return 1; }
+          Console.WriteLine($"QUIC available beside {typeof(Tailcat.Link.TailcatLink).Assembly.GetName().Name}");
+          return 0;
+          '@ | Set-Content Program.cs
+          @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources><clear /><add key="nuget.org" value="https://api.nuget.org/v3/index.json" /><add key="local" value="$env:GITHUB_WORKSPACE\artifacts" /></packageSources>
+            <packageSourceMapping>
+              <packageSource key="local"><package pattern="Tailcat.*" /></packageSource>
+              <packageSource key="nuget.org"><package pattern="*" /></packageSource>
+            </packageSourceMapping>
+          </configuration>
+          "@ | Set-Content nuget.config
+          dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o out
+          if (-not (Test-Path out\msquic.dll)) { throw 'msquic.dll was not published beside the executable' }
+          .\out\consumer.exe
+          if ($LASTEXITCODE -ne 0) { throw 'the published consumer has no QUIC' }
+
   # The second implementation of relay1. Its offline tests read the same record
   # vectors as Relay1VectorTests on the .NET side, so a wire format that drifts
   # apart fails here rather than waiting for somebody to run the interop by
