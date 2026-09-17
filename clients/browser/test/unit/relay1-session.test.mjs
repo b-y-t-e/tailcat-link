@@ -180,6 +180,36 @@ test("a record that arrives twice is ignored rather than taken for a gap", async
   assert.equal(await readAll(accepted), "one two three");
 });
 
+test("a record from another session is ignored rather than ending this one", async () => {
+  // A machine whose relay connection died resends what it sent just before;
+  // when that session has since been replaced, the records reach the new one
+  // under keys it does not have. Relay1Connection.HandleRecord does the same.
+  const { dialer, host, settled } = await connectedPair();
+  const stale = [];
+  const previous = new Relay1Session({
+    derp: { sendPacket: (_peerPublic, record) => stale.push(record) },
+    peerPublic: new Uint8Array(32),
+    keys: (await sessionKeys()).dialer,
+    isDialer: true,
+  });
+  let ignored = 0;
+  host.onignored = () => ignored++;
+  const old = previous.openStream();
+  await old.write(utf8("from the session before"));
+  for (const record of stale) await host.handleRecord(record);
+  assert.equal(ignored, stale.length);
+
+  const out = dialer.openStream();
+  await out.write(utf8("one "));
+  await out.write(utf8("two"));
+  await out.finish();
+  await settled();
+
+  assert.equal(host.closed, false);
+  const accepted = await host.accepted.next();
+  assert.equal(await readAll(accepted), "one two");
+});
+
 test("a session that ends takes its open streams with it", async () => {
   const { dialer, host, settled } = await connectedPair();
 

@@ -154,8 +154,19 @@ internal sealed class Relay1Connection : ITailcatConnection
             {
                 throw new TailcatException("this relay1 session has sent as many records as its keys allow");
             }
+
+            // The last point a caller may still back out. Once a counter is
+            // spent the record has to reach the relay: the far end counts
+            // every number, and one that never went out is a gap it closes
+            // the session on. A caller cancelled while the relay was busy —
+            // an exchange attempt ending, say, while its window update waited
+            // behind a large write — used to leave exactly that on a healthy
+            // relay. Nor does the wait go unbounded: a relay connection whose
+            // write is stuck is abandoned by its liveness check, and a record
+            // queued behind it fails with the connection.
+            cancellationToken.ThrowIfCancellationRequested();
             byte[] record = Relay1Record.Seal(frame, _sendKey, _sendCounter++);
-            await _send(record, cancellationToken).ConfigureAwait(false);
+            await _send(record, CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {
@@ -167,18 +178,31 @@ internal sealed class Relay1Connection : ITailcatConnection
     /// Takes one record off the relay.
     /// </summary>
     /// <returns>
-    /// False when the session cannot continue — a record that does not open,
-    /// or one that arrives out of order — in which case the caller closes it.
+    /// <see cref="Relay1RecordOutcome.SessionBroken"/> when the session cannot
+    /// continue — a record that arrives out of order, or one that opens to a
+    /// frame that makes no sense — in which case the caller closes it;
+    /// <see cref="Relay1RecordOutcome.Unopened"/> for one ignored because it
+    /// would not open, which the caller reports.
     /// </returns>
-    internal bool HandleRecord(ReadOnlySpan<byte> record)
+    internal Relay1RecordOutcome HandleRecord(ReadOnlySpan<byte> record)
     {
         if (_disposed)
         {
-            return false;
+            return Relay1RecordOutcome.SessionBroken;
         }
+
+        // A record that does not open is not this session's, and not news. The
+        // usual one is from the session before: a machine whose relay
+        // connection died resends what it sent just before, and when that
+        // session has meanwhile been replaced its records arrive here under
+        // keys this one never had. Ending the session on them ended every new
+        // session built straight after a cut. Ignoring them gives nothing
+        // away: the tag still keeps a forged record out, a relay that corrupts
+        // a genuine one leaves a gap the next record shows, and a relay could
+        // always drop records outright.
         if (!Relay1Record.TryOpen(record, _receiveKey, out ulong counter, out byte[] plaintext))
         {
-            return false;
+            return Relay1RecordOutcome.Unopened;
         }
 
         // A record seen before is one the other end sent again after its relay
@@ -186,7 +210,7 @@ internal sealed class Relay1Connection : ITailcatConnection
         // opened, so it is genuine; it is simply not news.
         if (counter < _expectedCounter)
         {
-            return true;
+            return Relay1RecordOutcome.Taken;
         }
 
         // Otherwise strictly in sequence. A gap is a record the relay dropped,
@@ -194,13 +218,13 @@ internal sealed class Relay1Connection : ITailcatConnection
         // would hand the layer above a hole in the middle of a message.
         if (counter != _expectedCounter)
         {
-            return false;
+            return Relay1RecordOutcome.SessionBroken;
         }
         _expectedCounter++;
 
         if (!Relay1Frame.TryDecode(plaintext, out ulong streamId, out Relay1FrameFlags flags, out ReadOnlyMemory<byte> payload))
         {
-            return false;
+            return Relay1RecordOutcome.SessionBroken;
         }
 
         Relay1Stream? stream = StreamFor(streamId);
@@ -208,7 +232,7 @@ internal sealed class Relay1Connection : ITailcatConnection
         {
             // A frame for a stream that has been disposed, or retired. Late
             // window updates and FINs are normal; nothing to do with them.
-            return true;
+            return Relay1RecordOutcome.Taken;
         }
 
         if (flags.HasFlag(Relay1FrameFlags.Window))
@@ -217,12 +241,12 @@ internal sealed class Relay1Connection : ITailcatConnection
             {
                 stream.OnWindow(BinaryPrimitives.ReadUInt32BigEndian(payload.Span));
             }
-            return true;
+            return Relay1RecordOutcome.Taken;
         }
         if (flags.HasFlag(Relay1FrameFlags.Reset))
         {
             stream.OnReset(System.Text.Encoding.UTF8.GetString(payload.Span));
-            return true;
+            return Relay1RecordOutcome.Taken;
         }
 
         stream.OnData(payload);
@@ -230,7 +254,7 @@ internal sealed class Relay1Connection : ITailcatConnection
         {
             stream.OnFin();
         }
-        return true;
+        return Relay1RecordOutcome.Taken;
     }
 
     internal void Forget(ulong streamId)

@@ -125,6 +125,18 @@ PeerMessageType.Relay1Record = 0x07
 - **The counter must arrive strictly in sequence.** A gap means the relay
   dropped a record, and there is no way to recover the stream it belonged to,
   so the session is closed. See *Cost*.
+- **A record that does not open is ignored**, not treated as the end of the
+  session. The usual one belongs to the session before: a sender whose relay
+  connection died resends what it sent just before, and when that session has
+  since been replaced, its records reach the new one under keys it does not
+  have. The tag still keeps a forged record out; a genuine one corrupted in
+  flight leaves a gap that the next record shows. They are still reported
+  (`ITailcatObserver.Relay1RecordsIgnored`, as a count at most every ten
+  seconds because a cut can bring thousands; `onignored` in `relay1.js`): a
+  steady stream of them is two ends whose keys disagree, not a silent peer.
+- **A counter, once sealed, is sent.** A sender may give up on a record only
+  before it takes a counter for it. One cancelled after that is a gap the
+  receiver closes the session on, with nothing dropped by the relay.
 - **A counter already seen is ignored**, not treated as a gap. A sender whose
   relay connection dies resends what it sent shortly before the connection's
   last sign of life, on the new connection and ahead of anything new, because

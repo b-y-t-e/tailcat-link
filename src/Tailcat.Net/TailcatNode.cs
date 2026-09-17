@@ -480,7 +480,10 @@ public sealed class TailcatNode : IAsyncDisposable
 
         ulong sessionId = BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         PeerLink link = new(_identity.PrivateKey, peer, sessionId, relay, _udp);
-        Session session = new(link) { Peer = peer, SessionId = sessionId, RegionId = peerRegionId };
+        Session session = new(link)
+        {
+            Peer = peer, SessionId = sessionId, RegionId = peerRegionId, IgnoredRecords = new(_time),
+        };
         await ReplaceSessionAsync(peer, session).ConfigureAwait(false);
         link.PathChanged += path => OnPathChanged(peer, path);
         link.DirectProbeSent += to => _observer.DirectProbeSent(peer, to);
@@ -1140,15 +1143,13 @@ public sealed class TailcatNode : IAsyncDisposable
         }
 
         // A relay1 session has no link and no paths; its records go straight
-        // to it, and one that will not open ends it — there is no
-        // retransmission here to paper over a record the relay dropped.
+        // to it, and a gap in them ends it — there is no retransmission here
+        // to paper over a record the relay dropped.
         if (PeerMessage.TypeOf(packet.Span) == PeerMessageType.Relay1Record)
         {
-            if (session.Relayed is not null && !session.Relayed.HandleRecord(packet.Span))
+            if (session.Relayed is not null)
             {
-                const string Lost = "a relay1 record was lost or forged; the session cannot continue";
-                _observer.HandshakeFailed(source, Lost);
-                await CloseSessionAsync(source, Lost).ConfigureAwait(false);
+                await HandleRelay1RecordAsync(source, session, session.Relayed, packet.Span).ConfigureAwait(false);
             }
             return;
         }
@@ -1156,6 +1157,32 @@ public sealed class TailcatNode : IAsyncDisposable
         if (session.Link is PeerLink link)
         {
             await link.HandlePacketAsync(packet, from, ct).ConfigureAwait(false);
+        }
+    }
+
+    private Task HandleRelay1RecordAsync(
+        NodePublic source, Session session, Relay1Connection relayed, ReadOnlySpan<byte> record)
+    {
+        switch (relayed.HandleRecord(record))
+        {
+            case Relay1RecordOutcome.Unopened:
+                // Harmless one at a time, but a session whose every record
+                // lands here has keys that disagree with the other end's, and
+                // would otherwise look like a peer that simply stopped talking.
+                // A cut can bring thousands at once, so the observer hears a
+                // count now and then rather than a call for each.
+                TailcatMetrics.Relay1RecordsIgnored.Add(1);
+                if (session.IgnoredRecords.Count(out long ignored))
+                {
+                    _observer.Relay1RecordsIgnored(source, ignored);
+                }
+                return Task.CompletedTask;
+            case Relay1RecordOutcome.SessionBroken:
+                const string Lost = "a relay1 record was lost; the session cannot continue";
+                _observer.HandshakeFailed(source, Lost);
+                return CloseSessionAsync(source, Lost);
+            default:
+                return Task.CompletedTask;
         }
     }
 
@@ -1228,6 +1255,7 @@ public sealed class TailcatNode : IAsyncDisposable
             Peer = peer,
             SessionId = hello.SessionId,
             RegionId = peerRegion,
+            IgnoredRecords = new(_time),
             // Before the session is visible to a repeated hello, not after.
             Ephemeral = agreed.Value == PeerTransport.Relay1 ? new Relay1Ephemeral() : null,
         };
@@ -1754,6 +1782,9 @@ public sealed class TailcatNode : IAsyncDisposable
 
         /// <summary>The session itself, when it is carried by the relay.</summary>
         public Relay1Connection? Relayed { get; set; }
+
+        /// <summary>The records <see cref="Relayed"/> ignored, for reporting.</summary>
+        public required Relay1IgnoredRecords IgnoredRecords { get; init; }
 
         /// <summary>The half of a relay1 handshake this node contributed.</summary>
         public Relay1Ephemeral? Ephemeral { get; set; }

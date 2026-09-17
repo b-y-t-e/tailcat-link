@@ -290,6 +290,10 @@ export class Relay1Session {
     this.#retiredBelowPeerStream = (isDialer ? 2 : 1) - 2;
     this.accepted = new Queue();
     this.onclose = null;
+    // Called for each record ignored because it would not open. One now and
+    // then is the session before's; a steady stream with nothing else is two
+    // ends whose keys disagree, which otherwise looks like a silent peer.
+    this.onignored = null;
   }
 
   get closed() {
@@ -305,9 +309,9 @@ export class Relay1Session {
     return stream;
   }
 
-  /// Takes one record. Anything that will not open, or arrives out of order,
-  /// ends the session: there is no way back from a hole in the middle of a
-  /// message, and pretending otherwise hands the layer above corruption.
+  /// Takes one record. One that arrives out of order ends the session: there
+  /// is no way back from a hole in the middle of a message, and pretending
+  /// otherwise hands the layer above corruption.
   async handleRecord(record) {
     if (this.#closed) return;
     let counter;
@@ -315,7 +319,13 @@ export class Relay1Session {
     try {
       ({ counter, plaintext } = await openRecord(record, this.#receiveKey));
     } catch {
-      this.close(new Error("a relay1 record would not open"));
+      // Not this session's, and not news: usually the session before's,
+      // resent by a machine whose relay connection died after that session
+      // had been replaced. Ending the session on it ended every new one built
+      // straight after a cut. The tag still keeps a forgery out, and a genuine
+      // record corrupted in flight leaves a gap the next one shows.
+      // Relay1Connection.HandleRecord does the same, and reports it too.
+      this.onignored?.();
       return;
     }
 

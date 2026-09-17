@@ -489,12 +489,182 @@ public class Relay1SessionTests
         byte[][] delivered = [records[0], records[1], records[2], records[0], records[1], records[3]];
         foreach (byte[] record in delivered)
         {
-            Assert.True(host.HandleRecord(record));
+            Assert.Equal(Relay1RecordOutcome.Taken, host.HandleRecord(record));
         }
 
         await using Stream accepted = await host.AcceptStreamAsync(ct);
         using StreamReader reader = new(accepted);
         Assert.Equal("one two three", await reader.ReadToEndAsync(ct));
+    }
+
+    /// <summary>
+    /// A send cancelled while the relay is busy does not cost the far end a
+    /// record. The counter used to be spent before the send, so a cancellation
+    /// that stopped the record from going out left a gap nothing had dropped —
+    /// and the far end closed a session on a perfectly healthy relay.
+    /// </summary>
+    [Fact]
+    public async Task ASendCancelledWhileTheRelayIsBusyLeavesNoGap()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (Relay1Keys dialerKeys, Relay1Keys hostKeys, NodePublic dialerPublic, NodePublic hostPublic) = SessionKeys();
+
+        // The first record waits for the relay, as a send does behind another
+        // one's write, and gives up if its caller does.
+        TaskCompletionSource relayBusy = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int held = 0;
+        List<byte[]> records = [];
+        await using Relay1Connection dialer = new(
+            hostPublic, dialerKeys, isDialer: true,
+            async (record, token) =>
+            {
+                if (Interlocked.Exchange(ref held, 1) == 0)
+                {
+                    await relayBusy.Task.WaitAsync(token);
+                }
+                lock (records)
+                {
+                    records.Add(record.ToArray());
+                }
+            });
+        await using Relay1Connection host = new(
+            dialerPublic, hostKeys, isDialer: false, (_, _) => Task.CompletedTask);
+
+        await using (Stream stream = await dialer.OpenStreamAsync(ct))
+        {
+            using CancellationTokenSource caller = new();
+            Task first = stream.WriteAsync("one "u8.ToArray(), caller.Token).AsTask();
+            await caller.CancelAsync();
+            relayBusy.SetResult();
+            try
+            {
+                await first;
+            }
+            catch (OperationCanceledException)
+            {
+                // Either outcome is the caller's to see; a hole is not.
+            }
+            await stream.WriteAsync("two"u8.ToArray(), ct);
+        }
+
+        foreach (byte[] record in records)
+        {
+            Assert.NotEqual(Relay1RecordOutcome.SessionBroken, host.HandleRecord(record));
+        }
+    }
+
+    /// <summary>
+    /// A record sealed for another session is ignored, not taken as the end of
+    /// this one. A machine whose relay connection died resends what it sent
+    /// just before — and when the session those records belonged to has since
+    /// been replaced, they arrive at the new one under keys it does not have.
+    /// That ended every new session built straight after a cut.
+    /// </summary>
+    [Fact]
+    public async Task ARecordFromAnotherSessionIsIgnored()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (Relay1Keys dialerKeys, Relay1Keys hostKeys, NodePublic dialerPublic, NodePublic hostPublic) = SessionKeys();
+        (Relay1Keys oldDialerKeys, _, _, _) = SessionKeys();
+
+        List<byte[]> records = [];
+        List<byte[]> oldRecords = [];
+        await using Relay1Connection dialer = new(
+            hostPublic, dialerKeys, isDialer: true,
+            (record, _) => { lock (records) { records.Add(record.ToArray()); } return Task.CompletedTask; });
+        await using Relay1Connection oldDialer = new(
+            hostPublic, oldDialerKeys, isDialer: true,
+            (record, _) => { lock (oldRecords) { oldRecords.Add(record.ToArray()); } return Task.CompletedTask; });
+        await using Relay1Connection host = new(
+            dialerPublic, hostKeys, isDialer: false, (_, _) => Task.CompletedTask);
+
+        await using (Stream stale = await oldDialer.OpenStreamAsync(ct))
+        {
+            await stale.WriteAsync("from the session before"u8.ToArray(), ct);
+        }
+        await using (Stream stream = await dialer.OpenStreamAsync(ct))
+        {
+            await stream.WriteAsync("one "u8.ToArray(), ct);
+            await stream.WriteAsync("two"u8.ToArray(), ct);
+        }
+
+        // The resend reaches the new session first, as it does after a cut.
+        foreach (byte[] record in oldRecords)
+        {
+            Assert.Equal(Relay1RecordOutcome.Unopened, host.HandleRecord(record));
+        }
+        foreach (byte[] record in records)
+        {
+            Assert.Equal(Relay1RecordOutcome.Taken, host.HandleRecord(record));
+        }
+
+        await using Stream accepted = await host.AcceptStreamAsync(ct);
+        using StreamReader reader = new(accepted);
+        Assert.Equal("one two", await reader.ReadToEndAsync(ct));
+    }
+
+    /// <summary>
+    /// A genuine record missing still ends the session: ignoring what does not
+    /// open must not turn into ignoring a gap.
+    /// </summary>
+    [Fact]
+    public async Task AGenuineRecordMissingStillEndsTheSession()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (Relay1Keys dialerKeys, Relay1Keys hostKeys, NodePublic dialerPublic, NodePublic hostPublic) = SessionKeys();
+
+        List<byte[]> records = [];
+        await using Relay1Connection dialer = new(
+            hostPublic, dialerKeys, isDialer: true,
+            (record, _) => { lock (records) { records.Add(record.ToArray()); } return Task.CompletedTask; });
+        await using Relay1Connection host = new(
+            dialerPublic, hostKeys, isDialer: false, (_, _) => Task.CompletedTask);
+
+        await using (Stream stream = await dialer.OpenStreamAsync(ct))
+        {
+            await stream.WriteAsync("one "u8.ToArray(), ct);
+            await stream.WriteAsync("two"u8.ToArray(), ct);
+        }
+
+        Assert.Equal(Relay1RecordOutcome.Taken, host.HandleRecord(records[0]));
+        Assert.Equal(Relay1RecordOutcome.SessionBroken, host.HandleRecord(records[2]));
+    }
+
+    /// <summary>
+    /// Ignored records are reported as a count, not one by one: a relay cut
+    /// can bring back thousands of the session before's, and a report for each
+    /// flooded the log. The first is reported at once, the rest once an
+    /// interval has passed.
+    /// </summary>
+    [Fact]
+    public void IgnoredRecordsAreReportedAsACountAtMostOncePerInterval()
+    {
+        FakeTimeProvider time = new(DateTimeOffset.UnixEpoch);
+        Relay1IgnoredRecords ignored = new(time);
+
+        Assert.True(ignored.Count(out long first));
+        Assert.Equal(1, first);
+        for (int i = 0; i < 1000; i++)
+        {
+            Assert.False(ignored.Count(out _));
+        }
+
+        time.Advance(Relay1IgnoredRecords.ReportInterval);
+        Assert.True(ignored.Count(out long later));
+        Assert.Equal(1001, later);
+    }
+
+    private static (Relay1Keys Dialer, Relay1Keys Host, NodePublic DialerPublic, NodePublic HostPublic) SessionKeys()
+    {
+        NodePrivate dialerKey = NodePrivate.NewKey();
+        NodePrivate hostKey = NodePrivate.NewKey();
+        Relay1Ephemeral dialerHalf = new();
+        Relay1Ephemeral hostHalf = new();
+        return (
+            dialerHalf.Derive(hostHalf.PublicKey, 9, dialerKey.Public(), hostKey.Public()),
+            hostHalf.Derive(dialerHalf.PublicKey, 9, dialerKey.Public(), hostKey.Public()),
+            dialerKey.Public(),
+            hostKey.Public());
     }
 
     /// <summary>

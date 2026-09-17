@@ -142,7 +142,14 @@ library is, roughly how the relays work, and examples that compile.
   consequences: a record is capped at 32256 bytes rather than DERP's 64 KiB,
   because a relay reached over a WebSocket closes a client that sends more
   than 32 KiB; and a dropped record ends the session outright, since there is
-  no retransmission there. `docs/relay1.md` is the specification.
+  no retransmission there. `docs/relay1.md` is the specification. Two rules
+  keep that from ending sessions nothing dropped, and both did until the
+  relay1 chaos test caught them: a counter, once sealed, is sent — the
+  caller's cancellation is honoured only before it — because a record cancelled
+  on its way out is a gap to the far end; and a record that will not open is
+  ignored and reported (`ITailcatObserver.Relay1RecordsIgnored`), not fatal,
+  because after a cut the resend brings the session before's records to the
+  new one.
 - **There is one exchange, and no size limit.** `RequestAsync`, `NotifyAsync`
   and `SendAsync`, in bytes or as `LinkContent`, are all the `Exchange` frame
   (7) with different flags: content of any size in blocks, resumed in both

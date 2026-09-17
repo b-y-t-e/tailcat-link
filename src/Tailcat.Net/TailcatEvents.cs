@@ -90,6 +90,19 @@ public interface ITailcatObserver
     void RelayRestarting(int regionId, TimeSpan reconnectIn, TimeSpan tryFor)
     {
     }
+
+    /// <summary>Relay1 records from a peer would not open and were ignored.</summary>
+    /// <remarks>
+    /// Reported for the first at once and then at most every ten seconds, with
+    /// <paramref name="count"/> saying how many since the last report: a relay
+    /// cut can bring back thousands of the session before's. A report every
+    /// interval, with nothing else arriving, is two ends whose session keys
+    /// disagree: the session stays up and carries nothing until a heartbeat
+    /// gives up on it.
+    /// </remarks>
+    void Relay1RecordsIgnored(NodePublic peer, long count)
+    {
+    }
 }
 
 /// <summary>An observer that ignores everything, the default.</summary>
@@ -193,6 +206,10 @@ public sealed class TextTailcatObserver(Action<string> write) : ITailcatObserver
     public void RelayRestarting(int regionId, TimeSpan reconnectIn, TimeSpan tryFor) =>
         _write($"relay: region {regionId} restarting, reconnect in {reconnectIn.TotalSeconds:F1} s, try for {tryFor.TotalSeconds:F0} s");
 
+    /// <inheritdoc/>
+    public void Relay1RecordsIgnored(NodePublic peer, long count) =>
+        _write($"relay1: {Short(peer)} sent {count} record(s) that would not open; ignored");
+
 }
 
 /// <summary>
@@ -220,4 +237,7 @@ public static class TailcatMetrics
 
     internal static readonly Counter<long> RelayReconnects =
         Meter.CreateCounter<long>("tailcat.relay.reconnects", description: "Relay connections re-established.");
+
+    internal static readonly Counter<long> Relay1RecordsIgnored =
+        Meter.CreateCounter<long>("tailcat.relay1.records.ignored", description: "Relay1 records that would not open under their session's keys.");
 }
