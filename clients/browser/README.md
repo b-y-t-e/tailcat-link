@@ -51,7 +51,10 @@ the same protocol and the same promises.
   type and metadata beside the bytes, and they arrive before the content does.
 - **Detection that works.** Writing into a dead relayed session succeeds, so
   silence is what a host that has gone away looks like: a heartbeat and a
-  per-request timeout are what notice.
+  per-request timeout are what notice. A relay connection a firewall has
+  quietly dropped is noticed sooner, in about three seconds: the page pings the
+  relay after a send that got nothing back, and dials a new connection when
+  nothing answers — the same check, on the same timings, as `DerpLiveness.cs`.
 - **Both directions.** The host can ask the page things too. `close()` waits
   for the answers already being written, *and* for the socket to send them,
   before it tears the session down — a handler returns long before its answer
@@ -153,7 +156,7 @@ obvious place to land on the other.
 | `src/exchange-ledger.js` | `ExchangeLedger.cs` | a retried request answered again, never run again |
 | `src/relay1.js` | `Relay1*.cs` | key schedule, records, stream multiplexing |
 | `src/peer.js` | `PeerMessage.cs` | sealed hellos and the transport negotiation |
-| `src/derp.js` | `DerpClient.cs` | the relay, over a WebSocket |
+| `src/derp.js` | `DerpClient.cs`, `DerpLivenessWatch.cs` | the relay, over a WebSocket, and noticing it went silent |
 | `src/address.js` | `ConnBlob.cs`, `InvitationCode.cs` | invitation codes and the CBOR in an address |
 | `src/store.js` | `ILinkStore.cs` | the identity, in IndexedDB |
 | `src/bytes.js` | — | byte handling, so nothing else counts offsets twice |

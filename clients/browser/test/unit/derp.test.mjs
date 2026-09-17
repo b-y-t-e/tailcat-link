@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { concat, str, u32be, utf8 } from "../../src/bytes.js";
-import { DerpConnection, DerpFrame } from "../../src/derp.js";
+import { DERP_LIVENESS, DerpConnection, DerpFrame } from "../../src/derp.js";
 import { nacl } from "../../src/nacl.js";
 
 class FakeSocket {
@@ -39,11 +39,21 @@ class FakeSocket {
   }
 }
 
-const connection = () => {
+const connection = (options) => {
   const socket = new FakeSocket();
   const keys = nacl.box.keyPair();
-  return { socket, conn: new DerpConnection(socket, keys.secretKey, keys.publicKey) };
+  return { socket, conn: new DerpConnection(socket, keys.secretKey, keys.publicKey, options) };
 };
+
+// The frame types the connection wrote, in order.
+const sentTypes = (socket) => socket.sent.map((frame) => frame[0]);
+
+// A clock the test moves by hand. Date is mocked too, because the connection
+// measures silence with it.
+function withClock(t) {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+  return (ms) => t.mock.timers.tick(ms);
+}
 
 test("a frame within the limit still arrives", async () => {
   const { socket, conn } = connection();
@@ -92,4 +102,104 @@ test("bytes that arrive after the oversized frame are not buffered", () => {
   socket.frame(DerpFrame.RecvPacket, concat(new Uint8Array(32), utf8("late")));
 
   assert.equal(conn.packets.length, 0);
+});
+
+test("a connection that got nothing back for a packet asks the relay, and goes when nothing answers", (t) => {
+  const tick = withClock(t);
+  const { socket, conn } = connection();
+  const closed = [];
+  conn.onclose = (error) => closed.push(error);
+
+  conn.sendPacket(new Uint8Array(32), utf8("into a flow a firewall forgot"));
+  tick(DERP_LIVENESS.probeAfterSendMs);
+  assert.deepEqual(sentTypes(socket), [DerpFrame.SendPacket, DerpFrame.Ping]);
+
+  tick(DERP_LIVENESS.timeoutMs - DERP_LIVENESS.checkIntervalMs);
+  assert.equal(conn.closed, false, "not before the timeout");
+
+  tick(DERP_LIVENESS.checkIntervalMs);
+  assert.equal(conn.closed, true);
+  assert.equal(socket.closed, true, "the socket goes, so the link dials a new one");
+  assert.match(closed[0].message, /went silent/);
+});
+
+test("any frame answers the ping, not only a pong", (t) => {
+  const tick = withClock(t);
+  const { socket, conn } = connection();
+
+  conn.sendPacket(new Uint8Array(32), utf8("hello"));
+  tick(DERP_LIVENESS.probeAfterSendMs);
+  socket.frame(DerpFrame.KeepAlive, new Uint8Array(0));
+  tick(DERP_LIVENESS.timeoutMs * 3);
+
+  assert.equal(conn.closed, false);
+});
+
+test("an idle connection is asked only after the longer wait", (t) => {
+  const tick = withClock(t);
+  const { socket, conn } = connection();
+
+  tick(DERP_LIVENESS.probeWhenIdleMs - DERP_LIVENESS.checkIntervalMs);
+  assert.deepEqual(sentTypes(socket), []);
+
+  tick(DERP_LIVENESS.checkIntervalMs);
+  assert.deepEqual(sentTypes(socket), [DerpFrame.Ping]);
+  socket.frame(DerpFrame.Pong, socket.sent[0].slice(5));
+  tick(DERP_LIVENESS.timeoutMs * 2);
+  assert.equal(conn.closed, false);
+});
+
+test("a ping queued behind a large upload is timed from when it leaves the socket", (t) => {
+  // A slow uplink with a relay1 transfer on it holds the ping in the
+  // WebSocket's buffer; the relay cannot answer what it has not been sent.
+  const tick = withClock(t);
+  const { socket, conn } = connection();
+
+  conn.sendPacket(new Uint8Array(32), new Uint8Array(30_000));
+  socket.bufferedAmount = 30_000;
+  tick(DERP_LIVENESS.probeAfterSendMs);
+  socket.bufferedAmount += 13; // the ping, behind the upload
+
+  tick(DERP_LIVENESS.timeoutMs - DERP_LIVENESS.checkIntervalMs);
+  socket.bufferedAmount = 0; // it all left, the ping last
+  tick(DERP_LIVENESS.checkIntervalMs);
+  tick(DERP_LIVENESS.timeoutMs - DERP_LIVENESS.checkIntervalMs);
+  assert.equal(conn.closed, false, "still inside the timeout counted from leaving");
+
+  tick(DERP_LIVENESS.checkIntervalMs);
+  assert.equal(conn.closed, true);
+});
+
+test("a ping that cannot leave the socket at all is the same verdict", (t) => {
+  const tick = withClock(t);
+  const { socket, conn } = connection();
+
+  conn.sendPacket(new Uint8Array(32), new Uint8Array(30_000));
+  socket.bufferedAmount = 30_000;
+  tick(DERP_LIVENESS.probeAfterSendMs);
+  socket.bufferedAmount += 13;
+  tick(DERP_LIVENESS.timeoutMs);
+
+  assert.equal(conn.closed, true);
+});
+
+test("a closed connection stops asking", (t) => {
+  const tick = withClock(t);
+  const { socket, conn } = connection();
+
+  conn.close();
+  tick(DERP_LIVENESS.probeWhenIdleMs * 2);
+
+  assert.deepEqual(sentTypes(socket), []);
+});
+
+test("liveness can be turned off", (t) => {
+  const tick = withClock(t);
+  const { socket, conn } = connection({ liveness: null });
+
+  conn.sendPacket(new Uint8Array(32), utf8("hello"));
+  tick(DERP_LIVENESS.probeWhenIdleMs * 2);
+
+  assert.deepEqual(sentTypes(socket), [DerpFrame.SendPacket]);
+  assert.equal(conn.closed, false);
 });

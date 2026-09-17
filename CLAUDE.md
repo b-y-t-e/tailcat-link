@@ -246,6 +246,11 @@ library is, roughly how the relays work, and examples that compile.
   QUIC gives up on a peer after ~16 s without an acknowledgement, and slow
   verdicts on two cuts in a row reached it. The timings are internal constants
   (`DerpLiveness`), not settings.
+  `clients/browser/src/derp.js` does the same check on the same timings
+  (`DERP_LIVENESS`), timing a ping from when it leaves the WebSocket's buffer,
+  and closes the socket; the link dials again. It does *not* resend: there a
+  relay1 session ends with its WebSocket, and the link resumes exchanges on the
+  next one.
 - **What a dead relay connection swallowed is sent again.** `RecentlySent` keeps
   what went out lately; on reconnecting, everything sent from 1 s before the
   dead connection's last frame goes out first, in order, and only then does the
