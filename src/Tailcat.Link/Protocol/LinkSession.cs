@@ -34,6 +34,7 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
     private readonly ITailcatConnection _connection;
     private readonly Func<LinkRequestHandler?> _handler;
     private readonly Func<string, LinkChannelServe?> _channels;
+    private readonly Func<string, LinkChannelServe?> _streams;
     private readonly CancellationToken _handlerLifetime;
     private readonly ExchangeLedger _ledger;
     private readonly ExchangeRegistry _exchanges;
@@ -61,6 +62,7 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
     /// does. Read on arrival rather than captured, for the same reason the
     /// request handler is.
     /// </param>
+    /// <param name="streams">What serves a stream of a given name, read on arrival as channels are.</param>
     /// <param name="ledger">
     /// Shared with every other session of the same link, because that is where
     /// a request retried after this session dies will arrive.
@@ -90,6 +92,7 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
         ITailcatConnection connection,
         Func<LinkRequestHandler?> handler,
         Func<string, LinkChannelServe?> channels,
+        Func<string, LinkChannelServe?> streams,
         ExchangeLedger ledger,
         ExchangeRegistry exchanges,
         PeerCapabilities advertised,
@@ -100,6 +103,7 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
         _connection = connection;
         _handler = handler;
         _channels = channels;
+        _streams = streams;
         _handlerLifetime = linkClosed;
         _ledger = ledger;
         _exchanges = exchanges;
@@ -133,11 +137,26 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
     /// </summary>
     /// <exception cref="RemoteHandlerException">If the peer has no handler for that name.</exception>
     /// <exception cref="LinkException">If the session could not carry it.</exception>
-    public async Task<Stream> OpenChannelAsync(string name, CancellationToken cancellationToken)
+    public Task<Stream> OpenChannelAsync(string name, CancellationToken cancellationToken) =>
+        OpenNamedAsync(LinkFrameKind.Channel, name, "channel", cancellationToken);
+
+    /// <summary>
+    /// Opens a two-way stream on this session and returns the transport stream
+    /// under it, once the peer has said it has a handler for the name.
+    /// </summary>
+    /// <exception cref="RemoteHandlerException">If the peer has no handler for that name.</exception>
+    /// <exception cref="LinkException">If the session could not carry it.</exception>
+    public Task<Stream> OpenLinkStreamAsync(string name, CancellationToken cancellationToken) =>
+        OpenNamedAsync(LinkFrameKind.Stream, name, "stream", cancellationToken);
+
+    // A channel and a stream open the same way: the name, and an answer saying
+    // whether anything takes it.
+    private async Task<Stream> OpenNamedAsync(
+        LinkFrameKind kind, string name, string what, CancellationToken cancellationToken)
     {
         // Before the stream exists, because a name this side got wrong is the
         // caller's own mistake and must not cost a stream to find out.
-        byte[] encodedName = ChannelFrame.EncodeName(name);
+        byte[] encodedName = ChannelFrame.EncodeName(name, what);
 
         using IdleTimeout idle = new(_requestTimeout, _time);
         Stream? stream = null;
@@ -149,7 +168,7 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
             stream = await OpenStreamAsync(cts.Token).ConfigureAwait(false);
             idle.Restart();
             await LinkFrame.WriteAsync(
-                    stream, (byte)LinkFrameKind.Channel, Guid.NewGuid(), encodedName, idle, cts.Token)
+                    stream, (byte)kind, Guid.NewGuid(), encodedName, idle, cts.Token)
                 .ConfigureAwait(false);
 
             (byte status, _, byte[] answer) =
@@ -157,7 +176,7 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
             if (status == (byte)LinkFrameStatus.Failed)
             {
                 throw new RemoteHandlerException(
-                    $"the other machine would not take the channel: {Encoding.UTF8.GetString(answer)}");
+                    $"the other machine would not take the {what}: {Encoding.UTF8.GetString(answer)}");
             }
             handedOver = true;
             return stream;
@@ -505,7 +524,11 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
                 return;
 
             case LinkFrameKind.Channel:
-                await ServeChannelAsync(exchange, payload, stream, ct).ConfigureAwait(false);
+                await ServeNamedAsync(_channels, "channel", exchange, payload, stream, ct).ConfigureAwait(false);
+                return;
+
+            case LinkFrameKind.Stream:
+                await ServeNamedAsync(_streams, "stream", exchange, payload, stream, ct).ConfigureAwait(false);
                 return;
 
             case LinkFrameKind.Request:
@@ -529,20 +552,26 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
     }
 
     /// <summary>
-    /// Answers whether anything here takes this channel, and if so hands the
-    /// stream to it for as long as it keeps reading.
+    /// Answers whether anything here takes this channel or stream, and if so
+    /// hands the transport stream to it for as long as it keeps it.
     /// </summary>
-    private async Task ServeChannelAsync(Guid exchange, byte[] payload, Stream stream, CancellationToken ct)
+    private async Task ServeNamedAsync(
+        Func<string, LinkChannelServe?> handlers,
+        string what,
+        Guid exchange,
+        byte[] payload,
+        Stream stream,
+        CancellationToken ct)
     {
-        string name = ChannelFrame.DecodeName(payload);
-        if (_channels(name) is not { } serve)
+        string name = ChannelFrame.DecodeName(payload, what);
+        if (handlers(name) is not { } serve)
         {
             await AnswerAsync(
                 stream,
                 exchange,
                 new LinkAnswer(
                     LinkFrameStatus.Failed,
-                    Encoding.UTF8.GetBytes($"the other machine has no \"{name}\" channel")),
+                    Encoding.UTF8.GetBytes($"the other machine has no \"{name}\" {what}")),
                 ct).ConfigureAwait(false);
             return;
         }

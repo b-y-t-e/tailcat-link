@@ -37,6 +37,8 @@ import {
   writeBlocks,
 } from "../../src/exchange-frame.js";
 import { IncomingContent } from "../../src/incoming-content.js";
+import { ABORT_MARKER, LinkStream } from "../../src/link-stream.js";
+import { FrameKind } from "../../src/link-frame.js";
 
 /// Collects what a channel writes, which is all a vector needs of a stream.
 const sink = () => {
@@ -122,6 +124,27 @@ test("a channel frame is read back as the .NET side wrote it", async () => {
   }
 
   assert.deepEqual(read, carrying.map((vector) => vector.payloadHex));
+});
+
+test("a stream ends its writes and abandons itself with the markers the .NET side writes", async () => {
+  const [ending, abandoning] = linkVectors.streamMarkers;
+  assert.equal(ABORT_MARKER, abandoning.marker);
+  assert.equal(FrameKind.Stream, linkVectors.streamFrameKind);
+
+  // A transport that takes writes and has nothing to read until it is let go of.
+  const written = [];
+  const transport = {
+    write: async (bytes) => void written.push(bytes),
+    read: (signal) =>
+      new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true })),
+    close: async () => {},
+  };
+  const stream = new LinkStream("tunnel", transport, { patienceMs: 20 });
+
+  await stream.finish();
+  assert.equal(hex(written.at(-1)), ending.frameHex, ending.name);
+  await stream.abort();
+  assert.equal(hex(written.at(-1)), abandoning.frameHex, abandoning.name);
 });
 
 test("both sides agree on the bounds that are left", () => {

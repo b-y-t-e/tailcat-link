@@ -35,27 +35,31 @@ internal static class ChannelFrame
     /// <summary>The most a channel name may be, in UTF-8 bytes.</summary>
     public const int MaxNameBytes = 256;
 
-    /// <summary>Reads the name out of the frame that opens a channel.</summary>
+    /// <summary>Reads the name out of the frame that opens a channel, or a stream.</summary>
+    /// <param name="payload">The frame's payload.</param>
+    /// <param name="what">What is being named, for the message: "channel" or "stream".</param>
     /// <exception cref="LinkException">If it is not a name.</exception>
-    public static string DecodeName(ReadOnlySpan<byte> payload)
+    public static string DecodeName(ReadOnlySpan<byte> payload, string what = "channel")
     {
         if (payload.Length is 0 or > MaxNameBytes)
         {
-            throw new LinkException($"a channel name must be 1 to {MaxNameBytes} bytes, this one is {payload.Length}");
+            throw new LinkException($"a {what} name must be 1 to {MaxNameBytes} bytes, this one is {payload.Length}");
         }
         return Encoding.UTF8.GetString(payload);
     }
 
-    /// <summary>Writes the name for the frame that opens a channel.</summary>
+    /// <summary>Writes the name for the frame that opens a channel, or a stream.</summary>
+    /// <param name="name">The name.</param>
+    /// <param name="what">What is being named, for the message: "channel" or "stream".</param>
     /// <exception cref="ArgumentException">If the name is empty or too long.</exception>
-    public static byte[] EncodeName(string name)
+    public static byte[] EncodeName(string name, string what = "channel")
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         byte[] encoded = Encoding.UTF8.GetBytes(name);
         if (encoded.Length > MaxNameBytes)
         {
             throw new ArgumentException(
-                $"a channel name may be at most {MaxNameBytes} bytes, this one is {encoded.Length}", nameof(name));
+                $"a {what} name may be at most {MaxNameBytes} bytes, this one is {encoded.Length}", nameof(name));
         }
         return encoded;
     }

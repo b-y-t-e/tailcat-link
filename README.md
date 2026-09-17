@@ -185,6 +185,28 @@ await using ILinkChannelWriter audio = await link.OpenChannelAsync("audio");
 await audio.SendAsync(frame);
 ```
 
+### Streams, for what already speaks in streams
+
+An ordinary `Stream` both ways — for tunnelling a TCP connection, or a protocol
+with its own framing. Like a channel it ends with the connection. Reading 0 means
+the other side finished; a stream that was cut off throws instead, so a
+half-finished download never looks like a finished one.
+
+```csharp
+// the machine with the database
+host.OnStream("postgres", async (peer, stream, ct) =>
+{
+    using TcpClient database = new();
+    await database.ConnectAsync("localhost", 5432, ct);
+    await using NetworkStream socket = database.GetStream();
+    await Task.WhenAll(stream.CopyToAsync(socket, ct), socket.CopyToAsync(stream, ct));
+});
+
+// the other machine
+await using LinkStream tunnel = await link.OpenStreamAsync("postgres");
+await Task.WhenAll(local.CopyToAsync(tunnel), tunnel.CopyToAsync(local));
+```
+
 ### Typed requests (`Tailcat.Link.Json`)
 
 ```csharp
@@ -320,6 +342,7 @@ machine joined. More in [clients/browser](clients/browser/README.md).
 - [docs/internals.md](docs/internals.md) — how every layer works, and what was
   learned the hard way
 - [docs/exchanges.md](docs/exchanges.md), [docs/channels.md](docs/channels.md),
+  [docs/streams.md](docs/streams.md),
   [docs/relay1.md](docs/relay1.md) — the wire formats
 - Tests: `dotnet test`; `TAILCAT_LIVE_TESTS=1 dotnet test` also runs tests over
   the public relays; `npm --prefix clients/browser test` for the browser client.

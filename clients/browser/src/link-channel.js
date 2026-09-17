@@ -19,19 +19,19 @@ export const ChannelCloseReason = {
   SessionEnded: "session-ended",
 };
 
-/// Writes the name for the frame that opens a channel.
-export function encodeChannelName(name) {
+/// Writes the name for the frame that opens a channel, or a stream.
+export function encodeChannelName(name, what = "channel") {
   const encoded = utf8(name ?? "");
   if (!encoded.length || encoded.length > MAX_CHANNEL_NAME_BYTES) {
-    throw new LinkError(`a channel name must be 1 to ${MAX_CHANNEL_NAME_BYTES} bytes, this one is ${encoded.length}`);
+    throw new LinkError(`a ${what} name must be 1 to ${MAX_CHANNEL_NAME_BYTES} bytes, this one is ${encoded.length}`);
   }
   return encoded;
 }
 
-/// Reads the name out of the frame that opens a channel.
-export function decodeChannelName(payload) {
+/// Reads the name out of the frame that opens a channel, or a stream.
+export function decodeChannelName(payload, what = "channel") {
   if (!payload.length || payload.length > MAX_CHANNEL_NAME_BYTES) {
-    throw new LinkError(`a channel name must be 1 to ${MAX_CHANNEL_NAME_BYTES} bytes, this one is ${payload.length}`);
+    throw new LinkError(`a ${what} name must be 1 to ${MAX_CHANNEL_NAME_BYTES} bytes, this one is ${payload.length}`);
   }
   return str(payload);
 }

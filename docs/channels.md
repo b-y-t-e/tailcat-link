@@ -42,9 +42,9 @@ await audio.SendAsync(frame, ct);
   consumes them, so a sender faster than the network waits in `SendAsync`
   rather than filling memory.
 - **One direction.** `OpenChannelAsync` returns an `ILinkChannelWriter`; the
-  handler is given an `ILinkChannelReader`. Two directions is two channels,
-  which is one fewer thing to explain than a duplex object whose halves close
-  at different times.
+  handler is given an `ILinkChannelReader`. What needs both directions, with
+  halves that close at different times, is a stream ([streams.md](streams.md))
+  rather than two channels and a protocol to pair them.
 
 ## The wire format
 

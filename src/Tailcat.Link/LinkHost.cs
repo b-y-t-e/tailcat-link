@@ -60,6 +60,7 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
     private LinkPeerContentHandler? _request;
     private LinkPeerTransferHandler? _transfer;
     private readonly ConcurrentDictionary<string, LinkChannelHandler> _channels = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, LinkStreamHandler> _streams = new(StringComparer.Ordinal);
 
     private TaskCompletionSource<ILinkPeer> _peerAppeared = NewPeerAppeared();
     private TaskCompletionSource<ILinkPeer> _peerConnected = NewPeerAppeared();
@@ -163,6 +164,9 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
     /// <inheritdoc/>
     LinkChannelHandler? ILinkHandlers.Channel(string name) => _channels.GetValueOrDefault(name);
 
+    /// <inheritdoc/>
+    LinkStreamHandler? ILinkHandlers.Stream(string name) => _streams.GetValueOrDefault(name);
+
     /// <summary>The stored state, for the facade that shows one peer's worth of it.</summary>
     public PairingRecord Pairing => _pairing;
 
@@ -230,6 +234,14 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentNullException.ThrowIfNull(handler);
         _channels[name] = handler;
+    }
+
+    /// <inheritdoc/>
+    public void OnStream(string name, LinkStreamHandler handler)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentNullException.ThrowIfNull(handler);
+        _streams[name] = handler;
     }
 
     /// <inheritdoc/>

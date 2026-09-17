@@ -36,6 +36,9 @@ internal interface ILinkHandlers
 
     /// <summary>What takes a channel of that name, or null if nothing does.</summary>
     LinkChannelHandler? Channel(string name);
+
+    /// <summary>What takes a stream of that name, or null if nothing does.</summary>
+    LinkStreamHandler? Stream(string name);
 }
 
 /// <summary>
@@ -353,6 +356,25 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
     }
 
     /// <inheritdoc/>
+    public async Task<LinkStream> OpenStreamAsync(
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        using CancellationTokenSource expiry = new(_options.RequestDeadline, _options.TimeProvider);
+        using CancellationTokenSource deadline =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token, expiry.Token);
+
+        // Like a channel, opened on one session and gone with it.
+        LinkSession session = await CurrentSessionAsync(deadline.Token).ConfigureAwait(false);
+        Stream transport = await session.OpenLinkStreamAsync(name, deadline.Token).ConfigureAwait(false);
+        return new PairedLinkStream(
+            name, this, transport, _options.RequestTimeout, _options.TimeProvider, session.Alive).Start();
+    }
+
+    /// <inheritdoc/>
     public async Task WaitUntilConnectedAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -422,6 +444,7 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
                     connection,
                     CurrentHandler,
                     ChannelServing,
+                    StreamServing,
                     _ledger,
                     _exchanges,
                     _options.AdvertisedCapabilities,
@@ -735,6 +758,33 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
                     // not the handler read to the end: nobody else is going
                     // to close one it stopped reading half way through.
                     await channel.EndAsync("the handler returned").ConfigureAwait(false);
+                }
+            }
+            : null;
+
+    private LinkChannelServe? StreamServing(string name) =>
+        _handlers.Stream(name) is { } take
+            ? async (transport, ct) =>
+            {
+                PairedLinkStream stream = new PairedLinkStream(
+                    name, this, transport, _options.RequestTimeout, _options.TimeProvider, ct).Start();
+                try
+                {
+                    await take(this, stream, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Said here, as a channel handler's failure is, and passed
+                    // on as an abort: a clean end would tell the other machine
+                    // that everything it was owed arrived.
+                    _log.Warn($"the \"{name}\" stream handler threw: {ex.Message}");
+                    await stream.AbortAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    // The stream ends when the handler returns: nobody else is
+                    // going to dispose one it was handed.
+                    await stream.DisposeAsync().ConfigureAwait(false);
                 }
             }
             : null;

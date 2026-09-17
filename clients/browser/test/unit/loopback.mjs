@@ -22,6 +22,7 @@ import {
 import { OutboundExchange, runExchangeAttempt } from "../../src/outbound-exchange.js";
 import { ExchangeFlags, writeBlocks } from "../../src/exchange-frame.js";
 import { ChannelWriter, decodeChannelName, encodeChannelName } from "../../src/link-channel.js";
+import { LinkStream } from "../../src/link-stream.js";
 import { decodeLinkHello } from "../../src/link-hello.js";
 import { Relay1Session, deriveKeys } from "../../src/relay1.js";
 import { nacl } from "../../src/nacl.js";
@@ -238,6 +239,18 @@ export class LoopbackHost {
     return new ChannelWriter(name, stream);
   }
 
+  /// Opens a stream into the browser, as a .NET host's `OpenStreamAsync` does.
+  async openStream(name) {
+    const stream = this.#connection.openStream();
+    await writeFrame(stream, FrameKind.Stream, newExchange(), encodeChannelName(name, "stream"));
+    const answer = await readFrame(stream);
+    if (answer.tag === FrameStatus.Failed) {
+      await stream.close().catch(() => {});
+      throw new Error(str(answer.payload));
+    }
+    return new LinkStream(name, stream, { patienceMs: 2_000 });
+  }
+
   /// Asks under an id of the test's choosing, so a retry across a session
   /// boundary can be staged the way a real one arrives.
   async requestAs(exchange, text) {
@@ -290,6 +303,20 @@ export class LoopbackHost {
             if (!length) break; // The marker that ends a channel on purpose.
             opened.frames.push(await stream.readExactly(length));
           }
+          break;
+        }
+        case FrameKind.Stream: {
+          // "echo" is the one stream this host takes: everything read comes
+          // back, and the stream ends when the browser's half has.
+          const name = decodeChannelName(payload, "stream");
+          if (name !== "echo") {
+            await writeFrame(stream, FrameStatus.Failed, exchange, utf8(`the other machine has no "${name}" stream`));
+            break;
+          }
+          await writeFrame(stream, FrameStatus.Ok, exchange, new Uint8Array(0));
+          const echo = new LinkStream(name, stream, { patienceMs: 2_000 });
+          for (let bytes = await echo.read(); bytes.length; bytes = await echo.read()) await echo.write(bytes);
+          await echo.close();
           break;
         }
         case FrameKind.Ping:

@@ -2,8 +2,8 @@
 
 The README says what the library is for. This is the rest: what each layer
 does, why, and what was found the hard way. The wire formats have documents of
-their own — [exchanges.md](exchanges.md), [channels.md](channels.md) and
-[relay1.md](relay1.md).
+their own — [exchanges.md](exchanges.md), [channels.md](channels.md),
+[streams.md](streams.md) and [relay1.md](relay1.md).
 
 ## What `Tailcat.Link` adds on top of `Tailcat.Net`
 
@@ -78,6 +78,13 @@ What it adds on top of `Tailcat.Net`, and why each part is needed:
   resumed, which is correct rather than a limitation, and `Closed` says which
   of "the peer hung up" and "the session died" happened. The wire format is
   [docs/channels.md](channels.md).
+- **A stream for what expects a socket.** `OpenStreamAsync` is a `Stream` both
+  ways with a half-close, gone with its session like a channel. Its point is
+  the endings: a read of 0 only when the other end finished, and a
+  `LinkStreamException` saying closed, aborted or session ended otherwise —
+  because a tunnel that hands on a cut-off download as a finished one is broken
+  in the one way nobody notices. [docs/streams.md](streams.md) has the markers
+  and the rules about the transport underneath that make those endings true.
 - **A retry that is not a second command.** A request carries an id that
   belongs to the request, not to the attempt, so the machine that already ran
   it answers the retry from memory instead of running it again. Without that,

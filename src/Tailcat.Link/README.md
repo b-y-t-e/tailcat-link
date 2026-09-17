@@ -181,6 +181,25 @@ await audio.SendAsync(frame);
 
 A name nothing is listening for is refused rather than swallowed.
 
+## A stream, for what already speaks in streams
+
+`OpenStreamAsync` returns a `LinkStream`: an ordinary `Stream` both ways, with
+a half-close (`CompleteWritesAsync`), for a tunnelled TCP connection or a
+protocol with its own framing. Like a channel it ends with its session. A read
+of 0 is a clean end and only that; anything else throws `LinkStreamException`,
+whose `Ending` says whether the other end closed it, abandoned it, or the
+session died.
+
+```csharp
+host.OnStream("tunnel", async (peer, stream, ct) =>
+{
+    await using NetworkStream socket = await ConnectAsync(ct);
+    await Task.WhenAll(stream.CopyToAsync(socket, ct), socket.CopyToAsync(stream, ct));
+});
+
+await using LinkStream tunnel = await link.OpenStreamAsync("tunnel");
+```
+
 ## State, errors and options
 
 ```csharp

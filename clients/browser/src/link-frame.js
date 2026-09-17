@@ -21,6 +21,8 @@ export const FrameKind = {
   // request with its answer, a notification, or a transfer. See
   // `outbound-exchange.js` and `incoming-exchange.js`.
   Exchange: 7,
+  // A two-way stream: see `link-stream.js`.
+  Stream: 8,
 };
 
 export const FrameStatus = {

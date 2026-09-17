@@ -33,6 +33,8 @@ public class LinkVectorTests
         IReadOnlyList<HelloVector> LegacyHellos,
         IReadOnlyList<ChannelNameVector> ChannelNames,
         IReadOnlyList<ChannelFrameVector> ChannelFrames,
+        IReadOnlyList<StreamMarkerVector> StreamMarkers,
+        byte StreamFrameKind,
         CapabilityVectors Capabilities,
         FlagVector ExchangeFlags,
         IReadOnlyList<ExchangeHeaderVector> ExchangeHeaders,
@@ -73,6 +75,8 @@ public class LinkVectorTests
     private sealed record ChannelNameVector(string Name, string ChannelName, string EncodedHex);
 
     private sealed record ChannelFrameVector(string Name, string PayloadHex, string FrameHex);
+
+    private sealed record StreamMarkerVector(string Name, uint Marker, string FrameHex);
 
     // The file is written by JavaScript, so its names are camelCase.
     private static readonly JsonSerializerOptions AsWritten = new() { PropertyNameCaseInsensitive = true };
@@ -137,6 +141,29 @@ public class LinkVectorTests
             Assert.Equal(vector.EncodedHex, Convert.ToHexStringLower(ChannelFrame.EncodeName(vector.ChannelName)));
             Assert.Equal(vector.ChannelName, ChannelFrame.DecodeName(Convert.FromHexString(vector.EncodedHex)));
         }
+    }
+
+    /// <summary>
+    /// A stream is framed as a channel is, and the two markers it adds — the
+    /// end of one direction and the abort — are the bytes the browser writes.
+    /// </summary>
+    [Fact]
+    public async Task StreamMarkersMatchTheSharedVectors()
+    {
+        LinkVectors vectors = Load();
+        StreamMarkerVector ending = vectors.StreamMarkers[0];
+        StreamMarkerVector abandoning = vectors.StreamMarkers[1];
+
+        Assert.Equal((byte)LinkFrameKind.Stream, vectors.StreamFrameKind);
+        Assert.Equal(PairedLinkStream.AbortMarker, abandoning.Marker);
+        byte[] abort = new byte[ChannelFrame.HeaderLength];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(abort, PairedLinkStream.AbortMarker);
+        Assert.Equal(abandoning.FrameHex, Convert.ToHexStringLower(abort));
+
+        using MemoryStream written = new();
+        await ChannelFrame.WriteAsync(written, ReadOnlyMemory<byte>.Empty, TestContext.Current.CancellationToken);
+        Assert.Equal(ending.FrameHex, Convert.ToHexStringLower(written.ToArray()));
+        Assert.Equal(0u, ending.Marker);
     }
 
     /// <summary>A frame carries its length in front of it, big-endian.</summary>

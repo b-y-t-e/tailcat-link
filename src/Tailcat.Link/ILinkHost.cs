@@ -118,6 +118,16 @@ public interface ILinkHost : IAsyncDisposable
     /// </remarks>
     void OnChannel(string name, LinkChannelHandler handler);
 
+    /// <summary>
+    /// Sets what takes streams named <paramref name="name"/> from any peer,
+    /// replacing any previous handler for that name.
+    /// </summary>
+    /// <remarks>
+    /// The stream ends when the handler returns, and is aborted if it throws.
+    /// See <see cref="LinkStream"/>.
+    /// </remarks>
+    void OnStream(string name, LinkStreamHandler handler);
+
     /// <summary>Mints an invitation and starts offering it.</summary>
     /// <exception cref="ObjectDisposedException">If the host has been closed.</exception>
     /// <exception cref="LinkException">

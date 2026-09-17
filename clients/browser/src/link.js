@@ -49,6 +49,7 @@ export class TailcatLink {
   #exchanges;
   #sender;
   #channels = new Map();
+  #streams = new Map();
   #session = null;
   #connected = new Deferred();
   #stopped = false;
@@ -199,6 +200,29 @@ export class TailcatLink {
     return session.openChannel(name);
   }
 
+  /// Takes the two-way streams the host opens under `name`. The handler is
+  /// given the stream; when it returns the stream is closed, and if it throws
+  /// the stream is aborted, so the host is told it did not finish.
+  onStream(name, handler) {
+    this.#streams.set(name, handler);
+  }
+
+  /// Opens a two-way stream to the host: bytes in order both ways, `finish()`
+  /// to end this end's writes while still reading, and `read()` resolving
+  /// with an empty array only at a clean end. Like a channel it is not carried
+  /// across a reconnection.
+  ///
+  /// @throws {RemoteHandlerError} if the host is not listening for that name.
+  async openStream(name, { timeout } = {}) {
+    let session;
+    try {
+      session = await withTimeout(this.#sessionAsync(), timeout ?? this.#options.requestTimeout, "the host");
+    } catch (error) {
+      throw asLinkError(error);
+    }
+    return session.openStream(name);
+  }
+
   get connected() {
     return this.#session !== null && !this.#session.closed;
   }
@@ -329,6 +353,7 @@ export class TailcatLink {
       handler: () => this.#handler,
       notifyHandler: () => this.#notifyHandler,
       channels: (name) => this.#channels.get(name) ?? null,
+      streams: (name) => this.#streams.get(name) ?? null,
       ledger: this.#ledger,
       exchanges: this.#exchanges,
       options: this.#options,

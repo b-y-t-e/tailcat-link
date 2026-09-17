@@ -28,6 +28,7 @@ public class SessionLivenessTests
             connection,
             handler: () => null,
             channels: _ => null,
+            streams: _ => null,
             new ExchangeLedger(LinkProtocol.ExchangeRetention, TimeProvider.System),
             new ExchangeRegistry(
                 () => null, () => null, LinkProtocol.TransferRetention, Window, TimeProvider.System, CancellationToken.None),

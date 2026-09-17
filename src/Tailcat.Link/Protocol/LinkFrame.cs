@@ -37,6 +37,13 @@ internal enum LinkFrameKind : byte
     /// </summary>
     /// <seealso cref="ExchangeFrame"/>
     Exchange = 7,
+
+    /// <summary>
+    /// The frame that opens a two-way stream, naming which of the peer's
+    /// stream handlers it is for. Both directions follow on the same stream,
+    /// framed as a channel is; see <see cref="PairedLinkStream"/>.
+    /// </summary>
+    Stream = 8,
 }
 
 /// <summary>How a request turned out.</summary>

@@ -80,6 +80,13 @@ the same protocol and the same promises.
   resumed, and `channel.closed.reason` says which of `peer-closed`,
   `local-closed` and `session-ended` happened.
   [docs/channels.md](../../docs/channels.md) is the wire format.
+- **A stream, for what speaks in bytes both ways.** `openStream` is the fourth
+  shape, the same as `OpenStreamAsync` in .NET: bytes in order both ways,
+  `finish()` to end this end's writes while still reading, and `read()`
+  resolving with an empty array only at a clean end. Anything else rejects with
+  a `LinkStreamError` whose `ending` is `peer-closed`, `peer-aborted`,
+  `aborted` or `session-ended`. Like a channel it ends with its session.
+  [docs/streams.md](../../docs/streams.md) is the wire format.
 
 ```js
 import { LinkContent } from "@tailcat/link";
@@ -105,6 +112,19 @@ await audio.close();
 
 link.onChannel("telemetry", async (channel) => {
   for await (const frame of channel.read()) consume(frame);
+});
+```
+
+```js
+const shell = await link.openStream("shell");
+await shell.write(utf8("uptime\n"));
+await shell.finish();
+for (let bytes = await shell.read(); bytes.length; bytes = await shell.read()) show(bytes);
+await shell.close();
+
+// a handler's stream is closed when it returns, and aborted if it throws
+link.onStream("echo", async (stream) => {
+  for (let bytes = await stream.read(); bytes.length; bytes = await stream.read()) await stream.write(bytes);
 });
 ```
 
@@ -145,6 +165,7 @@ obvious place to land on the other.
 | `src/pairing-handshake.js` | `PairingHandshake.cs` | the hello, offered on every session |
 | `src/link-hello.js` | `LinkHello.cs` | which invitation this browser holds, and what to call it |
 | `src/link-channel.js` | `LinkChannel.cs` | frames on a stream of their own, ordered and not durable |
+| `src/link-stream.js` | `LinkStream.cs`, `PairedLinkStream.cs` | bytes both ways, a half-close, and endings told apart |
 | `src/errors.js` | `LinkExceptions.cs` | the failures worth catching apart from one another |
 | `src/link-frame.js` | `LinkFrame.cs` | one frame per stream, length-prefixed |
 | `src/exchange-frame.js` | `ExchangeFrame.cs`, `TransferFrame.cs` | the exchange headers, the offset and the blocks |

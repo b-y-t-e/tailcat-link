@@ -297,6 +297,10 @@ internal sealed class LinkHostProxy(LinkHostSource source) : ILinkHost, IDisposa
         source.Register(host => host.OnChannel(name, handler));
 
     /// <inheritdoc/>
+    public void OnStream(string name, LinkStreamHandler handler) =>
+        source.Register(host => host.OnStream(name, handler));
+
+    /// <inheritdoc/>
     public Task<LinkInvitation> InviteAsync(
         InvitationRequest? request = null,
         CancellationToken cancellationToken = default) =>

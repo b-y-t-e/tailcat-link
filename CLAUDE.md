@@ -186,6 +186,17 @@ library is, roughly how the relays work, and examples that compile.
   is the specification, and `clients/browser` speaks it: `link.onChannel` and
   `link.openChannel` are `link-channel.js`, the shape of `LinkChannel.cs`. A
   name nothing is listening for is refused rather than swallowed.
+- **A stream is a channel's framing both ways, plus what the transport does.**
+  `OpenStreamAsync` / `OnStream` (frame 8) give an ordinary `Stream` with a
+  half-close; `docs/streams.md` is the specification, `PairedLinkStream.cs`
+  and `link-stream.js` the two halves. A read of 0 means the other end ended
+  its writes and nothing else does. The endings stay true only because of two
+  rules about the transport stream underneath: after the end marker an end
+  keeps it open while it still reads, and after the abort marker (`0xFFFFFFFF`)
+  it keeps it open until the other end has read the marker and let go. Closing
+  at once raced the marker, and on QUIC the far writer heard `StreamAborted`
+  first and reported `PeerClosed` for an abort. Each end reads ahead one piece
+  on its own task, which is the only way a writer learns the far end let go.
 - **A host may hold several peers.** `HostManyAsync` is the real thing;
   `HostAsync` is it with `MaxPeers = 1` behind `ILink`, and refuses options
   asking for more rather than narrowing them, because narrowing unpairs stored

@@ -199,6 +199,23 @@ internal sealed class DurableLink : ILink
     }
 
     /// <inheritdoc/>
+    public void OnStream(string name, Func<LinkStream, CancellationToken, Task> handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        _host.OnStream(name, (_, stream, ct) => handler(stream, ct));
+    }
+
+    /// <inheritdoc/>
+    public async Task<LinkStream> OpenStreamAsync(
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ILinkPeer peer = await ThePeerAsync(_options.RequestDeadline, cancellationToken).ConfigureAwait(false);
+        return await peer.OpenStreamAsync(name, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc/>
     public Task<InvitationCode> RenewInvitationAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);

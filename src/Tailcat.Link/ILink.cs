@@ -334,6 +334,38 @@ public interface ILink : IAsyncDisposable
     Task<ILinkChannelWriter> OpenChannelAsync(string name, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Sets what takes streams named <paramref name="name"/>, replacing any
+    /// previous handler for that name.
+    /// </summary>
+    /// <remarks>
+    /// The stream ends when the handler returns, and is aborted if it throws.
+    /// </remarks>
+    /// <seealso cref="OpenStreamAsync"/>
+    void OnStream(string name, Func<LinkStream, CancellationToken, Task> handler);
+
+    /// <summary>
+    /// Opens a two-way stream to the peer, into the handler it registered for
+    /// <paramref name="name"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// An ordinary <see cref="System.IO.Stream"/> both ways, with a half-close
+    /// (<see cref="LinkStream.CompleteWritesAsync"/>), for what already speaks
+    /// in streams: a TCP connection to tunnel, a protocol with its own framing.
+    /// Read to 0 is a clean end, and only that; anything else is a
+    /// <see cref="LinkStreamException"/> saying what happened.
+    /// </para>
+    /// <para>
+    /// Like a channel, <b>not durable</b>: it needs a session, waits for one
+    /// rather than being buffered, and ends with it. What must survive a
+    /// reconnection is a request or a transfer.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="RemoteHandlerException">If the peer has no handler for that name.</exception>
+    /// <exception cref="LinkException">If no session could be had in time.</exception>
+    Task<LinkStream> OpenStreamAsync(string name, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Returns the invitation code worth publishing now, minting a fresh one
     /// if the last has run out.
     /// </summary>

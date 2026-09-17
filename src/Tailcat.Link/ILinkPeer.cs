@@ -102,6 +102,22 @@ public interface ILinkPeer
     /// <exception cref="LinkException">If no session could be had in time.</exception>
     Task<ILinkChannelWriter> OpenChannelAsync(string name, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Opens a two-way stream to this peer, into the handler it registered for
+    /// <paramref name="name"/>.
+    /// </summary>
+    /// <remarks>
+    /// An ordinary <see cref="System.IO.Stream"/> both ways, with a half-close
+    /// (<see cref="LinkStream.CompleteWritesAsync"/>): what a tunnelled TCP
+    /// connection or a protocol with its own framing needs. Like a channel it
+    /// needs a session and ends with it; see <see cref="LinkStream"/>.
+    /// </remarks>
+    /// <param name="name">Which of the peer's stream handlers to reach.</param>
+    /// <param name="cancellationToken">Gives up on opening it.</param>
+    /// <exception cref="RemoteHandlerException">If the peer has no handler for that name.</exception>
+    /// <exception cref="LinkException">If no session could be had in time.</exception>
+    Task<LinkStream> OpenStreamAsync(string name, CancellationToken cancellationToken = default);
+
     /// <summary>Waits until a session with this peer is up.</summary>
     Task WaitUntilConnectedAsync(CancellationToken cancellationToken = default);
 }

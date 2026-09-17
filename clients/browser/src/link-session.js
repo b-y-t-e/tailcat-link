@@ -28,12 +28,14 @@ import {
   encodeChannelName,
 } from "./link-channel.js";
 import { IdleTimeout } from "./idle-timeout.js";
+import { LinkStream } from "./link-stream.js";
 
 export class LinkSession {
   #connection;
   #handler;
   #notifyHandler;
   #channels;
+  #streams;
   #ledger;
   #options;
   #emit;
@@ -52,16 +54,18 @@ export class LinkSession {
   /// @param channels finds what serves a channel of a given name, or nothing
   ///   when this browser is not listening for that name. Read on arrival for
   ///   the same reason the request handler is.
+  /// @param streams the same, for streams.
   /// @param ledger shared with every other session of the same link, because
   ///   that is where a request retried after this session dies will arrive.
   /// @param exchanges shared for the same reason, and for longer: an exchange
   ///   resumed on a later session carries on from what arrived on this one.
-  constructor({ connection, handler, notifyHandler, channels, ledger, exchanges = null, options, emit }) {
+  constructor({ connection, handler, notifyHandler, channels, streams, ledger, exchanges = null, options, emit }) {
     this.#connection = connection;
     this.#exchanges = exchanges;
     this.#handler = handler;
     this.#notifyHandler = notifyHandler;
     this.#channels = channels ?? (() => null);
+    this.#streams = streams ?? (() => null);
     this.#ledger = ledger;
     this.#options = options;
     this.#emit = emit;
@@ -143,18 +147,34 @@ export class LinkSession {
   ///
   /// @throws {RemoteHandlerError} if the host is not listening for that name.
   async openChannel(name) {
+    const stream = await this.#openNamed(FrameKind.Channel, encodeChannelName(name));
+    // From here the channel owns the stream, and that is what it sends its
+    // frames on.
+    return this.#hold(new ChannelWriter(name, stream));
+  }
+
+  /// Opens a two-way stream on this session, once the host has said it has a
+  /// handler for the name. Like a channel it ends with this session.
+  ///
+  /// @throws {RemoteHandlerError} if the host is not listening for that name.
+  async openStream(name) {
+    const transport = await this.#openNamed(FrameKind.Stream, encodeChannelName(name, "stream"));
+    return new LinkStream(name, transport, { patienceMs: this.#options.requestTimeout });
+  }
+
+  // A channel and a stream open the same way: the name, and an answer saying
+  // whether anything takes it.
+  async #openNamed(kind, encodedName) {
     const idle = new IdleTimeout(this.#options.requestTimeout);
     let stream;
     try {
       stream = this.#watch(this.#connection.openStream());
       idle.restart();
-      await writeFrame(stream, FrameKind.Channel, newExchange(), encodeChannelName(name), idle);
+      await writeFrame(stream, kind, newExchange(), encodedName, idle);
 
       const answer = await readFrame(stream, idle);
       if (answer.tag === FrameStatus.Failed) throw new RemoteHandlerError(str(answer.payload));
-      // Not closed in a finally: from here the channel owns the stream, and
-      // that is what it sends its frames on.
-      return this.#hold(new ChannelWriter(name, stream));
+      return stream;
     } catch (error) {
       await stream?.close().catch(() => {});
       throw idle.expired ? new LinkTimeoutError(`the host sent nothing for ${idle.limitMs} ms`) : error;
@@ -294,6 +314,9 @@ export class LinkSession {
           case FrameKind.Channel:
             await this.#serveChannel(stream, exchange, payload);
             break;
+          case FrameKind.Stream:
+            await this.#serveStream(stream, exchange, payload);
+            break;
           case FrameKind.Request: {
             // Through the ledger, so that a request the host is retrying after
             // a session died is answered from what its first arrival produced
@@ -345,6 +368,30 @@ export class LinkSession {
       await handler(channel);
     } finally {
       await channel.close(ChannelCloseReason.LocalClosed, "the handler returned");
+    }
+  }
+
+  /// Hands a stream the host opened to whatever is listening for the name. The
+  /// stream ends when the handler returns — closed, which ends this end's
+  /// writes cleanly — and is aborted if the handler throws: a clean end would
+  /// tell the host that everything it was owed arrived.
+  async #serveStream(transport, exchange, payload) {
+    const name = decodeChannelName(payload, "stream");
+    const handler = this.#streams(name);
+    if (!handler) {
+      await writeFrame(transport, FrameStatus.Failed, exchange, utf8(`this browser has no "${name}" stream`));
+      return;
+    }
+
+    await writeFrame(transport, FrameStatus.Ok, exchange, new Uint8Array(0));
+    const stream = new LinkStream(name, transport, { patienceMs: this.#options.requestTimeout });
+    try {
+      await handler(stream);
+    } catch (error) {
+      console.warn(`the "${name}" stream handler threw`, error);
+      await stream.abort();
+    } finally {
+      await stream.close();
     }
   }
 

@@ -49,6 +49,16 @@ export class LinkClosedError extends LinkError {
   }
 }
 
+/// A two-way stream stopped without a clean end. `ending` is one of
+/// `StreamEnding`, and says what happened: `LinkStreamException.Ending` in .NET.
+export class LinkStreamError extends LinkError {
+  constructor(ending, message, options) {
+    super(message, options);
+    this.name = "LinkStreamError";
+    this.ending = ending;
+  }
+}
+
 /// The far end's handler failed. Not a broken session: retrying it would only
 /// run it again.
 export class RemoteHandlerError extends LinkError {
