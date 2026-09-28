@@ -18,7 +18,10 @@ host.OnStream("tunnel", async (peer, stream, ct) =>
     using TcpClient target = new();
     await target.ConnectAsync("localhost", 5432, ct);
     await using NetworkStream socket = target.GetStream();
-    await Task.WhenAll(stream.CopyToAsync(socket, ct), socket.CopyToAsync(stream, ct));
+    // Each direction ends on its own: copying does not close what it copied to.
+    async Task ToTarget() { await stream.CopyToAsync(socket, ct); target.Client.Shutdown(SocketShutdown.Send); }
+    async Task ToPeer() { await socket.CopyToAsync(stream, ct); await stream.CompleteWritesAsync(ct); }
+    await Task.WhenAll(ToTarget(), ToPeer());
 });
 
 // the end that opens it
@@ -113,6 +116,16 @@ them ends too. Two rules make the endings unambiguous:
 A write cut part-way through a piece leaves no room for a marker; the end that
 cut it just lets go of the transport, which the other end reads as a piece that
 stopped part-way — an abort.
+
+Neither rule lets a *write* decide on its own, because the transport says the
+same thing for both: the other end let go. Which it was is in the marker that
+end wrote before letting go, already in this end's buffer but possibly behind
+pieces the application has not taken — and past two of those the read-ahead is
+waiting, not reading. So a write that hears the transport go lets the read-ahead
+past that wait, which costs nothing because an end that has gone sends no more,
+and takes the ending the read-ahead then finds. Only a read-ahead that still
+cannot say within the request timeout leaves the stream `PeerAborted`, which is
+the reading bytes nobody accounted for deserve.
 
 Each end reads ahead by a piece, on a task of its own. That is what lets it
 notice the other end letting go while the application is only writing: without

@@ -199,12 +199,16 @@ host.OnStream("postgres", async (peer, stream, ct) =>
     using TcpClient database = new();
     await database.ConnectAsync("localhost", 5432, ct);
     await using NetworkStream socket = database.GetStream();
-    await Task.WhenAll(stream.CopyToAsync(socket, ct), socket.CopyToAsync(stream, ct));
+    // Each direction ends on its own: copying does not close what it copied to.
+    async Task ToDatabase() { await stream.CopyToAsync(socket, ct); database.Client.Shutdown(SocketShutdown.Send); }
+    async Task ToPeer() { await socket.CopyToAsync(stream, ct); await stream.CompleteWritesAsync(ct); }
+    await Task.WhenAll(ToDatabase(), ToPeer());
 });
 
 // the other machine
 await using LinkStream tunnel = await link.OpenStreamAsync("postgres");
-await Task.WhenAll(local.CopyToAsync(tunnel), tunnel.CopyToAsync(local));
+async Task Upload() { await local.CopyToAsync(tunnel); await tunnel.CompleteWritesAsync(); }
+await Task.WhenAll(Upload(), tunnel.CopyToAsync(local));
 ```
 
 ### Typed requests (`Tailcat.Link.Json`)

@@ -5,6 +5,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Net.Quic;
 using System.Threading.Channels;
+using Tailcat.Net;
 
 namespace Tailcat.Link.Protocol;
 
@@ -26,6 +27,12 @@ namespace Tailcat.Link.Protocol;
 /// marker and let go: closed at once, the close races the marker, and on QUIC a
 /// writer at the other end hears the close first — as a stream closed, not
 /// abandoned.
+/// </para>
+/// <para>
+/// Neither rule lets a write decide on its own, because the transport says the
+/// same for both endings: the other end let go. Which it was is in the marker
+/// that end wrote first, and a write that hears the transport go waits for the
+/// read-ahead to reach it — see <see cref="FailFromTransportAsync"/>.
 /// </para>
 /// <para>
 /// A task reads ahead, one piece at a time, so that the other end letting go
@@ -68,6 +75,15 @@ internal sealed class PairedLinkStream : LinkStream
             new BoundedChannelOptions(1) { SingleReader = true, SingleWriter = true });
     private readonly Lock _mu = new();
 
+    // Cancelled when a write hears the other end let go of the transport.
+    // Nothing more can arrive then, so the read-ahead stops waiting for the
+    // application and reads on to the marker saying which ending it was.
+    private readonly CancellationTokenSource _peerLetGo = new();
+    // Set once the read side knows how the stream ended, or knows it never
+    // will. A write that heard the other end let go waits on this to be told
+    // which ending to report.
+    private readonly TaskCompletionSource _endingKnown = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     private Task _readAhead = Task.CompletedTask;
     private LinkStreamException? _failure;
     private bool _writesCompleted;
@@ -78,7 +94,10 @@ internal sealed class PairedLinkStream : LinkStream
     private bool _sourcesDisposed;
     private int _transportReleased;
 
-    // The piece a read is part-way through.
+    // The piece a read is part-way through. Only under _currentLock: disposing
+    // hands it back to the pool while a read may still be copying out of it,
+    // and a buffer returned twice, or read after returning, corrupts the pool.
+    private readonly Lock _currentLock = new();
     private byte[]? _current;
     private int _currentOffset;
     private int _currentLength;
@@ -187,19 +206,23 @@ internal sealed class PairedLinkStream : LinkStream
             return 0;
         }
 
-        while (_current is null)
+        for (;;)
         {
+            if (TryTakeFromCurrent(buffer.Span, out int taken))
+            {
+                return taken;
+            }
             if (_inbound.Reader.TryRead(out (byte[] Buffer, int Length) next))
             {
-                (_current, _currentOffset, _currentLength) = (next.Buffer, 0, next.Length);
-                break;
+                MakeCurrent(next);
+                continue;
             }
             bool more;
             try
             {
                 more = await _inbound.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested && Failure() is { } failure)
+            catch (Exception) when (!cancellationToken.IsCancellationRequested && ReadFailure() is { } failure)
             {
                 // The read-ahead ended the inbound side with why; a fresh
                 // exception per read rather than the one instance rethrown.
@@ -207,23 +230,50 @@ internal sealed class PairedLinkStream : LinkStream
             }
             if (!more)
             {
-                if (_inbound.Reader.Completion.IsFaulted && Failure() is { } ended)
+                if (_inbound.Reader.Completion.IsFaulted && ReadFailure() is { } ended)
                 {
                     throw Copy(ended);
                 }
                 return 0; // the other end finished its half, and all of it is read
             }
         }
+    }
 
-        int taken = Math.Min(buffer.Length, _currentLength - _currentOffset);
-        _current.AsSpan(_currentOffset, taken).CopyTo(buffer.Span);
-        _currentOffset += taken;
-        if (_currentOffset == _currentLength)
+    private bool TryTakeFromCurrent(Span<byte> destination, out int taken)
+    {
+        lock (_currentLock)
         {
-            ArrayPool<byte>.Shared.Return(_current);
-            _current = null;
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_current is null)
+            {
+                taken = 0;
+                return false;
+            }
+            taken = Math.Min(destination.Length, _currentLength - _currentOffset);
+            _current.AsSpan(_currentOffset, taken).CopyTo(destination);
+            _currentOffset += taken;
+            if (_currentOffset == _currentLength)
+            {
+                ArrayPool<byte>.Shared.Return(_current);
+                _current = null;
+            }
+            return true;
         }
-        return taken;
+    }
+
+    private void MakeCurrent((byte[] Buffer, int Length) piece)
+    {
+        lock (_currentLock)
+        {
+            if (_disposed)
+            {
+                // Disposing may already have handed back what it found; this
+                // piece is nobody's now either.
+                ArrayPool<byte>.Shared.Return(piece.Buffer);
+                ObjectDisposedException.ThrowIf(_disposed, this);
+            }
+            (_current, _currentOffset, _currentLength) = (piece.Buffer, 0, piece.Length);
+        }
     }
 
     /// <inheritdoc/>
@@ -236,34 +286,49 @@ internal sealed class PairedLinkStream : LinkStream
             return;
         }
 
+        Exception? letGo = null;
         await _writing.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ThrowUnlessWritable();
+            using CancellationTokenSource either =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stopWriting.Token);
             for (int at = 0; at < buffer.Length;)
             {
-                // Between pieces, never inside one: a piece stopped part-way
-                // leaves a length prefix whose bytes never come, and the other
-                // end would read the next prefix out of the middle of this
-                // piece's data. So the caller's cancellation is honoured exactly
-                // where honouring it leaves the stream whole.
                 cancellationToken.ThrowIfCancellationRequested();
                 int piece = Math.Min(PieceBytes, buffer.Length - at);
                 _midPiece = true;
-                await ChannelFrame.WriteAsync(_transport, buffer.Slice(at, piece), _stopWriting.Token).ConfigureAwait(false);
+                await ChannelFrame.WriteAsync(_transport, buffer.Slice(at, piece), either.Token).ConfigureAwait(false);
                 _midPiece = false;
                 at += piece;
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && _midPiece)
+        {
+            // A write parked on flow control must still hear its caller, but a
+            // piece stopped part-way leaves a length prefix whose bytes never
+            // come: the other end would read the next prefix out of the middle
+            // of this piece, so the stream cannot go on.
+            Fail(LinkStreamEnding.Aborted, $"a write on the \"{_name}\" stream was cancelled part-way through a piece");
+            throw;
         }
         catch (Exception ex) when (ex is not (LinkStreamException or InvalidOperationException)
             && !cancellationToken.IsCancellationRequested
             && SessionFailure.EndsTheSession(ex))
         {
-            throw Copy(FailFromTransport(ex));
+            letGo = ex;
         }
         finally
         {
             _writing.Release();
+        }
+
+        // Outside the lock, because telling a close from an abort asks the
+        // read-ahead, and the read-ahead takes this lock to let go of the
+        // transport once it knows.
+        if (letGo is not null)
+        {
+            throw Copy(await FailFromTransportAsync(letGo).ConfigureAwait(false));
         }
     }
 
@@ -271,6 +336,7 @@ internal sealed class PairedLinkStream : LinkStream
     public override async Task CompleteWritesAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        Exception? letGo = null;
         await _writing.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -279,20 +345,34 @@ internal sealed class PairedLinkStream : LinkStream
                 return;
             }
             ThrowUnlessWritable();
+            cancellationToken.ThrowIfCancellationRequested();
             using CancellationTokenSource either =
                 CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stopWriting.Token);
             await WriteMarkerAsync(0, either.Token).ConfigureAwait(false);
             _writesCompleted = true;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested && _midPiece)
+        {
+            // Cancelled with the marker part-way out: whatever follows would be
+            // read from the middle of it, so the stream cannot go on, and the
+            // other end must not take what it got for a clean end either.
+            Fail(LinkStreamEnding.Aborted, $"ending the writes on the \"{_name}\" stream was cancelled part-way");
+            throw;
+        }
         catch (Exception ex) when (ex is not (LinkStreamException or InvalidOperationException)
             && !cancellationToken.IsCancellationRequested
             && SessionFailure.EndsTheSession(ex))
         {
-            throw Copy(FailFromTransport(ex));
+            letGo = ex;
         }
         finally
         {
             _writing.Release();
+        }
+
+        if (letGo is not null)
+        {
+            throw Copy(await FailFromTransportAsync(letGo).ConfigureAwait(false));
         }
     }
 
@@ -323,6 +403,13 @@ internal sealed class PairedLinkStream : LinkStream
         // parked on flow control holds it — and writing can both be held up by
         // a peer that stopped reading. Past the bound the stream is abandoned
         // instead, which the other end hears as such.
+        if (_sessionAlive.IsCancellationRequested)
+        {
+            // The end marker would still reach the other machine while the
+            // session is being torn down, and tell it that a stream cut off
+            // with its session had finished.
+            Fail(LinkStreamEnding.SessionEnded, $"the \"{_name}\" stream ended with its session");
+        }
         if (Failure() is null && !_writesCompleted)
         {
             using CancellationTokenSource patience = new(_goodbyePatience, _time);
@@ -349,11 +436,16 @@ internal sealed class PairedLinkStream : LinkStream
         // the other end this one has let go, and whatever it still sends goes
         // nowhere, as it would to a closed socket.
         await LetGoAsync().ConfigureAwait(false);
+        // A read still waiting would otherwise wait for good: nothing else
+        // completes the inbound side on a clean path. One that already reached
+        // the clean end keeps it.
+        _inbound.Writer.TryComplete(new ObjectDisposedException(GetType().FullName));
         lock (_mu)
         {
             _sourcesDisposed = true;
             _stopWriting.Dispose();
             _stopReading.Dispose();
+            _peerLetGo.Dispose();
         }
         await base.DisposeAsync().ConfigureAwait(false);
     }
@@ -406,8 +498,7 @@ internal sealed class PairedLinkStream : LinkStream
     // buffer still held. Safe to run twice.
     private async Task LetGoAsync()
     {
-        await _stopWriting.CancelAsync().ConfigureAwait(false);
-        await _stopReading.CancelAsync().ConfigureAwait(false);
+        StopBothWays();
         await _readAhead.ConfigureAwait(false); // it records its own ending and never throws
         await ReleaseTransportAsync().ConfigureAwait(false);
 
@@ -415,10 +506,28 @@ internal sealed class PairedLinkStream : LinkStream
         {
             ArrayPool<byte>.Shared.Return(left.Buffer);
         }
-        if (_disposed && _current is { } current)
+        lock (_currentLock)
         {
-            _current = null;
-            ArrayPool<byte>.Shared.Return(current);
+            if (_disposed && _current is { } current)
+            {
+                _current = null;
+                ArrayPool<byte>.Shared.Return(current);
+            }
+        }
+    }
+
+    // Under the lock disposing takes: an abort letting go while a dispose
+    // finishes would otherwise cancel sources already gone.
+    private void StopBothWays()
+    {
+        lock (_mu)
+        {
+            if (_sourcesDisposed)
+            {
+                return;
+            }
+            _stopWriting.Cancel();
+            _stopReading.Cancel();
         }
     }
 
@@ -445,7 +554,12 @@ internal sealed class PairedLinkStream : LinkStream
     private async Task ReadAheadAsync()
     {
         CancellationToken ct = _stopReading.Token;
+        CancellationToken peerLetGo = _peerLetGo.Token;
         byte[] header = new byte[ChannelFrame.HeaderLength];
+        // The last piece handed on, while the application has yet to take it.
+        // The next header is read meanwhile — that is how an end that only
+        // writes still hears an abort — but no piece's body until it is taken.
+        Task handing = Task.CompletedTask;
         try
         {
             bool peerEnded = false;
@@ -483,33 +597,30 @@ internal sealed class PairedLinkStream : LinkStream
                 }
                 if (length == 0)
                 {
+                    // Not waited for: the transport ending after the marker is
+                    // how a writer hears the close, however much is unread.
                     peerEnded = true;
-                    _inbound.Writer.TryComplete(); // reads end cleanly from here
+                    handing = EndInboundAfterAsync(handing);
                     continue;
                 }
 
                 for (long remaining = length; remaining > 0;)
                 {
+                    // Waits for the application to read: this is where the
+                    // other end is paced.
+                    await PaceAsync(handing, peerLetGo).ConfigureAwait(false);
                     int part = (int)Math.Min(remaining, PieceBytes);
                     byte[] buffer = ArrayPool<byte>.Shared.Rent(part);
                     try
                     {
                         await _transport.ReadExactlyAsync(buffer.AsMemory(0, part), ct).ConfigureAwait(false);
-                        // Waits for the application to read: this is where the
-                        // other end is paced.
-                        await _inbound.Writer.WriteAsync((buffer, part), ct).ConfigureAwait(false);
-                    }
-                    catch (ChannelClosedException)
-                    {
-                        // Reads have ended — this end aborted — and what still
-                        // arrives is discarded until the other end lets go.
-                        ArrayPool<byte>.Shared.Return(buffer);
                     }
                     catch
                     {
                         ArrayPool<byte>.Shared.Return(buffer);
                         throw;
                     }
+                    handing = HandOnAsync(handing, buffer, part, ct);
                     remaining -= part;
                 }
             }
@@ -522,10 +633,82 @@ internal sealed class PairedLinkStream : LinkStream
         {
             Fail(LinkStreamEnding.PeerAborted, $"the other machine abandoned the \"{_name}\" stream part-way through a write", ex);
         }
+        catch (Exception ex) when (ClosedByPeer(ex) && !_sessionAlive.IsCancellationRequested)
+        {
+            // On QUIC a write the other end cancelled part-way aborts its side
+            // of the stream, and no marker can follow: that is an abandonment,
+            // not the session going.
+            Fail(LinkStreamEnding.PeerAborted, $"the other machine abandoned the \"{_name}\" stream part-way through a write", ex);
+        }
         catch (Exception ex) when (SessionFailure.EndsTheSession(ex))
         {
             Fail(LinkStreamEnding.SessionEnded, $"the \"{_name}\" stream ended with its session: {ex.Message}", ex);
         }
+        finally
+        {
+            // Nothing else will say how the stream ended, so a write waiting
+            // to be told stops waiting even when this end let go instead.
+            _endingKnown.TrySetResult();
+        }
+        // Every other ending has completed the inbound side or cancelled the
+        // read. After the other end closed, what it sent is still owed to the
+        // application: this waits for it to be read, or for this end to let go,
+        // and the writes have already been failed by then.
+        await handing.ConfigureAwait(false);
+    }
+
+    // Waits for the application to take the piece handed on last, which is
+    // what paces the other end. Once that end has let go the wait protects
+    // nothing — no more can arrive — and only delays the marker saying how it
+    // ended, so the rest is read on and queued behind what is still unread.
+    private static async Task PaceAsync(Task handing, CancellationToken peerLetGo)
+    {
+        try
+        {
+            await handing.WaitAsync(peerLetGo).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // The other end went; the piece stays queued for the application.
+        }
+    }
+
+    // Never throws: a piece nobody will take goes back to the pool, whether
+    // reads have ended — this end aborted, and what still arrives is discarded
+    // until the other end lets go — or this end let go.
+    private async Task HandOnAsync(Task previous, byte[] buffer, int length, CancellationToken ct)
+    {
+        try
+        {
+            // In turn, so pieces reach the application in the order they
+            // arrived when the pacing was let past and several are waiting,
+            // and so the inbound side keeps its one writer.
+            await previous.ConfigureAwait(false);
+            await _inbound.Writer.WriteAsync((buffer, length), ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is ChannelClosedException or OperationCanceledException)
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+            FailIfSessionEnded(ex);
+        }
+    }
+
+    // A piece dropped because the session went is data the application never
+    // gets: its reads must end with the session, not with the clean end the
+    // other machine sent, or a tunnel would finish a connection that was cut.
+    private void FailIfSessionEnded(Exception ex)
+    {
+        if (_sessionAlive.IsCancellationRequested)
+        {
+            Fail(LinkStreamEnding.SessionEnded, $"the \"{_name}\" stream ended with its session before everything sent was read", ex);
+        }
+    }
+
+    // Reads end cleanly once the last piece handed on has been taken.
+    private async Task EndInboundAfterAsync(Task handing)
+    {
+        await handing.ConfigureAwait(false);
+        _inbound.Writer.TryComplete();
     }
 
     // False on a clean end before any byte of a header.
@@ -549,26 +732,58 @@ internal sealed class PairedLinkStream : LinkStream
         _midPiece = false;
     }
 
-    // A write refused because the other end closed its side of this one
-    // stream is that end having let go — QUIC tells a writer before the
-    // read-ahead has read the end marker in front of the close. Anything else
-    // is the session going.
-    private LinkStreamException FailFromTransport(Exception ex)
+    // A write refused because the other end let go of its side of this one
+    // stream says that it let go, and no more: QUIC tells a writer that before
+    // the read-ahead has read what that end wrote in front of letting go. The
+    // marker saying whether it closed or abandoned the stream is already in
+    // this end's buffer, so the read-ahead is let past the pacing — nothing
+    // more can arrive from an end that has gone — and asked. Only a read-ahead
+    // that still cannot say leaves the stream abandoned, which is what bytes
+    // nobody accounted for deserve: told of a close, a tunnel would send a
+    // clean end for a connection that was cut.
+    private async Task<LinkStreamException> FailFromTransportAsync(Exception ex)
     {
         if (Failure() is { } already)
         {
             return already;
         }
-        return ClosedByPeer(ex)
-            ? Fail(LinkStreamEnding.PeerClosed, $"the other machine closed the \"{_name}\" stream", ex)
-            : Fail(LinkStreamEnding.SessionEnded, $"the \"{_name}\" stream ended with its session: {ex.Message}", ex);
+        if (!ClosedByPeer(ex))
+        {
+            return Fail(LinkStreamEnding.SessionEnded, $"the \"{_name}\" stream ended with its session: {ex.Message}", ex);
+        }
+
+        LetPastThePacing();
+        try
+        {
+            await _endingKnown.Task.WaitAsync(_goodbyePatience, _time).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            // The read-ahead is somewhere no marker will reach it from.
+        }
+        return Failure() ?? Fail(
+            LinkStreamEnding.PeerAborted,
+            $"the other machine let go of the \"{_name}\" stream without saying how it ended",
+            ex);
+    }
+
+    // Under the lock disposing takes, as every other cancellation here is.
+    private void LetPastThePacing()
+    {
+        lock (_mu)
+        {
+            if (!_sourcesDisposed)
+            {
+                _peerLetGo.Cancel();
+            }
+        }
     }
 
     private static bool ClosedByPeer(Exception? ex)
     {
         for (; ex is not null; ex = ex.InnerException)
         {
-            if (ex is QuicException { QuicError: QuicError.StreamAborted })
+            if (ex is QuicException { QuicError: QuicError.StreamAborted } or PeerReleasedStreamException)
             {
                 return true;
             }
@@ -603,11 +818,24 @@ internal sealed class PairedLinkStream : LinkStream
                 _stopWriting.Cancel();
             }
         }
-        // Reads that have not reached a clean end fail with it; ones that have
-        // keep returning 0, which is still true.
-        _inbound.Writer.TryComplete(failure);
+        if (ending != LinkStreamEnding.PeerClosed)
+        {
+            // Reads that have not reached a clean end fail with what the read
+            // side saw; ones that have keep returning 0, which is still true.
+            _inbound.Writer.TryComplete(ReadSideFailure(failure, ending, detail, cause));
+        }
+        // A write refused because the other end closed says nothing about what
+        // it sent before closing: the read-ahead goes on to its end marker, so
+        // every byte is read however slowly the application reads.
+        _endingKnown.TrySetResult();
         return failure;
     }
+
+    // Once a write has heard the other end close, the transport stopping
+    // without its end marker is still an abandonment to the reader.
+    private static LinkStreamException ReadSideFailure(
+        LinkStreamException failure, LinkStreamEnding ending, string detail, Exception? cause) =>
+        failure.Ending == LinkStreamEnding.PeerClosed ? new LinkStreamException(ending, detail, cause) : failure;
 
     private LinkStreamException? Failure()
     {
@@ -616,6 +844,14 @@ internal sealed class PairedLinkStream : LinkStream
             return _failure;
         }
     }
+
+    // What the inbound side was ended with, which may differ from the stream's
+    // first ending when a write heard the close before the reader did.
+    private LinkStreamException? ReadFailure() =>
+        _inbound.Reader.Completion is { IsFaulted: true } completion
+            && completion.Exception?.InnerException is LinkStreamException readSide
+            ? readSide
+            : Failure();
 
     private static LinkStreamException Copy(LinkStreamException failure) =>
         new(failure.Ending, failure.Message, failure.InnerException);

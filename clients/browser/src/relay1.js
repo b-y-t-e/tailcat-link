@@ -84,6 +84,10 @@ export async function openRecord(record, key) {
 
 export const FrameFlags = { None: 0, Fin: 1, Reset: 2, Window: 4 };
 
+/// A write refused because the peer let go of the stream, which is what QUIC
+/// says with `StreamAborted`; `PeerReleasedStreamException` in .NET.
+export class PeerReleasedStreamError extends Error {}
+
 export function writeVarint(value) {
   const out = [];
   while (value >= 0x80) {
@@ -128,7 +132,9 @@ export class Relay1Stream {
   #credit = Relay1Stream.INITIAL_WINDOW;
   #creditWaiter = null;
   #finSent = false;
+  #finReceived = false;
   #reset = null;
+  #resetByPeer = false;
 
   constructor(session, id) {
     this.#session = session;
@@ -149,11 +155,13 @@ export class Relay1Stream {
         await this.#grantCreditIfDue();
         return chunk;
       }
-      if (this.#reset) throw new Error(`the peer reset the stream: ${this.#reset}`);
+      // After the peer's FIN everything it sent is on its way, whatever ends
+      // the stream afterwards.
+      if (this.#reset && !this.#finReceived) throw new Error(`the peer reset the stream: ${this.#reset}`);
       try {
         this.#leftover = await this.#inbound.next(signal);
       } catch (error) {
-        if (this.#inbound.closed && !this.#reset) return new Uint8Array(0);
+        if (this.#inbound.closed && (!this.#reset || this.#finReceived)) return new Uint8Array(0);
         throw error;
       }
     }
@@ -198,8 +206,21 @@ export class Relay1Stream {
 
   async close() {
     await this.finish();
+    await this.#tellAWriterWeLetGo();
     this.#session._forget(this.id);
     this.#inbound.close(new Error("the stream was closed"));
+  }
+
+  // What QUIC does for a stream closed before the peer's FIN: a writer parked
+  // on credit this end will never grant would otherwise wait for the session
+  // to end. Sent after the FIN, so what the peer reads is unchanged.
+  async #tellAWriterWeLetGo() {
+    if (this.#finReceived || this.#reset) return;
+    try {
+      await this.#session._sendFrame(this.id, FrameFlags.Reset, utf8("the peer let go of the stream"));
+    } catch {
+      // The session is gone, which ends the stream anyway.
+    }
   }
 
   // ---- driven by the session's receive path --------------------------
@@ -209,11 +230,13 @@ export class Relay1Stream {
   }
 
   _onFin() {
+    this.#finReceived = true;
     this.#inbound.close(new Error("the peer finished the stream"));
   }
 
   _onReset(reason) {
     this.#reset = reason || "no reason given";
+    this.#resetByPeer = true;
     this.#inbound.close(new Error(this.#reset));
     this.#wakeCredit();
   }
@@ -237,7 +260,10 @@ export class Relay1Stream {
 
   async #reserveCredit(wanted, signal) {
     for (;;) {
-      if (this.#reset) throw new Error(`the stream is not writable: ${this.#reset}`);
+      if (this.#reset) {
+        const message = `the stream is not writable: ${this.#reset}`;
+        throw this.#resetByPeer ? new PeerReleasedStreamError(message) : new Error(message);
+      }
       if (this.#credit > 0) {
         const taken = Math.min(wanted, this.#credit);
         this.#credit -= taken;

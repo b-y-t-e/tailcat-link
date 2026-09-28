@@ -82,6 +82,31 @@ test("an abort reaches the other end's reads and writes as an abort, not an end"
   await accepter.close();
 });
 
+test("an end that only writes, holding bytes it never read, still hears an abort", async () => {
+  // Past a short patience, an abort nobody heard would still end: the writer
+  // must hear it well before then.
+  const { browser, host } = await sessionPair();
+  const opener = new LinkStream("test", browser.openStream(), { patienceMs: 60_000 });
+  await opener.write(utf8("never read"));
+  const accepter = new LinkStream("test", await host.accepted.next(), { patienceMs: 60_000 });
+
+  const writing = (async () => {
+    try {
+      for (;;) await accepter.write(new Uint8Array(32 * 1024));
+    } catch (error) {
+      return error;
+    }
+  })();
+
+  await opener.read();
+  const started = Date.now();
+  await opener.abort();
+
+  assert.equal((await writing).ending, StreamEnding.PeerAborted);
+  assert.ok(Date.now() - started < 5_000, "heard at once, not after the patience");
+  await accepter.close();
+});
+
 test("closing while the other end still writes tells the writer it was closed", async () => {
   const { opener, accepter } = await streamPair();
   assert.equal(str(await accepter.read()), "hello");
@@ -98,6 +123,37 @@ test("closing while the other end still writes tells the writer it was closed", 
   assert.equal(failed.ending, StreamEnding.PeerClosed);
   // The other end wrote nothing and ended its half on the way out.
   assert.equal((await opener.read()).length, 0);
+  await opener.close();
+});
+
+test("a writer hears a close behind bytes it has not read, and reads them afterwards", async () => {
+  const { opener, accepter } = await streamPair();
+  assert.equal(str(await accepter.read()), "hello");
+  // More pieces than the reading end holds, so its read-ahead is pacing.
+  for (const piece of ["ban", "ner"]) await accepter.write(utf8(piece));
+  await accepter.close();
+
+  const failed = await (async () => {
+    try {
+      for (;;) await opener.write(new Uint8Array(32 * 1024));
+    } catch (error) {
+      return error;
+    }
+  })();
+
+  assert.equal(failed.ending, StreamEnding.PeerClosed);
+  assert.equal(str(await readToEnd(opener)), "banner");
+  await opener.close();
+});
+
+test("a read waiting when the stream is closed is told so rather than spinning", async () => {
+  const { opener, accepter } = await streamPair();
+  assert.equal(str(await accepter.read()), "hello");
+
+  const waiting = assert.rejects(accepter.read(), (error) => error.ending === StreamEnding.Aborted);
+  await accepter.close();
+
+  await waiting;
   await opener.close();
 });
 

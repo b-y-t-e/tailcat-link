@@ -772,12 +772,16 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
                 {
                     await take(this, stream, ct).ConfigureAwait(false);
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
                 {
+                    // A handler's own cancellation — a timeout, a connect it
+                    // gave up on — is a failure like any other; only the
+                    // session going away is not the handler's to report.
                     // Said here, as a channel handler's failure is, and passed
                     // on as an abort: a clean end would tell the other machine
                     // that everything it was owed arrived.
-                    _log.Warn($"the \"{name}\" stream handler threw: {ex.Message}");
+                    if (IsHandlerFailure(ex))
+                        _log.Warn($"the \"{name}\" stream handler threw: {ex.Message}");
                     await stream.AbortAsync().ConfigureAwait(false);
                 }
                 finally
@@ -788,6 +792,12 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
                 }
             }
             : null;
+
+    // A copy that stops because the other machine let go or the session died
+    // throws out of the handler too, and it is not the handler's to report:
+    // blaming it would put a warning in the log on every cut.
+    private static bool IsHandlerFailure(Exception ex) =>
+        ex is not LinkStreamException { Ending: not LinkStreamEnding.Aborted };
 
     private TimeSpan Grow(TimeSpan backoff) =>
         backoff >= _options.MaxReconnectDelay ? _options.MaxReconnectDelay

@@ -619,8 +619,12 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
         _disposed = true;
 
         Fail("the link was closed");
-        await _cts.CancelAsync().ConfigureAwait(false);
+        // The connection first: what the session's streams let go of as they
+        // hear it end then goes nowhere, where a stream released while the
+        // connection still carried it reached the other machine as that one
+        // stream abandoned, ahead of the session ending.
         await _connection.DisposeAsync().ConfigureAwait(false);
+        await _cts.CancelAsync().ConfigureAwait(false);
         if (_serveLoop is not null)
         {
             try

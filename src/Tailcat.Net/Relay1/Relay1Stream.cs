@@ -211,9 +211,34 @@ internal sealed class Relay1Stream : Stream
             }
         }
 
+        await TellAWriterWeLetGoAsync().ConfigureAwait(false);
         _connection.Forget(Id);
         _inbound.Writer.TryComplete();
         await base.DisposeAsync().ConfigureAwait(false);
+    }
+
+    // What QUIC does for a stream disposed before the peer's FIN: a writer
+    // parked on credit this end will never grant would otherwise wait for the
+    // session to end. Sent after the FIN, so what the peer reads is unchanged.
+    private async Task TellAWriterWeLetGoAsync()
+    {
+        lock (_mu)
+        {
+            if (_finReceived || _ended is not null)
+            {
+                return;
+            }
+        }
+        try
+        {
+            await _connection
+                .SendFrameAsync(Id, Relay1FrameFlags.Reset, "the peer let go of the stream"u8.ToArray(), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or TailcatException)
+        {
+            // The session is already gone, which ends the stream anyway.
+        }
     }
 
     /// <inheritdoc/>
@@ -252,6 +277,7 @@ internal sealed class Relay1Stream : Stream
             _ended = new StreamEnd(reason, ByPeer: true);
         }
         _inbound.Writer.TryComplete();
+        OnWindow(0); // a write parked on credit hears it too
     }
 
     internal void OnWindow(long credit)
@@ -294,7 +320,7 @@ internal sealed class Relay1Stream : Stream
             {
                 if (_ended is { } ended)
                 {
-                    throw new IOException(ended.WhenWriting);
+                    throw ended.ByPeer ? new PeerReleasedStreamException(ended.WhenWriting) : new IOException(ended.WhenWriting);
                 }
                 if (_credit > 0)
                 {

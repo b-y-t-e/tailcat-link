@@ -196,7 +196,12 @@ library is, roughly how the relays work, and examples that compile.
   it keeps it open until the other end has read the marker and let go. Closing
   at once raced the marker, and on QUIC the far writer heard `StreamAborted`
   first and reported `PeerClosed` for an abort. Each end reads ahead one piece
-  on its own task, which is the only way a writer learns the far end let go.
+  on its own task, which is the only way a writer learns the far end let go —
+  and a write that hears that never decides the ending from the transport,
+  which says the same for both: it lets the read-ahead past the pacing, where
+  the marker already is, and takes the ending it finds. Past two unread pieces
+  the read-ahead is waiting, not reading, so a tunnel was told a cut connection
+  had finished.
 - **A host may hold several peers.** `HostManyAsync` is the real thing;
   `HostAsync` is it with `MaxPeers = 1` behind `ILink`, and refuses options
   asking for more rather than narrowing them, because narrowing unpairs stored

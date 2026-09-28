@@ -182,6 +182,12 @@ frame has no size limit, and without credit a sender would push all of one at a
 relay which drops what it cannot deliver, ending the session (above). A sender
 with no credit stops; it does not buffer past the window.
 
+An end that lets go of a stream before the peer's `FIN` sends `RESET` after
+its own `FIN`, as QUIC does for a stream disposed while the peer still writes:
+a writer waiting on credit that will never come would otherwise wait for the
+session to end. A `RESET` after a `FIN` fails only the receiver's writes;
+everything before the `FIN` is still read.
+
 ## Lifetime
 
 A `relay1` session lives and dies with the relay connection under it. There

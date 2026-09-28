@@ -194,7 +194,10 @@ session died.
 host.OnStream("tunnel", async (peer, stream, ct) =>
 {
     await using NetworkStream socket = await ConnectAsync(ct);
-    await Task.WhenAll(stream.CopyToAsync(socket, ct), socket.CopyToAsync(stream, ct));
+    // Each direction ends on its own: copying does not close what it copied to.
+    async Task ToSocket() { await stream.CopyToAsync(socket, ct); socket.Socket.Shutdown(SocketShutdown.Send); }
+    async Task ToPeer() { await socket.CopyToAsync(stream, ct); await stream.CompleteWritesAsync(ct); }
+    await Task.WhenAll(ToSocket(), ToPeer());
 });
 
 await using LinkStream tunnel = await link.OpenStreamAsync("tunnel");
