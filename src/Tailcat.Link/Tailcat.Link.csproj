@@ -78,6 +78,7 @@
   <ItemGroup>
     <!-- DPAPI: on Windows the stored identity key is encrypted to the user
          account, so a readable file is not a usable key. -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" />
     <!-- ILogger, so what the link is doing can be filtered and correlated
          rather than only printed. Abstractions only: the application chooses
