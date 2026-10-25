@@ -101,6 +101,12 @@ public interface ILink : IAsyncDisposable
     /// </remarks>
     LinkConnectionState State { get; }
 
+    /// <inheritdoc cref="ILinkPeer.Route"/>
+    LinkRoute Route { get; }
+
+    /// <inheritdoc cref="ILinkPeer.RouteChanged"/>
+    event EventHandler<LinkRouteChangedEventArgs>? RouteChanged;
+
     /// <summary>Raised when a session comes up, including every re-established one.</summary>
     event Action? Connected;
 

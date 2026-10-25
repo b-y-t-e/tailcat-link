@@ -117,6 +117,23 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
     /// <summary>The machine at the other end.</summary>
     public NodePublic Peer => _connection.Peer;
 
+    /// <summary>How this session's traffic travels right now.</summary>
+    public LinkRoute Route => RouteOf(_connection.CurrentPath);
+
+    /// <summary>
+    /// Calls <paramref name="onChange"/> whenever the connection moves between
+    /// the relay and a direct path, for as long as the connection lives.
+    /// </summary>
+    /// <remarks>
+    /// It is called on the connection's probe loop, which is also what keeps
+    /// a direct path alive, so it must not block.
+    /// </remarks>
+    public void WatchRoute(Action<LinkRoute> onChange) =>
+        _connection.PathChanged += path => onChange(RouteOf(path));
+
+    private static LinkRoute RouteOf(PeerPath path) =>
+        path.Kind == PeerPathKind.Direct ? LinkRoute.Direct : LinkRoute.Relayed;
+
     /// <summary>Completes with the reason this session ended.</summary>
     public Task<string> Ended => _ended.Task;
 

@@ -80,6 +80,21 @@ internal sealed class DurableLink : ILink
     }
 
     /// <inheritdoc/>
+    public LinkRoute Route
+    {
+        get
+        {
+            lock (_mu)
+            {
+                return _peer?.Route ?? LinkRoute.None;
+            }
+        }
+    }
+
+    /// <inheritdoc/>
+    public event EventHandler<LinkRouteChangedEventArgs>? RouteChanged;
+
+    /// <inheritdoc/>
     public event Action? Connected;
 
     /// <inheritdoc/>
@@ -117,6 +132,8 @@ internal sealed class DurableLink : ILink
         }
         peer.StateChanged += (_, changed) =>
             Raise(() => StateChanged?.Invoke(this, changed), nameof(StateChanged));
+        peer.RouteChanged += (_, changed) =>
+            Raise(() => RouteChanged?.Invoke(this, changed), nameof(RouteChanged));
     }
 
     /// <inheritdoc/>

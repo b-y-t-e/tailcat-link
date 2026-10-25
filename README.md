@@ -250,6 +250,7 @@ sealed class Worker(ILinkHost host, ILogger<Worker> log) : BackgroundService
 
 ```csharp
 link.StateChanged += (_, e) => Console.WriteLine($"link is {e.State}");
+link.RouteChanged += (_, e) => Console.WriteLine($"traffic goes {e.Route}"); // Relayed or Direct
 link.SessionEnded += (_, e) =>
 {
     if (e.Reason == LinkDisconnectReason.Refused)

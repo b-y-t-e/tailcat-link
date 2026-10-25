@@ -53,6 +53,24 @@ public interface ILinkPeer
     /// <summary>Where it stands, as one value a user interface can bind to.</summary>
     LinkConnectionState State { get; }
 
+    /// <summary>
+    /// Whether its traffic goes through a relay or straight between the two
+    /// machines, or <see cref="LinkRoute.None"/> while no session is up.
+    /// </summary>
+    /// <remarks>
+    /// A session starts on the relay and moves when a hole punch succeeds,
+    /// and back when the direct path stops answering, without interrupting
+    /// anything in flight.
+    /// </remarks>
+    LinkRoute Route { get; }
+
+    /// <summary>Raised whenever <see cref="Route"/> changes.</summary>
+    /// <remarks>
+    /// Raised off the thread that noticed, in order, so a slow handler delays
+    /// only the next one of these.
+    /// </remarks>
+    event EventHandler<LinkRouteChangedEventArgs>? RouteChanged;
+
     /// <summary>Raised when a session with it comes up, including every re-established one.</summary>
     event EventHandler<EventArgs>? Connected;
 

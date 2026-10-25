@@ -207,6 +207,7 @@ await using LinkStream tunnel = await link.OpenStreamAsync("tunnel");
 
 ```csharp
 link.StateChanged += (_, e) => Console.WriteLine($"link is {e.State}");
+link.RouteChanged += (_, e) => Console.WriteLine($"traffic goes {e.Route}"); // Relayed or Direct
 
 try
 {

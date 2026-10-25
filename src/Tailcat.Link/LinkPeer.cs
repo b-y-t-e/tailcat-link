@@ -78,6 +78,8 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
     private LinkSession? _session;
     private bool _sessionIsUp;
     private LinkConnectionState _state = LinkConnectionState.Idle;
+    private LinkRoute _route = LinkRoute.None;
+    private Task _routeEvents = Task.CompletedTask;
     private TaskCompletionSource<LinkSession> _ready = NewReady();
     private TaskCompletionSource _sessionEnded = NewSessionEnded();
     private Task? _supervisor;
@@ -172,6 +174,21 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
             }
         }
     }
+
+    /// <inheritdoc/>
+    public LinkRoute Route
+    {
+        get
+        {
+            lock (_mu)
+            {
+                return _route;
+            }
+        }
+    }
+
+    /// <inheritdoc/>
+    public event EventHandler<LinkRouteChangedEventArgs>? RouteChanged;
 
     /// <inheritdoc/>
     public event EventHandler<EventArgs>? Connected;
@@ -586,6 +603,8 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
             _sessionIsUp = true;
             _ready.TrySetResult(session);
         }
+        session.WatchRoute(_ => MoveRouteTo(session));
+        MoveRouteTo(session);
         _log.Say($"link up with {session.Peer}");
         LinkTelemetry.SessionUp();
         MoveTo(LinkConnectionState.Connected);
@@ -613,6 +632,7 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
             }
         }
         ReleaseSessionEnded();
+        MoveRouteTo(null);
         _log.Say($"link down: {reason}");
         LinkTelemetry.Reconnecting(kind);
         // A peer that has never had a session is still building its first one,
@@ -671,6 +691,7 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
             _ = _ready.Task.Exception;
         }
         ReleaseSessionEnded();
+        MoveRouteTo(null);
         MoveTo(LinkConnectionState.Faulted);
         Raise(
             () => Disconnected?.Invoke(
@@ -689,6 +710,43 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
             _state = next;
         }
         Raise(() => StateChanged?.Invoke(this, new LinkStateChangedEventArgs(next)), nameof(StateChanged));
+    }
+
+    /// <summary>
+    /// Takes the route of <paramref name="session"/> as this peer's, or
+    /// <see cref="LinkRoute.None"/> when it is null.
+    /// </summary>
+    /// <remarks>
+    /// The route is read here, under the lock, rather than taken from the
+    /// event that prompted it, so two path changes reported out of order
+    /// still leave the right one; and a session that is no longer the
+    /// current one has nothing left to say. The event goes out on the thread
+    /// pool, chained so that order holds: the thread that noticed is the
+    /// probe loop keeping the direct path alive, and an application's slow
+    /// handler there would cost it that path.
+    /// </remarks>
+    private void MoveRouteTo(LinkSession? session)
+    {
+        lock (_mu)
+        {
+            if (session is not null && !ReferenceEquals(session, _session))
+            {
+                return;
+            }
+            LinkRoute next = session?.Route ?? LinkRoute.None;
+            if (_route == next)
+            {
+                return;
+            }
+            _route = next;
+            _routeEvents = _routeEvents.ContinueWith(
+                _ => Raise(
+                    () => RouteChanged?.Invoke(this, new LinkRouteChangedEventArgs(next)),
+                    nameof(RouteChanged)),
+                CancellationToken.None,
+                TaskContinuationOptions.None,
+                TaskScheduler.Default);
+        }
     }
 
     /// <summary>

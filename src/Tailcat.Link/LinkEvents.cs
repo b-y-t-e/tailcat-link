@@ -26,6 +26,24 @@ public enum LinkConnectionState
     Faulted,
 }
 
+/// <summary>How a peer's traffic is travelling.</summary>
+/// <remarks>
+/// Worth showing beside the state: a relayed link works, but every byte
+/// crosses a shared, rate-limited relay, and the usual reason a transfer is
+/// slow is that the two machines could not reach each other directly.
+/// </remarks>
+public enum LinkRoute
+{
+    /// <summary>No session is up, so nothing is travelling.</summary>
+    None,
+
+    /// <summary>Through a relay: always available, slower, and rate limited.</summary>
+    Relayed,
+
+    /// <summary>Straight between the two machines, after a hole punch.</summary>
+    Direct,
+}
+
 /// <summary>Why a session ended, in a form worth branching on.</summary>
 /// <remarks>
 /// A user interface that shows a fresh invitation code on
@@ -74,6 +92,14 @@ public sealed class LinkStateChangedEventArgs(LinkConnectionState state) : Event
 {
     /// <summary>The state the link has just moved into.</summary>
     public LinkConnectionState State { get; } = state;
+}
+
+/// <summary>How the link's traffic now travels.</summary>
+/// <param name="route">The route it has just moved onto.</param>
+public sealed class LinkRouteChangedEventArgs(LinkRoute route) : EventArgs
+{
+    /// <summary>The route the link has just moved onto.</summary>
+    public LinkRoute Route { get; } = route;
 }
 
 /// <summary>Which peer this is about.</summary>
