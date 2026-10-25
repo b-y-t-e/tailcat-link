@@ -281,3 +281,24 @@ jobs:
       - run: npm ci
 
       - run: npm test
+
+  # The hosting end in JavaScript. It is built on the client's own modules, so
+  # the client is installed first and the two are tested together: a change
+  # to the client that breaks the host fails here.
+  browser-host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: npm ci
+        working-directory: clients/browser
+
+      - run: npm ci
+        working-directory: clients/browser-host
+
+      - run: npm test
+        working-directory: clients/browser-host

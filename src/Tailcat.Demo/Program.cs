@@ -44,6 +44,12 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
               against. --forget drops the stored pairing first, so a second
               client can take the place of the first.
 
+          tailcat-demo join [<invitation-code>] [--forget]
+              The other end of a Tailcat.Link: joins a host — this demo's,
+              or one run by clients/browser-host — asks it something every
+              few seconds and answers what it asks, uppercased. The code is
+              needed the first time only; --forget drops the stored pairing.
+
           --relay-only
               Offers only the relayed transport, whatever this machine can
               do. What a browser and a Windows 10 machine get, on a machine
@@ -93,6 +99,9 @@ try
 
         case "host":
             return await HostAsync(args.Contains("--forget"), cts.Token);
+
+        case "join":
+            return await JoinAsync(args.Length >= 2 && !args[1].StartsWith("--", StringComparison.Ordinal) ? args[1] : null, args.Contains("--forget"), cts.Token);
 
         default:
             Console.Error.WriteLine($"unknown command: {string.Join(' ', args)}");
@@ -527,6 +536,65 @@ static async Task<int> HostAsync(bool forget, CancellationToken ct)
     }
     catch (OperationCanceledException)
     {
+    }
+    return 0;
+}
+
+static async Task<int> JoinAsync(string? code, bool forget, CancellationToken ct)
+{
+    const string AppName = "tailcat-demo-join";
+
+    if (forget)
+    {
+        await TailcatLink.ForgetAsync(AppName, cancellationToken: ct);
+        Console.WriteLine("forgot the stored pairing");
+    }
+
+    await using ILink link = await TailcatLink.JoinAsync(
+        AppName, code, new JoinRequest { DisplayName = $"tailcat-demo on {Environment.MachineName}" }, cancellationToken: ct);
+    link.OnRequest(command =>
+    {
+        Console.WriteLine($"  <- {command}");
+        return command.ToUpperInvariant();
+    });
+
+    Console.WriteLine("joining ...");
+    await link.WaitUntilConnectedAsync(ct);
+    Console.WriteLine("connected");
+
+    // Asked on a timer rather than once, so a session the host's end lets
+    // fall is seen to come back.
+    for (int i = 1; !ct.IsCancellationRequested; i++)
+    {
+        try
+        {
+            Console.WriteLine($"  -> the host answered: {await link.RequestAsync($"request {i}", ct)}");
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
+        catch (LinkClosedException ex)
+        {
+            // Stopped for good: every later request would fail at once.
+            Console.WriteLine($"  -> the link stopped: {ex.Message}");
+            return 1;
+        }
+        catch (LinkException ex)
+        {
+            Console.WriteLine($"  -> asking the host failed: {ex.Message}");
+        }
+
+        // After a failure too: one that fails at once — the host's handler
+        // threw — would otherwise be asked again in a tight loop.
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+        }
+        catch (OperationCanceledException)
+        {
+            break;
+        }
     }
     return 0;
 }

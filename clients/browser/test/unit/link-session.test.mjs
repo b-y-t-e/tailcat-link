@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { delay, hex } from "../../src/bytes.js";
+import { atMost, delay, hex, withAbort } from "../../src/bytes.js";
 import { ChannelWriter, encodeChannelName } from "../../src/link-channel.js";
 import {
   Capabilities,
@@ -61,6 +61,30 @@ function stageHost(connection, { says }) {
   })().catch(() => {});
   return host;
 }
+
+test("a wait on a long-lived signal leaves no listener behind once it is over", async () => {
+  const signal = new AbortController().signal;
+  let listening = 0;
+  const add = signal.addEventListener.bind(signal);
+  const remove = signal.removeEventListener.bind(signal);
+  signal.addEventListener = (...args) => {
+    listening++;
+    add(...args);
+  };
+  signal.removeEventListener = (...args) => {
+    listening--;
+    remove(...args);
+  };
+  for (let wait = 0; wait < 25; wait++) await withAbort(Promise.resolve(wait), signal);
+  assert.equal(listening, 0);
+});
+
+test("a bounded wait that finishes early leaves no timer running", async () => {
+  const before = process.getActiveResourcesInfo().filter((name) => name === "Timeout").length;
+  await atMost(Promise.resolve(), 60_000);
+  await atMost(Promise.reject(new Error("settles either way")), 60_000);
+  assert.equal(process.getActiveResourcesInfo().filter((name) => name === "Timeout").length, before);
+});
 
 test("a ping is answered with what this client can take", async () => {
   const { browser, host } = await sessionPair();

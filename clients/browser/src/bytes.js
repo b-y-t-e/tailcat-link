@@ -58,13 +58,21 @@ export const randomBytes = (n) => crypto.getRandomValues(new Uint8Array(n));
 /// A promise that rejects when the signal fires, so a wait can be abandoned.
 export const withAbort = (promise, signal) => {
   if (!signal) return promise;
+  // Removed once the race is over: a signal lives as long as its link, and
+  // every wait on it would otherwise leave a listener behind until then.
+  let onAbort = null;
   return Promise.race([
     promise,
     new Promise((_, reject) => {
       if (signal.aborted) reject(signal.reason ?? new Error("aborted"));
-      else signal.addEventListener("abort", () => reject(signal.reason ?? new Error("aborted")), { once: true });
+      else {
+        onAbort = () => reject(signal.reason ?? new Error("aborted"));
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
     }),
-  ]);
+  ]).finally(() => {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  });
 };
 
 /// Rejects after a delay unless the promise settles first. A relayed session
@@ -81,6 +89,22 @@ export const withTimeout = (promise, ms, what) => {
 };
 
 export const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/// Waits for the promise, but no longer than `ms`, and settles either way.
+/// The timer goes when the promise wins: one left running holds a Node
+/// process open for the whole of it after everything else has finished.
+export const atMost = (promise, ms) => {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise).then(
+      () => {},
+      () => {},
+    ),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+};
 
 /// A promise whose settling is somebody else's business.
 export class Deferred {

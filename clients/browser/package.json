@@ -5,7 +5,8 @@
   "type": "module",
   "license": "BSD-3-Clause",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./internal/*": "./src/*"
   },
   "files": ["src"],
   "sideEffects": false,

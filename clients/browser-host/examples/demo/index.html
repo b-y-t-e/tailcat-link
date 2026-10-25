@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>tailcat-link-host</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+  code.invitation { display: block; padding: .6rem; background: #f3f3f3; word-break: break-all; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  td, th { text-align: left; padding: .25rem .5rem; border-bottom: 1px solid #ddd; }
+  pre#log { background: #111; color: #ddd; padding: .8rem; min-height: 10rem; white-space: pre-wrap; }
+</style>
+
+<h1>This page is a host</h1>
+<p>Anything that joins with the code below — <code>@tailcat/link</code> in another tab,
+<code>dotnet run --project src/Tailcat.Demo -- join &lt;code&gt;</code>, or an application
+built on <code>Tailcat.Link</code> — is paired with this page and can ask it things. It answers
+what it is asked, uppercased. Keep the tab in front: a page that is closed or put to sleep is a
+host that is gone.</p>
+
+<code class="invitation" id="code">starting…</code>
+<p>
+  <button id="invite" disabled>new invitation</button>
+  <button id="forget" disabled>forget this host</button>
+</p>
+
+<table>
+  <thead><tr><th>peer</th><th>state</th><th></th></tr></thead>
+  <tbody id="peers"></tbody>
+</table>
+
+<pre id="log"></pre>
+
+<!-- No build step, so the bare imports are resolved here. tweetnacl's UMD
+     build sets the global the client's nacl.js picks up; the hash pins it. -->
+<script type="importmap">
+  {
+    "imports": {
+      "@tailcat/link": "/link/index.js",
+      "@tailcat/link/internal/": "/link/"
+    }
+  }
+</script>
+<script
+  src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl-fast.min.js"
+  integrity="sha384-05+sicyRJQ56XpL4U9HJ8YbtSzFDvAg7apPKOGV6A0JsAJKFM68jp5oLnUjG5mEp"
+  crossorigin="anonymous"></script>
+<script type="module">
+  import { TailcatHost } from "/host/index.js";
+
+  const APP = "tailcat-host-demo";
+  const $ = (id) => document.getElementById(id);
+  const log = (line) => ($("log").textContent += `${new Date().toLocaleTimeString()}  ${line}\n`);
+
+  const host = await TailcatHost.start({ appName: APP, maxPeers: 4 });
+  log(`listening in region ${host.regionId}`);
+  $("code").textContent = host.invitationCode;
+
+  const label = (peer) => peer.name ?? peer.key.slice(0, 12);
+  function render() {
+    $("peers").replaceChildren(
+      ...host.peers.map((peer) => {
+        const row = document.createElement("tr");
+        const forget = Object.assign(document.createElement("button"), { textContent: "unpair" });
+        forget.onclick = async () => {
+          await host.forgetPeer(peer);
+          log(`unpaired ${label(peer)}`);
+          render();
+        };
+        row.append(
+          Object.assign(document.createElement("td"), { textContent: label(peer) }),
+          Object.assign(document.createElement("td"), { textContent: peer.connected ? "connected" : "away" }),
+          Object.assign(document.createElement("td"), {}),
+        );
+        row.lastChild.append(forget);
+        return row;
+      }),
+    );
+  }
+
+  for (const name of ["peer-joined", "peer-left", "refused", "invitation-expired", "relay-lost"]) {
+    host.events.addEventListener(name, (event) => {
+      const peer = event.detail?.peer;
+      log(`${name} ${typeof peer === "string" ? peer.slice(0, 12) : peer ? label(peer) : ""}`);
+      render();
+    });
+  }
+
+  host.onRequest((peer, text) => {
+    log(`${label(peer)} asked: ${text}`);
+    return text.toUpperCase();
+  });
+
+  $("invite").onclick = async () => {
+    try {
+      const invitation = await host.invite({ singleUse: true });
+      $("code").textContent = invitation.code;
+      log(`a single-use invitation, good until ${invitation.expiresAt.toLocaleTimeString()}`);
+    } catch (error) {
+      log(error.message);
+    }
+  };
+  $("forget").onclick = async () => {
+    await host.close();
+    await TailcatHost.forget(APP);
+    location.reload();
+  };
+  $("invite").disabled = $("forget").disabled = false;
+  render();
+</script>
+</html>

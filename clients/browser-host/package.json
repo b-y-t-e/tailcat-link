@@ -1,0 +1,29 @@
+{
+  "name": "@tailcat/link-host",
+  "version": "0.1.0",
+  "description": "Host a Tailcat link from a page or from Node: publish an invitation, admit the machines that join",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "exports": {
+    ".": "./src/index.js",
+    "./file-store": "./src/file-store.js"
+  },
+  "files": ["src"],
+  "sideEffects": false,
+  "scripts": {
+    "test": "node --test --test-timeout=60000 \"test/unit/*.test.mjs\"",
+    "example": "node examples/demo/serve.mjs",
+    "live": "node test/live.mjs"
+  },
+  "peerDependencies": {
+    "@tailcat/link": "0.1.0",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "@tailcat/link": "file:../browser",
+    "tweetnacl": "1.0.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -26,6 +26,7 @@ dotnet run --project src/Tailcat.Demo -- listen [--relay-only]
 dotnet run --project src/Tailcat.Demo -- connect <address>
 dotnet run --project src/Tailcat.Demo -- ping <address>
 dotnet run --project src/Tailcat.Demo -- host [--forget]
+dotnet run --project src/Tailcat.Demo -- join [<code>] [--forget]
 
 # Diagnosing a direct path that will not form. natcheck classifies this
 # machine's NAT; punch is bare UDP with none of this library involved, which
@@ -37,6 +38,12 @@ dotnet run --project src/Tailcat.Demo -- punch [ip:port]
 npm --prefix clients/browser ci
 npm --prefix clients/browser test
 npm --prefix clients/browser run interop -- <invitation-code>
+
+# The JavaScript host (clients/browser-host), built on the client's modules:
+npm --prefix clients/browser-host ci        # after clients/browser's
+npm --prefix clients/browser-host test
+npm --prefix clients/browser-host run live -- --self   # hosts and joins itself over a real relay
+npm --prefix clients/browser-host run live             # hosts; then tailcat-demo join <code>
 
 dotnet pack -c Release -o artifacts   # builds the four published packages
 python Deploy/publish.py --dry-run    # everything a release does but the push
@@ -72,6 +79,7 @@ Tailcat.WebDemo  the webdemo package
 Tailcat.Demo   tailcat-demo, for verifying a link between two machines
 
 clients/browser  the JavaScript client: the same link, in a page
+clients/browser-host  the JavaScript host: publishes a code, admits who joins
 ```
 
 `clients/browser` has no place in the solution — it is JavaScript — and CI
@@ -90,6 +98,19 @@ capability byte, both exchange headers, the offset and the blocks
 (`LinkVectorTests`, and `link-frames.test.mjs`). Add to those files when you
 change a format, and put the hex there rather than in a test of one side: two
 literals that agree today are two literals, not a vector.
+
+`clients/browser-host` is the hosting end, and is deliberately *not* a second
+copy of the link: it imports the client's modules through
+`@tailcat/link/internal/*`, and every paired machine is a `TailcatLink` made by
+`TailcatLink._fromSource` with an `OfferedSessionSource` whose `pause` ends the
+moment a session is handed in (the host-side rule in "A backoff belongs to the
+end that dials"). What it adds is what only a host has: `relay-hub.js` answers
+hellos — once per session, with the same key on a repeat, into the dialler's
+region — `pairing-record.js` is `PairingRecord.cs`'s rules, and
+`pairing-accept.js` the host half of the handshake. Change a pairing rule in
+both places or in neither. Its tests stand a host and real `TailcatLink.join`
+pages up on an in-memory relay through the `connectRelay` seam both packages
+take.
 
 ## Publishing
 

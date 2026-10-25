@@ -140,6 +140,7 @@ direction that resumes into the handler already reading it.
 | `tests/Tailcat.Net.Tests` | (new) STUN, sealed messages, paths, and live session tests |
 | `tests/Tailcat.Link.Tests` | (new) pairing, stored identities, and self-healing links |
 | `clients/browser` | (new) the same link, in a page — `web/` is the nearest Go relative |
+| `clients/browser-host` | (new) the hosting end of it, in a page or in Node |
 
 ## What was ported
 
@@ -525,6 +526,16 @@ The machine being reached is written exactly as it always was —
 `TailcatLink.HostAsync`, `OnRequest` — and never learns that a browser
 arrived. See [clients/browser](../clients/browser/README.md).
 
+The other direction is `clients/browser-host`: a page or a Node process that
+*hosts*, publishing a code that a browser or a .NET machine joins. It answers
+the sealed hello itself, agreeing to `relay1` with a .NET dialler that offered
+QUIC first, and holds every paired machine in the client's own `TailcatLink`
+with its sessions handed in rather than dialled — the split `LinkHost` makes
+with one `LinkPeer` for both ends, so the pairing rules and the link cannot
+drift between the two. It measures its region by timing each relay's
+`/derp/probe` endpoint, since a page cannot send STUN, and pins it like any
+host. `tailcat-demo join <code>` is the .NET end to try it against.
+
 ### Not done yet
 
 - **Rekeying.** A session TLS certificate lives as long as the process.
@@ -572,6 +583,8 @@ TAILCAT_LIVE_TESTS=1 dotnet test # also the end-to-end tests over a public relay
 
 npm --prefix clients/browser ci
 npm --prefix clients/browser test   # the browser client, offline
+npm --prefix clients/browser-host ci
+npm --prefix clients/browser-host test   # the JavaScript host, offline
 ```
 
 CI runs both on every push (`.github/workflows/ci.yml`): the .NET tests on
@@ -620,5 +633,7 @@ one reference, and nobody else's project name gets claimed on a public feed.
 Anyone who wants the transport on its own can reference `src/Tailcat.Net`
 from a checkout.
 
-`clients/browser` is not published either. It carries a `package.json` and is
-importable from a checkout; putting it on npm is a separate decision.
+`clients/browser` is not published either, nor is `clients/browser-host`. Each
+carries a `package.json` and is importable from a checkout; putting them on npm
+is a separate decision, and the host names the exact client version it reaches
+into, so the two would go together.

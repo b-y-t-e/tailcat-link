@@ -123,13 +123,16 @@ export class DialingSessionSource {
 /// hello, the ephemeral exchange, and a relay1 session on top of the lot.
 export function relayDialer({ options, identity, peer }) {
   return async (signal) => {
-    const host = options.relayHost ?? (await relayHostFor(options.derpMap, peer.regionId));
-    const derp = await DerpConnection.connect({
-      url: `wss://${host}/derp`,
-      privateKey: identity.secretKey,
-      publicKey: identity.publicKey,
-      signal,
-    });
+    // `connectRelay` is the seam a test stands the whole handshake up on
+    // without a socket, as TailcatNodeOptions.ConnectRelay is on the .NET side.
+    const derp = options.connectRelay
+      ? await options.connectRelay({ regionId: peer.regionId, identity, signal })
+      : await DerpConnection.connect({
+          url: `wss://${options.relayHost ?? (await relayHostFor(options.derpMap, peer.regionId))}/derp`,
+          privateKey: identity.secretKey,
+          publicKey: identity.publicKey,
+          signal,
+        });
 
     try {
       const keys = await negotiate({ derp, options, identity, peer });

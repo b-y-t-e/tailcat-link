@@ -246,9 +246,11 @@ modules run unchanged; what differs is the TLS stack and IndexedDB.
 
 ## What it does not do
 
-- **Host.** A browser can only join. A host pins the relay region it first
-  measured and publishes an address that has to keep pointing at it, and a
-  page cannot promise that.
+- **Host.** This package only joins. Hosting is
+  [`@tailcat/link-host`](../browser-host), built on this one: a page or a Node
+  process that publishes a code and admits the machines that join it. A page
+  is a host only while it stays open, which is why Node is the usual place
+  for one.
 - **Leave the relay.** There is no direct path from a browser, ever. Every
   byte crosses the relay twice, and a session is as fast as the relay is.
 - **Survive a dropped record.** A gap in the counter ends the session and the

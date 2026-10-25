@@ -23,7 +23,10 @@ import { ExchangeLedger } from "./exchange-ledger.js";
 import { IndexedDbStore } from "./store.js";
 import { nacl } from "./nacl.js";
 
-const DEFAULTS = {
+// Exported for the host package, whose peers are links like this one: a copy
+// there would keep its old values the day these change, and the two ends of
+// one link would disagree.
+export const DEFAULTS = {
   derpMap: "/derpmap.json",
   requestTimeout: 30_000,
   // How long a request or notification sent as a string or bytes may go with
@@ -141,6 +144,22 @@ export class TailcatLink {
     });
 
     const link = new TailcatLink({ options: { ...options, appName }, source, store });
+    link.#run();
+    return link;
+  }
+
+  /// A link over sessions that something else produces: what
+  /// `@tailcat/link-host` keeps one of per paired machine, with sessions the
+  /// relay handed in already paired. Not for a page — `join` is — and kept
+  /// here rather than copied there so that the two ends of a link cannot
+  /// drift apart, which is the reason `LinkHost.cs` uses one `LinkPeer` for
+  /// both ends on the .NET side.
+  ///
+  /// @param source `{ nextSession(signal), pause?(ms, signal) }`. `pause`
+  ///   replaces the backoff between sessions, because a backoff belongs to the
+  ///   end that dials: see `ISessionSource.PauseAsync`.
+  static _fromSource({ options, source, store }) {
+    const link = new TailcatLink({ options: { ...DEFAULTS, ...options }, source, store });
     link.#run();
     return link;
   }
@@ -341,7 +360,7 @@ export class TailcatLink {
         this.#options.maxReconnectDelay,
         this.#options.minReconnectDelay * 2 ** Math.min(attempt++, 8),
       );
-      await delay(wait);
+      await (this.#source.pause ? this.#source.pause(wait, this.#closing.signal) : delay(wait));
     }
   }
 

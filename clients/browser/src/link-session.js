@@ -6,7 +6,7 @@
 // two apart is what makes either of them understandable. `LinkSession.cs` is
 // the .NET half.
 
-import { concat, delay, str, utf8 } from "./bytes.js";
+import { atMost, concat, delay, str, utf8 } from "./bytes.js";
 import { LinkTimeoutError, RemoteHandlerError } from "./errors.js";
 import { IncomingContent } from "./incoming-content.js";
 import { asContent } from "./link-content.js";
@@ -248,13 +248,20 @@ export class LinkSession {
     // durable and nothing is owed to it, while an answer already produced is
     // — and a handler sitting inside a channel's frames would otherwise hold
     // the whole drain open until its timeout.
-    await this.#endChannels("the link was closed");
+    // Not waited on past the timeout either: a channel's close lets its queued
+    // frames go first, and a peer that stopped reading never lets them, which
+    // held a host's forgetPeer — and the unpaired machine's session — open.
+    // One deadline for all three steps: `timeout` is what closing may cost,
+    // not what each part of it may.
+    const deadline = Date.now() + timeout;
+    const left = () => Math.max(0, deadline - Date.now());
+    await atMost(this.#endChannels("the link was closed"), left());
     if (this.#answering.size) {
-      await Promise.race([Promise.allSettled([...this.#answering]), delay(timeout)]);
+      await atMost(Promise.allSettled([...this.#answering]), left());
     }
     // Written is not sent: waiting only for the handlers leaves the sealed
     // records sitting in the socket's buffer, which closing then throws away.
-    await this.#connection.flush(timeout);
+    await this.#connection.flush(left());
   }
 
   close(error = new Error("the session was closed")) {
