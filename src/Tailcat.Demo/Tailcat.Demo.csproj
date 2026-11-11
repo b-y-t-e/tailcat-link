@@ -12,4 +12,15 @@
     <ProjectReference Include="..\Tailcat.Net\Tailcat.Net.csproj" />
   </ItemGroup>
 
+  <!--
+    QUIC on Windows 10, to be tried there: `dotnet run -p:OpenSslQuic=true`.
+    What an application does is the reference alone; the import is here only
+    because a project reference does not bring a package's targets with it,
+    and the package is how an application gets them.
+  -->
+  <ItemGroup Condition="'$(OpenSslQuic)' == 'true'">
+    <PackageReference Include="Microsoft.Native.Quic.MsQuic.OpenSSL" GeneratePathProperty="true" ExcludeAssets="all" />
+  </ItemGroup>
+  <Import Project="..\Tailcat.Link\buildTransitive\Tailcat.Link.targets" Condition="'$(OpenSslQuic)' == 'true'" />
+
 </Project>

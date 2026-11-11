@@ -325,8 +325,9 @@ public sealed class TailcatNode : IAsyncDisposable
     {
         options ??= new TailcatNodeOptions();
 
-        // QUIC is not everywhere: Windows 10 has none at all, and Linux needs
-        // libmsquic from the distribution. A node without it is not broken,
+        // QUIC is not everywhere: Windows 10 has none of its own (an
+        // application can bring one: the OpenSSL build of msquic, see
+        // Tailcat.Link.targets), and Linux needs libmsquic from the distribution. A node without it is not broken,
         // it simply has one transport fewer to offer — so what it can speak
         // is worked out here rather than being assumed, and only a node left
         // with nothing at all is refused.
@@ -340,8 +341,8 @@ public sealed class TailcatNode : IAsyncDisposable
             if (chosen.Contains(PeerTransport.Quic) && !QuicListener.IsSupported)
             {
                 throw new PlatformNotSupportedException(
-                    "QUIC was asked for but this platform has none (Windows 10 has none; " +
-                    "Linux needs libmsquic installed)");
+                    "QUIC was asked for but this platform has none (Windows 10 has none unless the " +
+                    "application references Microsoft.Native.Quic.MsQuic.OpenSSL; Linux needs libmsquic installed)");
             }
             transports = [.. chosen];
         }

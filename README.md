@@ -334,7 +334,9 @@ machine joined. More in [clients/browser](clients/browser/README.md).
 
 - **Requirements:** .NET 10. The direct path needs QUIC — Windows 11 / Server
   2022+, macOS, or Linux with `libmsquic`. Without it (e.g. Windows 10) the
-  link still works, only over the relay.
+  link still works, only over the relay. Windows 10 can be given QUIC by
+  referencing one package from your application; the `Tailcat.Link` package's
+  README says how.
 - **Some networks cannot be punched through.** Then everything stays on the
   relay: it works, just slower.
 - **Relays are Tailscale's public servers**, shared and rate-limited; they see

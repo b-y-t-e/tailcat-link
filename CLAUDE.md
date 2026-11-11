@@ -394,7 +394,20 @@ let one bounced probe abort the receive a peer's answer was arriving on. The
 path will not form, because a failed punch looks exactly like a peer that is
 switched off.
 
-**QUIC is narrower than "Windows, Linux, macOS"**: Windows 10 has none and
-Linux needs `libmsquic` from the distro. That is no longer fatal — such a
+**Windows 10 can be given QUIC, by the application.** What it lacks is TLS 1.3
+in Schannel, not QUIC: `System.Net.Quic` checks the Windows version only when
+the msquic it loaded says its TLS is Schannel. An application that references
+`Microsoft.Native.Quic.MsQuic.OpenSSL` with `GeneratePathProperty="true"` gets
+that build copied beside it by `Tailcat.Link.targets`, which also sets
+`System.Net.Quic.AppLocalMsQuic` and drops the runtime's own `msquic.dll` from
+a self-contained publish (same name, and a publish error). All three or it
+fails the silent way, relayed. It is not a dependency of the package on
+purpose: it changes the TLS stack on every Windows the application runs on.
+`dotnet run --project src/Tailcat.Demo -p:OpenSslQuic=true -- …` is the demo
+on it. Checked by running the tests on that DLL under Windows 11; nobody has
+yet run it on a Windows 10 machine.
+
+**QUIC is narrower than "Windows, Linux, macOS"**: Windows 10 has none of its
+own and Linux needs `libmsquic` from the distro. That is no longer fatal — such a
 node offers only `relay1` and works, relayed. A pair that can do QUIC still
 does, because the transport list is in preference order.

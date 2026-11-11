@@ -103,6 +103,15 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
                 "with no direct path. msquic.dll is probably missing beside the executable; publish with the " +
                 "Tailcat.Link package so it is copied there.");
         }
+        else if (OperatingSystem.IsWindows() && !System.Net.Quic.QuicListener.IsSupported)
+        {
+            // Said for the same reason: relayed works, so nothing else would
+            // ever point at the cause, and here there is something to do.
+            _log.Warn(
+                "This Windows has no QUIC of its own (it arrived with Windows 11 and Server 2022), so every session " +
+                "will go through the relay with no direct path. Referencing the Microsoft.Native.Quic.MsQuic.OpenSSL " +
+                "package from the application gives it one; see the Tailcat.Link README.");
+        }
     }
 
     /// <inheritdoc/>

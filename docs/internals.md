@@ -507,6 +507,24 @@ works; measured between a Windows 11 machine and a Windows 10 one, the two
 agreed on `relay1` with neither configured for it, and the session came up in
 107 ms against QUIC's 3.3 seconds. There is no QUIC handshake to do.
 
+That left Windows 10 relayed for good, and the reason turned out to be
+narrower than "no QUIC". What it lacks is TLS 1.3 in Schannel, which the
+`msquic.dll` .NET ships is built on; `System.Net.Quic` loads the library,
+asks it which TLS provider it has, and checks the Windows version *only* for
+Schannel (`MsQuicApi.cs`). Microsoft publishes the same library built against
+OpenSSL, as `Microsoft.Native.Quic.MsQuic.OpenSSL`, and that one passes. So an
+application that references the package gets QUIC on Windows 10, and with it
+everything `PeerLink` does: `Tailcat.Link.targets` copies the DLL beside the
+application, sets `System.Net.Quic.AppLocalMsQuic` so that the runtime loads
+it from there rather than from beside `System.Net.Quic`, and keeps the
+runtime's own copy out of a self-contained publish, where the two would land
+on one name. Nothing in the library changed. It is the application's choice
+and not a dependency of the package, because it swaps the TLS stack under
+QUIC on every Windows the application runs on and is a native binary someone
+has to keep current. `tailcat-demo` takes it with `-p:OpenSslQuic=true`,
+which is how to check a Windows 10 machine: `natcheck`, then `listen` and
+`connect`, and a route that says direct.
+
 The protocol is specified byte for byte in [docs/relay1.md](relay1.md),
 which is what let the JavaScript client be written against the document
 rather than against the code. It landed on the formats first time — and then

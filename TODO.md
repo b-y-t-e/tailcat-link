@@ -18,6 +18,16 @@ reach a peer whose announcement was heard locally. Open questions:
   in an invitation code;
 - `clients/browser` cannot do it (no UDP), so it stays .NET-only.
 
+## QUIC on Windows 10: try it on one
+
+`Microsoft.Native.Quic.MsQuic.OpenSSL` referenced by the application gives
+Windows 10 QUIC (`Tailcat.Link.targets`, the Tailcat.Link README). Loaded and
+tested under Windows 11 only. On a Windows 10 machine:
+`dotnet run --project src/Tailcat.Demo -p:OpenSslQuic=true -- listen`, connect
+to it from another machine, and see the route go direct. If it does, consider
+a CI job that publishes a consumer with the reference, as `single-file-quic`
+does without it.
+
 ## The direct path between JavaScript ends: what is left
 
 `directPath` (WebRTC carrying relay1 records, `docs/relay1.md`, *A direct
