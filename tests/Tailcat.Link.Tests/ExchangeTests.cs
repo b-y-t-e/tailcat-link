@@ -407,6 +407,140 @@ public class ExchangeTests
     }
 
     /// <summary>
+    /// A handler that gives up on something of its own — a timeout, a connect
+    /// it cancelled — has refused the request, and the sender hears that. It
+    /// used to be taken for the session failing: the sender saw a broken
+    /// stream, tried again into the same cancelled outcome, and timed out.
+    /// </summary>
+    [Fact]
+    public async Task AHandlersOwnCancellationIsARefusalNotABrokenSession()
+    {
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(2));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        FakeRelayGatewayFactory gateways = new(relay);
+        (ILink host, ILink peer) = await PairAsync(gateways, ct);
+        await using (host)
+        await using (peer)
+        {
+            int handlerRuns = 0;
+            host.OnRequest((_, _) =>
+            {
+                Interlocked.Increment(ref handlerRuns);
+                return Task.FromException<LinkContent>(new TaskCanceledException("the lookup timed out"));
+            });
+
+            RemoteHandlerException refused = await Assert.ThrowsAsync<RemoteHandlerException>(
+                () => peer.RequestAsync(new byte[] { 1, 2, 3 }, ct));
+
+            Assert.Contains("the lookup timed out", refused.Message, StringComparison.Ordinal);
+            Assert.Equal(1, handlerRuns);
+        }
+    }
+
+    /// <summary>
+    /// Content that fails to read is this machine's own trouble: the caller
+    /// is told, once, and the session carries on. It used to be taken for the
+    /// session dying, which ended a healthy one and tried again on the next.
+    /// </summary>
+    [Fact]
+    public async Task ContentThatCannotBeReadFailsTheSendAndLeavesTheSessionUp()
+    {
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(2));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        FakeRelayGatewayFactory gateways = new(relay);
+        (ILink host, ILink peer) = await PairAsync(gateways, ct);
+        await using (host)
+        await using (peer)
+        {
+            host.OnRequest((_, _) => Task.FromResult(LinkContent.FromString("still here")));
+            int sessionsEnded = 0;
+            peer.Disconnected += _ => Interlocked.Increment(ref sessionsEnded);
+
+            LinkContentException failed = await Assert.ThrowsAsync<LinkContentException>(
+                () => peer.RequestAsync(LinkContent.FromStream(new UnreadableStream()), ct));
+            Assert.IsType<IOException>(failed.InnerException);
+
+            await using IncomingTransfer answer = await peer.RequestAsync(LinkContent.FromString("anyone?"), ct);
+            Assert.Equal("still here", await answer.ReadAllTextAsync(ct));
+            Assert.Equal(0, sessionsEnded);
+        }
+    }
+
+    /// <summary>
+    /// An answer whose content gives out while it is being sent is a refusal
+    /// the asker hears, with the reason. Every retry used to open it again
+    /// and break at the same place, until the asker's patience ran out and it
+    /// was told the peer had not answered in time.
+    /// </summary>
+    [Fact]
+    public async Task AnAnswerThatCannotBeReadIsARefusalNotATimeout()
+    {
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(2));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        FakeRelayGatewayFactory gateways = new(relay);
+        (ILink host, ILink peer) = await PairAsync(gateways, ct);
+        await using (host)
+        await using (peer)
+        {
+            host.OnRequest((_, _) => Task.FromResult(LinkContent.FromStream(new UnreadableStream())));
+
+            RemoteHandlerException refused = await Assert.ThrowsAsync<RemoteHandlerException>(
+                () => peer.RequestAsync(new byte[] { 1, 2, 3 }, ct));
+
+            Assert.Contains("the device is not ready", refused.Message, StringComparison.Ordinal);
+        }
+    }
+
+    private sealed class UnreadableStream : MemoryStream
+    {
+        public override bool CanSeek => false;
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            throw new IOException("the device is not ready");
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            throw new IOException("the device is not ready");
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new IOException("the device is not ready");
+    }
+
+    /// <summary>
+    /// What the application's log sink throws stays in the sink: it is called
+    /// from the loops that keep a link up, and a closed window on the other
+    /// side of it must not be what stops them.
+    /// </summary>
+    [Fact]
+    public async Task AThrowingLogSinkDoesNotStopTheLink()
+    {
+        using CancellationTokenSource cts = Deadline(TimeSpan.FromMinutes(2));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        FakeRelayGatewayFactory gateways = new(relay);
+        LinkOptions noisy = OptionsFor(gateways, new InMemoryLinkStore()) with
+        {
+            Log = _ => throw new InvalidOperationException("the window is closed"),
+        };
+        (ILink host, ILink peer) = await PairAsync(gateways, ct, hostOptions: noisy);
+        await using (host)
+        await using (peer)
+        {
+            host.OnRequest((_, _) => Task.FromResult(LinkContent.FromString("still here")));
+
+            await using IncomingTransfer answer = await peer.RequestAsync(LinkContent.FromString("anyone?"), ct);
+
+            Assert.Equal("still here", await answer.ReadAllTextAsync(ct));
+        }
+    }
+
+    /// <summary>
     /// A machine that says it takes neither exchanges nor large frames is
     /// refused a request at once, rather than sent a shape it did not ask for.
     /// </summary>

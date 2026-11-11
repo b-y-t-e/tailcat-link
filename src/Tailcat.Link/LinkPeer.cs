@@ -239,12 +239,16 @@ internal sealed class LinkPeer : ILinkPeer, IPeerSessions, IAsyncDisposable
     public void AcceptSession(ITailcatConnection connection, OfferedSessionSource offered)
     {
         ArgumentNullException.ThrowIfNull(offered);
-        offered.Offer(connection);
+
+        // Read before the offer, not after: the offer wakes the supervision
+        // loop, which on a host sets the new session without a pause, and the
+        // session read afterwards could be the very one just handed in.
         LinkSession? stale;
         lock (_mu)
         {
             stale = _session;
         }
+        offered.Offer(connection);
         stale?.Fail("the peer opened another session");
     }
 

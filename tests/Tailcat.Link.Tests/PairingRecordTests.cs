@@ -369,6 +369,56 @@ public class PairingRecordTests
     }
 
     /// <summary>
+    /// A paired machine coming back is let in whatever the disk does: all
+    /// there is to write is when it was last seen. A full disk used to refuse
+    /// every paired machine for as long as it stayed full. A stranger is
+    /// another matter — its pairing is not made until it is written.
+    /// </summary>
+    [Fact]
+    public async Task AKnownMachineIsAdmittedEvenWhenItsLastSeenCannotBeSaved()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        FailingLinkStore store = new();
+        List<string> warnings = [];
+        PairingRecord host = new(
+            "demo",
+            new LinkState { PrivateKey = NodePrivate.NewKey() },
+            store,
+            _clock,
+            maxPeers: 2,
+            saveFailed: (message, _) => warnings.Add(message));
+        PairingOffer offer = await host.OfferPairingAsync(Window, ct);
+        NodePublic paired = NodePrivate.NewKey().Public();
+        Assert.NotNull(await host.AdmitAsync(paired, new LinkHello(offer.Token, null), ct));
+
+        store.Failing = true;
+        _clock.Advance(TimeSpan.FromMinutes(1));
+
+        PairedPeer? back = await host.AdmitAsync(paired, new LinkHello(offer.Token, null), ct);
+        Assert.NotNull(back);
+        Assert.Equal(_clock.GetUtcNow(), back.LastSeen);
+        Assert.Single(warnings);
+
+        NodePublic stranger = NodePrivate.NewKey().Public();
+        await Assert.ThrowsAsync<IOException>(
+            () => host.AdmitAsync(stranger, new LinkHello(offer.Token, null), ct));
+    }
+
+    private sealed class FailingLinkStore : ILinkStore
+    {
+        public bool Failing { get; set; }
+
+        public Task<LinkState?> LoadAsync(string appName, CancellationToken cancellationToken = default) =>
+            Task.FromResult<LinkState?>(null);
+
+        public Task SaveAsync(string appName, LinkState state, CancellationToken cancellationToken = default) =>
+            Failing ? Task.FromException(new IOException("the disk is full")) : Task.CompletedTask;
+
+        public Task DeleteAsync(string appName, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
+    }
+
+    /// <summary>
     /// A store whose first write hangs until it is let go, which is what a
     /// slow disk looks like from here.
     /// </summary>

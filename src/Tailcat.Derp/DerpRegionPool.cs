@@ -248,14 +248,28 @@ public sealed class DerpRegionPool : IAsyncDisposable
                 return;
             }
             _lastUsed.TryRemove(evicted, out _);
-            try
-            {
-                await (await entry.Value.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is TailcatException or IOException or ObjectDisposedException or OperationCanceledException)
-            {
-            }
+            await CloseAsync(entry).ConfigureAwait(false);
         }
+    }
+
+    // An entry can hold a dial that failed: a caller whose wait was cancelled
+    // leaves it in place, and it may fault afterwards with whatever a socket
+    // or a handshake throws. There is nothing to close in that case, and it
+    // must not stop the entries after it from being closed.
+    private static async Task CloseAsync(Lazy<Task<DerpConnection>> entry)
+    {
+        DerpConnection connection;
+        try
+        {
+            connection = await entry.Value.ConfigureAwait(false);
+        }
+#pragma warning disable CA1031 // A dial that failed, however it failed, left nothing behind to close.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+            return;
+        }
+        await connection.DisposeAsync().ConfigureAwait(false);
     }
 
     /// <summary>Closes every relay connection.</summary>
@@ -272,13 +286,7 @@ public sealed class DerpRegionPool : IAsyncDisposable
 
         foreach (Lazy<Task<DerpConnection>> entry in _connections.Values)
         {
-            try
-            {
-                await (await entry.Value.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is TailcatException or IOException or ObjectDisposedException or OperationCanceledException)
-            {
-            }
+            await CloseAsync(entry).ConfigureAwait(false);
         }
         _connections.Clear();
         _cts.Dispose();

@@ -2,6 +2,7 @@
 // Copyright (c) Andrzej Ból and contributors (.NET port)
 // SPDX-License-Identifier: BSD-3-Clause
 
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
@@ -69,7 +70,7 @@ public static class SocksAddr
             }
         }
 
-        if (!IPAddress.TryParse(host, out IPAddress? ip))
+        if (!TryParseLiteral(host, out IPAddress? ip))
         {
             IReadOnlyList<IPAddress> ips = await lookup(host, cancellationToken).ConfigureAwait(false);
             if (ips.Count == 0)
@@ -88,6 +89,33 @@ public static class SocksAddr
         }
 
         return new SocksTarget(Dst: new IPEndPoint(Unmap(ip), portNum));
+    }
+
+    // IPAddress.TryParse reads "10", "127.1" and "0x7f.1" as IPv4 addresses.
+    // Go's netip.ParseAddr takes only four decimal parts, and anything else is
+    // a hostname to resolve: "10:80" must not be dialled as 0.0.0.10.
+    private static bool TryParseLiteral(string host, [NotNullWhen(true)] out IPAddress? ip)
+    {
+        ip = null;
+        if (!host.Contains(':', StringComparison.Ordinal))
+        {
+            string[] parts = host.Split('.');
+            if (parts.Length != 4)
+            {
+                return false;
+            }
+            foreach (string part in parts)
+            {
+                bool decimalOctet = part.Length is >= 1 and <= 3
+                    && part.All(char.IsAsciiDigit)
+                    && (part.Length == 1 || part[0] != '0');
+                if (!decimalOctet)
+                {
+                    return false;
+                }
+            }
+        }
+        return IPAddress.TryParse(host, out ip);
     }
 
     // Unmap turns an IPv4-mapped IPv6 address back into a plain IPv4 one, as

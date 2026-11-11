@@ -98,7 +98,15 @@ public sealed class FileLinkStore : ILinkStore
                 "link state does not travel between machines — delete the file to pair again");
         }
 
-        byte[] key = _protector.Unprotect(Convert.FromBase64String(stored.PrivateKey));
+        byte[] key;
+        try
+        {
+            key = _protector.Unprotect(Convert.FromBase64String(stored.PrivateKey));
+        }
+        catch (FormatException ex)
+        {
+            throw new LinkException($"{path} is not readable as link state", ex);
+        }
         try
         {
             (IReadOnlyList<PairingOffer> pairings, IReadOnlyList<PairedPeer> peers) = ReadPairings(stored);
@@ -160,6 +168,11 @@ public sealed class FileLinkStore : ILinkStore
             await using (FileStream file = Create(temporary))
             {
                 await JsonSerializer.SerializeAsync(file, stored, Json, cancellationToken).ConfigureAwait(false);
+
+                // On the disk before the rename, not merely in the cache: a
+                // rename can survive a power cut that its file's contents did
+                // not, and what comes back then is the identity, empty.
+                file.Flush(flushToDisk: true);
             }
             File.Move(temporary, path, overwrite: true);
         }

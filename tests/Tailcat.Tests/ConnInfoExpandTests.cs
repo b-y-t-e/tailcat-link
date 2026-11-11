@@ -169,6 +169,21 @@ public class ConnInfoExpandTests
         Assert.Equal(SomeKey(), ci.ServerPublic);
     }
 
+    /// <summary>
+    /// The map handed in through the options is the caller's: resolving a
+    /// blob against it must not cost it the nodes the blob leaves out.
+    /// </summary>
+    [Fact]
+    public async Task ResolveLeavesTheCallersMapWhole()
+    {
+        ConnBlob blob = new ConnInfo { ServerPublic = SomeKey(), RegionID = 3 }.ToConnBlob();
+        DerpMap map = MapOf(Region(3, "a.example", "b.example", "c.example"));
+
+        await blob.ResolveAsync(new ExpandOptions { DerpMap = map }, TestContext.Current.CancellationToken);
+
+        Assert.Equal(3, map.Regions[3].Nodes.Count);
+    }
+
     private sealed class FixedRegionPicker(int regionID) : IRegionPicker
     {
         public Task<int> PickBestRegionAsync(DerpMap derpMap, CancellationToken cancellationToken = default) =>

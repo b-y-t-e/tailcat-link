@@ -50,6 +50,9 @@ export class PairingRecord {
   #now;
   #lastWrite = Promise.resolve();
 
+  /// Told when a write nothing depends on did not happen. Set by the host.
+  onSaveFailed = null;
+
   constructor({ appName, store, state, maxPeers, now }) {
     this.#appName = appName;
     this.#store = store;
@@ -222,8 +225,10 @@ export class PairingRecord {
     const now = this.#now();
     let admitted = null;
     let lapsed = false;
+    let onlyRefreshes = false;
     const write = this.#update((current) => {
       const known = current.peers.find((peer) => peer.key === key);
+      onlyRefreshes = Boolean(known);
       const invitation = current.pairings.find((offer) => !expired(offer, now) && matches(offer, pairingToken));
       if (!known && (current.peers.length >= this.#maxPeers || !invitation)) {
         lapsed =
@@ -249,8 +254,12 @@ export class PairingRecord {
       };
     });
     // Answered only once it is written: a pairing the store lost on the way
-    // is a machine that is paired today and a stranger after a restart.
-    await write;
+    // is a machine that is paired today and a stranger after a restart. A
+    // machine already paired is another matter, as in PairingRecord.cs: all
+    // there is to write is when it was last seen, and a store that is full or
+    // locked must not be what keeps it out, at every attempt, over that.
+    if (onlyRefreshes) await write.catch((error) => this.onSaveFailed?.(error));
+    else await write;
     return { admitted, lapsed };
   }
 

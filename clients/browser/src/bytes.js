@@ -155,6 +155,14 @@ export class Queue {
     if (this.closed) throw this.closed;
     const waiter = new Deferred();
     this.waiters.push(waiter);
-    return withAbort(waiter.promise, signal);
+    try {
+      return await withAbort(waiter.promise, signal);
+    } catch (error) {
+      // A wait that was given up on must not stay in the queue: the next push
+      // would hand its item to nobody.
+      const at = this.waiters.indexOf(waiter);
+      if (at >= 0) this.waiters.splice(at, 1);
+      throw error;
+    }
   }
 }

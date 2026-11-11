@@ -8,7 +8,7 @@
 // a session that never touched a socket, the way
 // `TailcatNodeOptions.ConnectRelay` does on the .NET side.
 
-import { equal, withTimeout } from "./bytes.js";
+import { equal, readU64be, withTimeout } from "./bytes.js";
 import { DerpConnection, relayHostFor } from "./derp.js";
 import {
   PeerMessageType,
@@ -145,28 +145,41 @@ export function relayDialer({ options, identity, peer }) {
   };
 }
 
+const HELLO_RESEND_MS = 500;
+
 // The hello and its answer: which transport the two have in common, and the
 // two ephemeral halves the traffic keys come out of.
 async function negotiate({ derp, options, identity, peer }) {
   const sessionId = Number(BigInt.asUintN(48, BigInt(Date.now())) * 1000n + BigInt(Math.floor(Math.random() * 1000)));
   const ephemeral = nacl.box.keyPair();
 
-  derp.sendPacket(
+  const hello = seal(
+    PeerMessageType.Hello,
+    encodeHello({
+      sessionId,
+      homeRegionId: peer.regionId,
+      transports: [PeerTransport.Relay1],
+      ephemeral: ephemeral.publicKey,
+    }),
+    identity.secretKey,
     peer.serverPublic,
-    seal(
-      PeerMessageType.Hello,
-      encodeHello({
-        sessionId,
-        homeRegionId: peer.regionId,
-        transports: [PeerTransport.Relay1],
-        ephemeral: ephemeral.publicKey,
-      }),
-      identity.secretKey,
-      peer.serverPublic,
-    ),
   );
+  derp.sendPacket(peer.serverPublic, hello);
 
-  const ack = await withTimeout(awaitHelloAck(derp, identity, peer), options.handshakeTimeout, "the host");
+  // The same hello again every half second until it is answered, as
+  // TailcatNode.SendUntilAnsweredAsync does: a relay drops what it cannot
+  // deliver, and the host's connection to it may be mid-reconnect. Sent once,
+  // one lost packet cost the whole handshake timeout. The host answers a
+  // repeat with the same key, so the copies are harmless.
+  const resend = setInterval(() => {
+    if (!derp.closed) derp.sendPacket(peer.serverPublic, hello);
+  }, HELLO_RESEND_MS);
+  let ack;
+  try {
+    ack = await withTimeout(awaitHelloAck(derp, identity, peer, sessionId), options.handshakeTimeout, "the host");
+  } finally {
+    clearInterval(resend);
+  }
   if (ack.transports.length !== 1 || ack.transports[0] !== PeerTransport.Relay1) {
     throw new Error(
       `no transport in common: this client speaks [relay1], the host answered [${ack.transports.join(", ")}]`,
@@ -183,13 +196,19 @@ async function negotiate({ derp, options, identity, peer }) {
   });
 }
 
-async function awaitHelloAck(derp, identity, peer) {
+async function awaitHelloAck(derp, identity, peer, sessionId) {
   for (;;) {
     const packet = await derp.packets.next();
     if (!isPeerMessage(packet.payload)) continue;
     if (peerMessageType(packet.payload) !== PeerMessageType.HelloAck) continue;
     const opened = openPeerMessage(packet.payload, identity.secretKey, peer.serverPublic);
     if (!opened) continue;
+    // An answer to the dial before this one names that dial's session. Every
+    // dial is a new socket under the same key, so the relay hands a late one
+    // to whichever is open now; taken, it gave this session the other's
+    // ephemeral key, and nothing either end sent would open. TailcatNode
+    // checks the same on its side.
+    if (opened.payload.length < 8 || readU64be(opened.payload, 0) !== BigInt(sessionId)) continue;
     return decodeHello(opened.payload);
   }
 }

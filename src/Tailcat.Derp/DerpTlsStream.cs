@@ -147,13 +147,15 @@ internal sealed class DerpTlsStream : Stream
             }
 
             // Reading can produce output of its own (a key update, an alert).
-            if (queued is not null)
-            {
-                await _outbound.Writer.WriteAsync(queued, cancellationToken).ConfigureAwait(false);
-            }
+            // Before the output is queued: what was decrypted has left the
+            // protocol and exists nowhere else if that write fails.
             if (decrypted is not null)
             {
                 (_pending, _pendingOffset) = (decrypted, 0);
+            }
+            if (queued is not null)
+            {
+                await QueueAsync(queued, cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -178,7 +180,23 @@ internal sealed class DerpTlsStream : Stream
         }
         if (queued is not null)
         {
-            await _outbound.Writer.WriteAsync(queued, cancellationToken).ConfigureAwait(false);
+            await QueueAsync(queued, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    // Closing this stream completes the channel, and a writer parked on it —
+    // or arriving a moment later — is told ChannelClosedException. Nothing
+    // above expects that from a stream: it escaped every filter written for a
+    // connection going away, and ended the probe and liveness loops it reached.
+    private async ValueTask QueueAsync(byte[] records, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _outbound.Writer.WriteAsync(records, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ChannelClosedException)
+        {
+            throw new ObjectDisposedException(nameof(DerpTlsStream));
         }
     }
 

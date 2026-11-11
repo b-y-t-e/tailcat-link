@@ -150,6 +150,10 @@ internal sealed class Relay1Connection : ITailcatConnection
         await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            // Again, now that the wait is over: a sender queued behind another
+            // when the session closed is let through by the one ahead of it,
+            // and has to hear why rather than seal a record nobody will open.
+            ThrowIfEnded();
             if (_sendCounter == ulong.MaxValue)
             {
                 throw new TailcatException("this relay1 session has sent as many records as its keys allow");
@@ -307,7 +311,12 @@ internal sealed class Relay1Connection : ITailcatConnection
             stream.OnSessionClosed(_endedBecause);
         }
         _streams.Clear();
-        _sendLock.Dispose();
+
+        // _sendLock is never disposed, for the reason DerpFrameStream gives
+        // for its own: a disposed SemaphoreSlim wakes nobody. A stream's FIN
+        // queued here with no cancellation waited for good, and the sender
+        // ahead of it had its Release throw "disposed object" over the reason
+        // the session ended for.
 
         if (_onClosed is not null)
         {

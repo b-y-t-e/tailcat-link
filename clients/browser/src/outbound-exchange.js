@@ -69,6 +69,11 @@ export class OutboundExchange {
   /// receiver decides: it is the one that knows which blocks made it out of a
   /// session that then died.
   rewindTo(offset) {
+    // Where it already is, is not movement, as OutboundTransfer.RewindTo has
+    // it: a peer that answers every attempt's offset and then takes nothing
+    // would otherwise renew the patience each time, and "no answer within"
+    // would never be said.
+    if (offset === this.sent) return;
     this.sent = offset;
     this.moved();
   }
@@ -289,12 +294,19 @@ export class ExchangeSender {
   /// saturated link can outpace, and waiting for it is silence all the same.
   async #readyWithin(left, signal) {
     const patience = new IdleTimeout(left);
-    const either = signal ? AbortSignal.any([signal, patience.signal]) : patience.signal;
+    // The link closing ends the wait too, as `Stopping` does in ExchangeSender:
+    // without it a request made while disconnected sat out its whole patience
+    // after close() before saying the link was closed.
+    const stopping = this.#sessions.stopping;
+    const either = AbortSignal.any(signal ? [signal, patience.signal, stopping] : [patience.signal, stopping]);
     try {
       const session = await abortable(this.#sessions.current(), either);
       const capabilities = await abortable(session.capabilities(), either);
       return { session, capabilities };
     } catch (error) {
+      if (stopping.aborted && !signal?.aborted) {
+        throw this.#sessions.fatal() ?? new LinkClosedError("the link is closed");
+      }
       if (patience.expired && !signal?.aborted) return null;
       throw error;
     } finally {

@@ -97,11 +97,18 @@ public static class Proxy
         ArgumentNullException.ThrowIfNull(a);
         ArgumentNullException.ThrowIfNull(b);
 
-        await Task.WhenAll(CopyAsync(a, b, cancellationToken), CopyAsync(b, a, cancellationToken))
-            .ConfigureAwait(false);
-
-        Close(a);
-        Close(b);
+        try
+        {
+            await Task.WhenAll(CopyAsync(a, b, cancellationToken), CopyAsync(b, a, cancellationToken))
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            // The interface is public, so a stream may fail with something a
+            // copy does not swallow. The proxy owns both ends either way.
+            Close(a);
+            Close(b);
+        }
     }
 
     private static async Task CopyAsync(
@@ -118,10 +125,14 @@ public static class Proxy
             // As in Go, a copy error just ends that direction; the shutdown
             // below still runs so the peer isn't left waiting.
         }
-
-        if (!dst.TryCloseWrite())
+        finally
         {
-            Close(dst);
+            // Also on an error nothing above swallows: the other direction is
+            // still reading, and only this shutdown tells it to stop.
+            if (!dst.TryCloseWrite())
+            {
+                Close(dst);
+            }
         }
     }
 

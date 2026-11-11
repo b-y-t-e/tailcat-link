@@ -184,6 +184,12 @@ internal sealed class ExchangeSender
                 // again would reach the same decision.
                 throw;
             }
+            catch (LinkContentException)
+            {
+                // This machine's own content failed to read. The next attempt
+                // would read it again and fail again.
+                throw;
+            }
             catch (LinkException ex) when (!running.IsCancellationRequested)
             {
                 if (exchange.OnlyOnce)

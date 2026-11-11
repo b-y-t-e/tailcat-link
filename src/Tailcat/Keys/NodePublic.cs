@@ -24,6 +24,12 @@ public readonly struct NodePublic : IEquatable<NodePublic>
 
     private readonly byte[]? _raw;
 
+    // The key without the copy Raw32 makes: a key is a dictionary key in
+    // every session table, and each lookup hashed and compared clones.
+    private static readonly byte[] Zero = new byte[RawLen];
+
+    private ReadOnlySpan<byte> Bytes => _raw ?? Zero;
+
     private NodePublic(byte[] raw) => _raw = raw;
 
     /// <summary>Builds a key from its 32 raw bytes, which are copied.</summary>
@@ -74,14 +80,14 @@ public readonly struct NodePublic : IEquatable<NodePublic>
         }
     }
 
-    public bool Equals(NodePublic other) => Raw32().AsSpan().SequenceEqual(other.Raw32());
+    public bool Equals(NodePublic other) => Bytes.SequenceEqual(other.Bytes);
 
     public override bool Equals([NotNullWhen(true)] object? obj) => obj is NodePublic other && Equals(other);
 
     public override int GetHashCode()
     {
         HashCode h = new();
-        h.AddBytes(Raw32());
+        h.AddBytes(Bytes);
         return h.ToHashCode();
     }
 

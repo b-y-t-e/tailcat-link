@@ -45,6 +45,15 @@ public class SocksAddrTests
             new SocksTarget(Dst: Ap("10.1.2.3:80"))
         },
         {
+            // Not 0.0.0.10: Go's netip.ParseAddr takes four decimal parts only.
+            "short_ipv4_form_is_a_hostname", "10:80", LookupOf("192.0.2.1"),
+            new SocksTarget(Dst: Ap("192.0.2.1:80"))
+        },
+        {
+            "hex_ipv4_form_is_a_hostname", "0x7f.1:80", LookupOf("192.0.2.1"),
+            new SocksTarget(Dst: Ap("192.0.2.1:80"))
+        },
+        {
             "ipv6_literal", "[2001:db8::1]:443", NoLookup,
             new SocksTarget(Dst: Ap("[2001:db8::1]:443"))
         },
@@ -80,6 +89,7 @@ public class SocksAddrTests
         { "hostname_no_addresses", "example.com:80", LookupOf() },
         { "missing_port", "example.com", NoLookup },
         { "bad_port", "example.com:99999", NoLookup },
+        { "two_ports_after_a_bracket", "[::1]:80:90", NoLookup },
     };
 
     [Theory]

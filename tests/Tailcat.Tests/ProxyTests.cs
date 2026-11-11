@@ -102,6 +102,51 @@ public class ProxyTests
         await proxyTask;
     }
 
+    /// <summary>
+    /// The proxy owns both ends whatever a copy fails with. A stream that
+    /// threw something other than an I/O error used to leave both open, and
+    /// the far side without the shutdown that tells it to stop.
+    /// </summary>
+    [Fact]
+    public async Task ProxyClosesBothEndsWhenACopyFailsUnexpectedly()
+    {
+        Recording broken = new(new ThrowingStream());
+        Recording other = new(new MemoryStream());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => Proxy.ConnsAsync(broken, other, TestContext.Current.CancellationToken));
+
+        Assert.True(broken.Closed);
+        Assert.True(other.Closed);
+        Assert.True(other.WriteClosed);
+    }
+
+    private sealed class Recording(Stream stream) : IHalfCloseableStream, IDisposable
+    {
+        public Stream Stream => stream;
+
+        public bool Closed { get; private set; }
+
+        public bool WriteClosed { get; private set; }
+
+        public bool TryCloseWrite()
+        {
+            WriteClosed = true;
+            return true;
+        }
+
+        public void Dispose() => Closed = true;
+    }
+
+    private sealed class ThrowingStream : MemoryStream
+    {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("not an I/O error");
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("not an I/O error");
+    }
+
     private static Socket Listen()
     {
         Socket s = new(SocketType.Stream, ProtocolType.Tcp);

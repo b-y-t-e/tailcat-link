@@ -30,7 +30,13 @@ internal static class HostPort
             {
                 throw new FormatException($"missing port in address {addr}");
             }
-            return (addr[1..end], addr[(end + 2)..]);
+            string bracketedPort = addr[(end + 2)..];
+            if (bracketedPort.Contains(':', StringComparison.Ordinal))
+            {
+                // "[::1]:80:90": Go splits at the last colon and rejects this.
+                throw new FormatException($"too many colons in address {addr}");
+            }
+            return (addr[1..end], bracketedPort);
         }
 
         int colon = addr.LastIndexOf(':');

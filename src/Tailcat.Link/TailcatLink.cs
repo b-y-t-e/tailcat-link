@@ -308,6 +308,7 @@ public static class TailcatLink
             state = new LinkState { PrivateKey = NodePrivate.NewKey() };
             await options.Store.SaveAsync(appName, state, cancellationToken).ConfigureAwait(false);
         }
-        return new PairingRecord(appName, state, options.Store, options.TimeProvider, options.MaxPeers);
+        Diagnostics.LinkLog log = new(options.LoggerFactory?.CreateLogger<ILink>(), options.Log);
+        return new PairingRecord(appName, state, options.Store, options.TimeProvider, options.MaxPeers, log.Warn);
     }
 }

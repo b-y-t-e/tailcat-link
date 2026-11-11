@@ -14,6 +14,20 @@ namespace Tailcat.Tests;
 /// </summary>
 public class KeyTests
 {
+    /// <summary>
+    /// The unset key and thirty-two zero bytes are one key, to equality and
+    /// to a dictionary alike.
+    /// </summary>
+    [Fact]
+    public void TheUnsetKeyEqualsTheZeroBytes()
+    {
+        NodePublic zeros = NodePublic.FromRaw32(new byte[NodePublic.RawLen]);
+
+        Assert.Equal(default, zeros);
+        Assert.Equal(default(NodePublic).GetHashCode(), zeros.GetHashCode());
+        Assert.Equal(default, DiscoPublic.FromRaw32(new byte[DiscoPublic.RawLen]));
+    }
+
     [Fact]
     public void ZeroKeysAreZero()
     {

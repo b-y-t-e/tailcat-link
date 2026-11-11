@@ -24,12 +24,16 @@ namespace Tailcat.Link.Storage;
 /// than a resource one: every admitted peer can reach the application's
 /// handler.
 /// </param>
+/// <param name="saveFailed">
+/// Told when a write nothing waits on did not happen: see <c>UpdateAsync</c>.
+/// </param>
 internal sealed class PairingRecord(
     string appName,
     LinkState state,
     ILinkStore store,
     TimeProvider time,
-    int maxPeers = 1)
+    int maxPeers = 1,
+    Action<string, Exception>? saveFailed = null)
     : IPairingPolicy
 {
     private readonly Lock _mu = new();
@@ -69,8 +73,18 @@ internal sealed class PairingRecord(
     /// trusts, so there is no invitation to check. A host reaches its peers
     /// through <see cref="AdmitAsync"/> instead.
     /// </remarks>
-    public Task PairWithAsync(NodePublic peer, string? name = null, CancellationToken cancellationToken = default) =>
-        UpdateAsync(current => WithPeer(current, peer, name), cancellationToken);
+    public Task PairWithAsync(NodePublic peer, string? name = null, CancellationToken cancellationToken = default)
+    {
+        bool known = false;
+        return UpdateAsync(
+            current =>
+            {
+                known = current.PeerWith(peer) is not null;
+                return WithPeer(current, peer, name);
+            },
+            cancellationToken,
+            onlyRefreshes: () => known);
+    }
 
     /// <summary>
     /// Returns the offer this host should publish, minting a fresh one when
@@ -217,6 +231,7 @@ internal sealed class PairingRecord(
     {
         PairedPeer? admitted = null;
         bool lapsed = false;
+        bool known = false;
         // The decision is made inside the update so that it and the pinning
         // are one step: two strangers arriving at once must not both be told
         // yes, with only the first of them written down.
@@ -225,7 +240,7 @@ internal sealed class PairingRecord(
             {
                 admitted = null;
                 lapsed = false;
-                bool known = current.PeerWith(candidate) is not null;
+                known = current.PeerWith(candidate) is not null;
                 if (!known
                     && (current.Peers.Count >= maxPeers || Invitation(current, hello.PairingToken) is null))
                 {
@@ -244,7 +259,8 @@ internal sealed class PairingRecord(
                 }
                 return paired with { Pairings = [.. paired.Pairings.Where(offer => offer.Id != spent.Id)] };
             },
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            onlyRefreshes: () => known).ConfigureAwait(false);
 
         // Thrown rather than returned, and only after the decision is
         // written: the machine outside is told nothing but "no", while this
@@ -312,9 +328,19 @@ internal sealed class PairingRecord(
             : current with { Peers = [.. current.Peers.Select(peer => peer.Key == key ? refreshed : peer)] };
     }
 
-    // Writing only on a real change keeps a link that reconnects every few
-    // minutes for a week from rewriting the same file every time.
-    private Task UpdateAsync(Func<LinkState, LinkState?> change, CancellationToken cancellationToken)
+    // A change that decides something — who is paired, which invitation is
+    // spent — is not made until it is written, and whoever asked hears when
+    // the write fails. One that only refreshes what is known of a machine
+    // already paired (when it was last seen, what it calls itself) is still
+    // written, but nothing depends on how that goes: every session of a paired
+    // machine begins with one, and a disk that was full or a file that was
+    // locked used to refuse the machine on a host and end the session it had
+    // just brought up on the end that dialled, round and round, over a
+    // timestamp. onlyRefreshes is asked after the change has run.
+    private Task UpdateAsync(
+        Func<LinkState, LinkState?> change,
+        CancellationToken cancellationToken,
+        Func<bool>? onlyRefreshes = null)
     {
         lock (_mu)
         {
@@ -323,6 +349,17 @@ internal sealed class PairingRecord(
                 return Task.CompletedTask;
             }
             _state = next;
+            if (onlyRefreshes?.Invoke() == true)
+            {
+                // The write is not the caller's to cancel: the state has
+                // changed in memory, and a write abandoned half way would
+                // leave the file behind it for no reason anyone asked for.
+                // The wait for it is: a store that hangs must not hold a
+                // handshake past its own deadline.
+                _lastWrite = SaveAfterAsync(_lastWrite, next, CancellationToken.None);
+                return ToleratingAsync(_lastWrite).WaitAsync(cancellationToken);
+            }
+
             // The write is queued behind the previous one while the change is
             // still made under the lock, so the file ends up in the order the
             // states were decided in. Two changes at once — a renewed
@@ -346,5 +383,22 @@ internal sealed class PairingRecord(
         {
         }
         await store.SaveAsync(appName, updated, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ToleratingAsync(Task write)
+    {
+        try
+        {
+            await write.ConfigureAwait(false);
+        }
+#pragma warning disable CA1031 // Whatever a store fails with, a refreshed timestamp is not worth a session.
+        catch (Exception ex)
+#pragma warning restore CA1031
+        {
+            saveFailed?.Invoke(
+                $"could not save when a paired machine was last seen ({ex.Message}); the link carries on, "
+                + "and the next change is written in full",
+                ex);
+        }
     }
 }

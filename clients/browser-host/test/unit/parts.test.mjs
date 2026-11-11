@@ -431,6 +431,24 @@ test("a stranger needs a live token and room; a known machine needs neither", as
   assert.ok((await rules.admit("aa", { pairingToken: "anything" })).admitted, "known by its key");
 });
 
+test("a known machine is let in even when the store will not take when it was last seen", async () => {
+  const store = memoryStore();
+  const rules = await PairingRecord.load({ appName: "rules", store, maxPeers: 2, now: () => 1_000 });
+  const offer = await rules.offerPairing(100);
+  assert.ok((await rules.admit("aa", { pairingToken: offer.token })).admitted);
+
+  const failures = [];
+  rules.onSaveFailed = (error) => failures.push(error);
+  store.save = async () => {
+    throw new Error("the disk is full");
+  };
+
+  assert.ok((await rules.admit("aa", { pairingToken: "anything" })).admitted);
+  assert.equal(failures.length, 1);
+  // A stranger's pairing is not made until it is written.
+  await assert.rejects(rules.admit("bb", { pairingToken: offer.token }), /the disk is full/);
+});
+
 test("an expired token is refused and reported as lapsed only to this end", async () => {
   let now = 1_000;
   const rules = await record({ maxPeers: 2, now: () => now });

@@ -86,6 +86,33 @@ public class LinkTimeoutException : LinkException
     }
 }
 
+/// <summary>The content this machine was sending could not be read.</summary>
+/// <remarks>
+/// The fault is in the stream or file handed in — a drive that went away, a
+/// source that reset — and not in the link, which stays up. Nothing is sent
+/// again: reading the same content would fail the same way. The cause is the
+/// inner exception.
+/// </remarks>
+public class LinkContentException : LinkException
+{
+    /// <summary>Creates an exception with no message.</summary>
+    public LinkContentException()
+    {
+    }
+
+    /// <summary>Creates an exception with a message.</summary>
+    public LinkContentException(string message)
+        : base(message)
+    {
+    }
+
+    /// <summary>Creates an exception with a message and an underlying cause.</summary>
+    public LinkContentException(string message, Exception? innerException)
+        : base(message, innerException)
+    {
+    }
+}
+
 /// <summary>The link, the peer or the channel has been closed for good.</summary>
 public class LinkClosedException : LinkException
 {

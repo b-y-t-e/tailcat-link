@@ -184,6 +184,13 @@ public static class CborMapper
         if (reader.PeekState() == CborReaderState.Null)
         {
             reader.ReadNull();
+            // The wire types declare their strings non-nullable and everything
+            // downstream dereferences them. Go's decoder leaves a string at ""
+            // on a CBOR null, so a blob carrying one is the same blob here.
+            if (type == typeof(string))
+            {
+                return "";
+            }
             return type.IsValueType ? Activator.CreateInstance(type) : null;
         }
         if (type == typeof(int))

@@ -9,7 +9,7 @@
 
 import { hex } from "@tailcat/link/internal/bytes.js";
 import { DerpConnection, relayHostFor } from "@tailcat/link/internal/derp.js";
-import { LinkError } from "@tailcat/link/internal/errors.js";
+import { LinkClosedError, LinkError } from "@tailcat/link/internal/errors.js";
 import { IndexedDbStore } from "@tailcat/link/internal/store.js";
 import { DEFAULTS as LINK_DEFAULTS } from "@tailcat/link/internal/link.js";
 import { nacl } from "@tailcat/link/internal/nacl.js";
@@ -61,9 +61,11 @@ export class TailcatHost {
     /// `peer-joined` and `peer-left` with `{ peer, error? }`, every time a
     /// session comes up or goes down; `refused`, `invitation-expired` and
     /// `handshake-failed` with `{ peer, error? }` naming the machine by key;
-    /// `relay-connected` and `relay-lost` for the relay under it all; and
-    /// `answer-failed` with `{ peer, error }`.
+    /// `relay-connected` and `relay-lost` for the relay under it all;
+    /// `answer-failed` with `{ peer, error }`; and `save-failed` with
+    /// `{ error }` when the store would not take when a machine was last seen.
     this.events = new EventTarget();
+    record.onSaveFailed = (error) => this.#emit("save-failed", { error });
   }
 
   /// Starts hosting under `appName`: the identity and region stored for it,
@@ -358,8 +360,15 @@ export class TailcatHost {
       verdict = await acceptPairing(
         connection,
         // Nothing more is written once closing has begun: `close` waits only
-        // for the writes already decided.
-        (hello) => (this.#closed ? { admitted: null } : this.#record.admit(key, hello)),
+        // for the writes already decided. Nor is the machine answered: a
+        // refusal is what a page takes for "this pairing is over" and forgets
+        // its identity on, and a host on its way down has decided no such
+        // thing. Dropped without a word, the page dials again, as it would
+        // for a .NET host, which cancels the handshake here.
+        (hello) => {
+          if (this.#closed) throw new LinkClosedError("the host is closing");
+          return this.#record.admit(key, hello);
+        },
         this.#options.requestTimeout,
       );
     } catch (error) {

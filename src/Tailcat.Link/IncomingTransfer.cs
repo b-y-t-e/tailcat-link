@@ -239,6 +239,8 @@ public sealed class IncomingTransfer : IAsyncDisposable
     /// <param name="cancellationToken">Gives up on the content.</param>
     public async Task<byte[]> ReadAllBytesAsync(CancellationToken cancellationToken = default)
     {
+        const int FirstReadBytes = 64 * 1024;
+
         if (_pipe is null)
         {
             // Already whole, as it arrived from a machine that sends messages
@@ -256,8 +258,24 @@ public sealed class IncomingTransfer : IAsyncDisposable
                 throw new LinkException(
                     $"{known} bytes do not fit in one array; read {nameof(Content)} as a stream instead");
             }
-            byte[] whole = new byte[known];
-            await Content.ReadExactlyAsync(whole, cancellationToken).ConfigureAwait(false);
+            // The length is what the other machine announced, and nothing has
+            // arrived yet: the array grows with the bytes, as every other read
+            // here does. Taken at its word, a header claiming two gigabytes
+            // cost that much memory with nothing behind it.
+            byte[] whole = new byte[Math.Min(known, FirstReadBytes)];
+            for (int read = 0; read < known;)
+            {
+                if (read == whole.Length)
+                {
+                    Array.Resize(ref whole, (int)Math.Min(known, (long)whole.Length * 2));
+                }
+                int arrived = await Content.ReadAsync(whole.AsMemory(read), cancellationToken).ConfigureAwait(false);
+                if (arrived == 0)
+                {
+                    throw new EndOfStreamException($"the content ended after {read} of {known} bytes");
+                }
+                read += arrived;
+            }
             return whole;
         }
 

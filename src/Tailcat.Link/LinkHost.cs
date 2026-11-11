@@ -278,13 +278,23 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
     public async Task ForgetPeerAsync(ILinkPeer peer, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(peer);
-        await _pairing.ForgetPeerAsync(peer.Key, cancellationToken).ConfigureAwait(false);
-        if (_peers.TryRemove(peer.Key, out PeerEntry? entry))
+        try
         {
-            // Dropped as well as forgotten: a machine that is unpaired while
-            // it is connected must stop reaching the handler at once, not at
-            // the next reconnection.
-            await entry.DisposeAsync().ConfigureAwait(false);
+            await _pairing.ForgetPeerAsync(peer.Key, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Whatever became of the write: the record forgets the machine in
+            // memory before it saves, so it is no longer admitted, and a save
+            // that failed or was cancelled must not leave its live session
+            // reaching the handler all the same.
+            if (_peers.TryRemove(peer.Key, out PeerEntry? entry))
+            {
+                // Dropped as well as forgotten: a machine that is unpaired
+                // while it is connected must stop reaching the handler at
+                // once, not at the next reconnection.
+                await entry.DisposeAsync().ConfigureAwait(false);
+            }
         }
         _log.Say($"forgot {peer.Key}");
     }

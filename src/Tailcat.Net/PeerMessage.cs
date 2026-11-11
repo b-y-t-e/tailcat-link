@@ -164,12 +164,19 @@ public static class PeerMessage
 
         byte[] nonce = packet.Slice(HeaderLen, NonceLen).ToArray();
         byte[] box = packet[(HeaderLen + NonceLen)..].ToArray();
+        if (box.Length < MacLen)
+        {
+            // Not even an authenticator. The library does not say so cleanly:
+            // it trims sixteen leading zeros as a legacy format and then sizes
+            // a buffer from what is left, which for a short box is negative.
+            return false;
+        }
         try
         {
             payload = PublicKeyBox.Open(box, nonce, self.Raw32(), peer.Raw32());
             return true;
         }
-        catch (Exception ex) when (ex is CryptographicException or ArgumentException)
+        catch (Exception ex) when (ex is CryptographicException or ArgumentException or OverflowException)
         {
             // A forged or corrupted message; indistinguishable, and both are
             // simply dropped.

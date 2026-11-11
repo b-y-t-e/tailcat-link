@@ -49,6 +49,12 @@ public sealed class DerpConnection : IRelay, IAsyncDisposable
 
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(30);
 
+    // How long one attempt at a replacement may take before it counts as
+    // failed. Generous beside a handshake that takes a fraction of a second,
+    // and still well short of the twenty seconds a system takes to give up on
+    // a connect of its own accord.
+    private static readonly TimeSpan DialTimeout = TimeSpan.FromSeconds(10);
+
     private readonly Func<CancellationToken, Task<DerpClient>> _connect;
     private readonly TimeProvider _time;
     private readonly CancellationTokenSource _cts = new();
@@ -171,6 +177,16 @@ public sealed class DerpConnection : IRelay, IAsyncDisposable
     /// <inheritdoc/>
     public async Task SendAsync(NodePublic destination, ReadOnlyMemory<byte> packet, CancellationToken cancellationToken = default)
     {
+        // Before it is recorded, not when it is written: a packet recorded
+        // during an outage is written by the reconnection, and one too large
+        // to send failed there instead, in the loop every packet arrives on.
+        if (packet.Length > DerpProtocol.MaxPacketSize)
+        {
+            throw new ArgumentException(
+                $"packet of {packet.Length} bytes exceeds the DERP limit of {DerpProtocol.MaxPacketSize}",
+                nameof(packet));
+        }
+
         try
         {
             if (!await _resender.RecordAsync(destination, packet, cancellationToken).ConfigureAwait(false))
@@ -240,6 +256,12 @@ public sealed class DerpConnection : IRelay, IAsyncDisposable
                 // unreachable most of the time.
                 bool wasStable = _time.GetElapsedTime(connectedAt) >= StablePeriod
                     || _watch.WasAbandoned(_client);
+
+                // The connection is condemned from here on, whatever the read
+                // failed with. One that failed on a frame it could not parse is
+                // still open and out of step: left so, a failed attempt at
+                // replacing it sent this loop back to read payload as headers.
+                await _client.DisposeAsync().ConfigureAwait(false);
                 switch (await ReconnectAsync(backoff, ct).ConfigureAwait(false))
                 {
                     case ReconnectOutcome.Cancelled:
@@ -323,7 +345,7 @@ public sealed class DerpConnection : IRelay, IAsyncDisposable
             await _clientMu.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                DerpClient replacement = await _connect(ct).ConfigureAwait(false);
+                DerpClient replacement = await DialAsync(ct).ConfigureAwait(false);
                 try
                 {
                     await AdoptAsync(replacement, ct).ConfigureAwait(false);
@@ -358,6 +380,26 @@ public sealed class DerpConnection : IRelay, IAsyncDisposable
         }
     }
 
+    // A dial is a TCP connect, a TLS handshake, an HTTP upgrade and the relay's
+    // own handshake, and every one of them reads. A flow cut after this end's
+    // last bytes were acknowledged leaves nothing to retransmit, so the system
+    // never reports it: the read waited for good, under the connection lock,
+    // and no further attempt was ever made. The liveness check cannot help —
+    // it watches the connection in place, which is the dead one.
+    private async Task<DerpClient> DialAsync(CancellationToken ct)
+    {
+        using CancellationTokenSource deadline = new(DialTimeout, _time);
+        using CancellationTokenSource both = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
+        try
+        {
+            return await _connect(both.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new IOException($"the relay did not finish connecting within {DialTimeout}");
+        }
+    }
+
     /// <summary>Closes the connection and stops reconnecting.</summary>
     public async ValueTask DisposeAsync()
     {
@@ -384,6 +426,11 @@ public sealed class DerpConnection : IRelay, IAsyncDisposable
             {
             }
         }
+
+        // Again: a replacement whose dial finished just as this began is
+        // adopted after the dispose above, and was left logged in under the
+        // node's key with nothing to close it.
+        await _client.DisposeAsync().ConfigureAwait(false);
         _clientMu.Dispose();
         _cts.Dispose();
     }

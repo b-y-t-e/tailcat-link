@@ -46,6 +46,7 @@ internal sealed class IncomingExchange
     private Stream? _answerStream;
     private bool _answerOwned;
     private AnswerHeader _answerHeader;
+    private string? _answerUnreadable;
     private bool _expired;
     private int _finished;
 
@@ -200,14 +201,23 @@ internal sealed class IncomingExchange
             return await AcknowledgedAsync(stream, token).ConfigureAwait(false);
         }
 
+        if (_answerUnreadable is { } unreadable)
+        {
+            await WriteFailedAsync(stream, unreadable, token).ConfigureAwait(false);
+            return false;
+        }
+
         OutboundTransfer answer;
         try
         {
             answer = OpenAnswer(outcome.Answer ?? LinkContent.Empty);
             answer.RewindTo(header.AnswerOffset);
         }
-        catch (LinkException ex)
+        catch (Exception ex) when (ex is LinkException or IOException or UnauthorizedAccessException)
         {
+            // Nothing here touches the transport, so an I/O failure is the
+            // answer's own: a file that is locked or gone. That is a refusal
+            // the sender can be told, not a stream to abort under it.
             // An answer that cannot be read again from where the sender got to
             // is over for good, and said so rather than sent with a hole in it.
             await WriteFailedAsync(stream, ex.Message, token).ConfigureAwait(false);
@@ -215,7 +225,21 @@ internal sealed class IncomingExchange
         }
 
         await WriteOkAsync(stream, ExchangeFrame.EncodeAnswer(_answerHeader), token).ConfigureAwait(false);
-        await TransferFrame.WriteContentAsync(stream, answer, idle: null, token).ConfigureAwait(false);
+        try
+        {
+            await TransferFrame.WriteContentAsync(stream, answer, idle: null, token).ConfigureAwait(false);
+        }
+        catch (LinkContentException ex)
+        {
+            // The answer's own content gave out part way: a file cut short or
+            // taken away under it. Blocks have no way to say so, so this
+            // attempt ends as a broken stream, but the next is refused with
+            // the reason. Left to open and read again, every retry broke at
+            // the same byte until the sender's patience ran out, and what it
+            // was told was that the peer had not answered in time.
+            _answerUnreadable = ex.Message;
+            throw;
+        }
         return await AcknowledgedAsync(stream, token).ConfigureAwait(false);
     }
 
@@ -269,10 +293,16 @@ internal sealed class IncomingExchange
             }
             return new ExchangeOutcome(Refusal: null, answer);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !linkClosed.IsCancellationRequested)
         {
             // The application refused it. That is an answer, and the sender
             // hears it rather than retrying something that would fail again.
+            // A cancellation of the handler's own counts — a timeout, a
+            // connect it gave up on — as it does for a stream's handler: only
+            // the link closing is not the handler's to report. Taken for a
+            // session's failure it reached the sender as a broken stream, and
+            // every retry joined the same cancelled outcome and broke the
+            // next session too, for as long as the sender's patience lasted.
             await Request.CompleteReaderAsync(ex).ConfigureAwait(false);
             return new ExchangeOutcome(ex.Message, Answer: null);
         }

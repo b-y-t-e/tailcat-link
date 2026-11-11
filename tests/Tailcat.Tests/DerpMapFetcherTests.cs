@@ -169,6 +169,19 @@ public class DerpMapFetcherTests
     [InlineData("not json")]
     public void DecodeRejectsBadInput(string body) =>
         Assert.Null(DerpMapFetcher.Decode(System.Text.Encoding.UTF8.GetBytes(body)));
+
+    /// <summary>
+    /// An explicit null where a map, a list or a name belongs is an invalid
+    /// map rather than one that throws wherever it is first walked.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"Regions":null}""")]
+    [InlineData("""{"Regions":{"1":null}}""")]
+    [InlineData("""{"Regions":{"1":{"RegionID":1,"Nodes":null}}}""")]
+    [InlineData("""{"Regions":{"1":{"RegionID":1,"Nodes":[null]}}}""")]
+    [InlineData("""{"Regions":{"1":{"RegionID":1,"Nodes":[{"Name":"1a","HostName":null}]}}}""")]
+    public void DecodeRejectsAMapWithNullsInIt(string body) =>
+        Assert.Null(DerpMapFetcher.Decode(System.Text.Encoding.UTF8.GetBytes(body)));
 }
 
 /// <summary>A manually advanced clock, so cache freshness tests don't sleep.</summary>

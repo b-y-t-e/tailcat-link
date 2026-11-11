@@ -42,6 +42,11 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
     private readonly TimeSpan _requestTimeout;
     private readonly TimeProvider _time;
     private readonly CancellationTokenSource _cts = new();
+
+    // Taken once, while the source is certain to exist. Asked for after the
+    // session was disposed, the source throws ObjectDisposedException, and a
+    // channel opened just as its session went got that instead of an ending.
+    private readonly CancellationToken _alive;
     private readonly TaskCompletionSource<string> _ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Lock _channelsMu = new();
     private readonly HashSet<LinkChannelBase> _openChannels = [];
@@ -100,6 +105,7 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
         TimeProvider time,
         CancellationToken linkClosed)
     {
+        _alive = _cts.Token;
         _connection = connection;
         _handler = handler;
         _channels = channels;
@@ -143,7 +149,7 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
     /// session that carries it, which is the whole of what a channel promises
     /// instead of a transfer's durability.
     /// </remarks>
-    public CancellationToken Alive => _cts.Token;
+    public CancellationToken Alive => _alive;
 
     /// <summary>Starts answering the peer.</summary>
     public void Start() => _serveLoop ??= Task.Run(() => ServeLoopAsync(_cts.Token), CancellationToken.None);
@@ -597,7 +603,7 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
         // The session's own token, not the link's: a channel is not resumed,
         // so a handler still reading one when the session dies is told so
         // rather than left waiting for frames that will never come.
-        await serve(stream, _cts.Token).ConfigureAwait(false);
+        await serve(stream, _alive).ConfigureAwait(false);
     }
 
     /// <summary>Runs the application's handler and turns whatever it does into an answer.</summary>
@@ -607,9 +613,11 @@ internal sealed class LinkSession : IExchangeCarrier, IAsyncDisposable
         {
             return new LinkAnswer(LinkFrameStatus.Ok, await InvokeHandlerAsync(payload, ct).ConfigureAwait(false));
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            // Application code threw. The peer is waiting and deserves to be
+            // Application code threw — a cancellation of its own included,
+            // which only the link closing makes somebody else's to report.
+            // The peer is waiting and deserves to be
             // told why rather than left to time out, and this machine's link
             // must survive its own handler's bugs. This is a real answer, so
             // it is remembered like one: a retry is told the same thing.

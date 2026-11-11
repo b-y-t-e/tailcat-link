@@ -143,11 +143,24 @@ public readonly record struct ConnBlob(string Value)
         await ci.ExpandAsync(options, cancellationToken).ConfigureAwait(false);
 
         // Keep the blob short: two relay nodes suffice.
-        foreach (DerpRegion r in ci.Region)
+        // The region is the DERP map's own object, and with ExpandOptions.DerpMap
+        // that map is the caller's: trim a copy, or one resolve costs the
+        // caller's map every node past the second for good.
+        for (int i = 0; i < ci.Region.Count; i++)
         {
+            DerpRegion r = ci.Region[i];
             if (r.Nodes.Count > 2)
             {
-                r.Nodes = [.. r.Nodes.Take(2)];
+                ci.Region[i] = new DerpRegion
+                {
+                    RegionID = r.RegionID,
+                    RegionCode = r.RegionCode,
+                    RegionName = r.RegionName,
+                    Latitude = r.Latitude,
+                    Longitude = r.Longitude,
+                    Avoid = r.Avoid,
+                    Nodes = [.. r.Nodes.Take(2)],
+                };
             }
         }
         ci.RegionID = 0;

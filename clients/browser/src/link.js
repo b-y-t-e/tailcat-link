@@ -325,6 +325,7 @@ export class TailcatLink {
   async #run() {
     let attempt = 0;
     while (!this.#stopped) {
+      let upSince = null;
       try {
         const connection = await this.#source.nextSession(this.#closing.signal);
         // close() while a connect was running found no session and so closed
@@ -336,7 +337,7 @@ export class TailcatLink {
         }
 
         this.#session = this.#openSession(connection);
-        attempt = 0;
+        upSince = Date.now();
         if (!this.#connected.settled) this.#connected.resolve();
         this.#emit("connected");
         await this.#session.serve();
@@ -356,6 +357,13 @@ export class TailcatLink {
       if (this.#connected.settled && !this.#fatal) this.#connected = new Deferred();
 
       if (this.#stopped) return;
+      // Only a session that held counts as a success, as in LinkPeer's loop.
+      // One that comes up and dies at once — a relay that takes the handshake
+      // and drops it, a second tab of this page dialling under the same key
+      // and taking the session over — used to put the wait back to its floor
+      // every time: a WebSocket, a login and a pairing twice a second, for
+      // as long as the page stayed open.
+      if (upSince !== null && Date.now() - upSince >= this.#options.heartbeatInterval) attempt = 0;
       const wait = Math.min(
         this.#options.maxReconnectDelay,
         this.#options.minReconnectDelay * 2 ** Math.min(attempt++, 8),

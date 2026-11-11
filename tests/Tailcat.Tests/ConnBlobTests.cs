@@ -261,6 +261,45 @@ public class ConnBlobTests
     }
 
     /// <summary>
+    /// A CBOR null where a string belongs reads as the empty string, as Go's
+    /// decoder leaves it: the blob parses, and the elided fields are restored
+    /// as though it had not been there. It used to be a null the parse
+    /// dereferenced, which no caller of TryParse catches.
+    /// </summary>
+    [Fact]
+    public void ParseReadsANullStringAsEmpty()
+    {
+        ConnBlob blob = Blob(w =>
+        {
+            w.WriteStartMap(2);
+            w.WriteTextString("p");
+            w.WriteByteString(TestKey().Raw32());
+            w.WriteTextString("r");
+            w.WriteStartArray(1);
+            w.WriteStartMap(2);
+            w.WriteTextString("c");
+            w.WriteNull();
+            w.WriteTextString("N");
+            w.WriteStartArray(1);
+            w.WriteStartMap(2);
+            w.WriteTextString("n");
+            w.WriteNull();
+            w.WriteTextString("h");
+            w.WriteTextString("relay.example");
+            w.WriteEndMap();
+            w.WriteEndArray();
+            w.WriteEndMap();
+            w.WriteEndArray();
+            w.WriteEndMap();
+        });
+
+        Assert.True(blob.TryParse(out ConnInfo? ci));
+        Tailcat.Tailcfg.DerpRegion region = Assert.Single(ci.Region);
+        Assert.Equal("1", region.RegionCode);
+        Assert.Equal("relay.example", Assert.Single(region.Nodes).Name);
+    }
+
+    /// <summary>
     /// A region ID wider than an int is malformed, not a crash: CBOR encodes
     /// integers by value, so a blob can carry one that our int fields can't
     /// hold (Go widened its own wire fields to int64 when upstream tailcfg

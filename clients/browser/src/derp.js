@@ -51,6 +51,9 @@ const MAX_FRAME_LEN = MAX_PACKET_SIZE + 1024;
 /// outlives the relay connection under it, so what a dead connection swallowed
 /// is worth sending again; here a session ends with its WebSocket, and the
 /// link resumes every exchange on the next one from where each end got to.
+// How long one attempt at connecting may take: DerpConnection.DialTimeout.
+const DIAL_TIMEOUT_MS = 10_000;
+
 export const DERP_LIVENESS = Object.freeze({
   probeAfterSendMs: 1_000,
   probeWhenIdleMs: 15_000,
@@ -101,18 +104,51 @@ export class DerpConnection {
 
   static async connect({ url, privateKey, publicKey, signal, liveness }) {
     const socket = new WebSocket(url, "derp");
-    await new Promise((resolve, reject) => {
-      socket.onopen = resolve;
-      socket.onerror = () => reject(new Error(`could not reach ${url}`));
-      signal?.addEventListener("abort", () => {
-        socket.close();
-        reject(signal.reason ?? new Error("aborted"));
-      }, { once: true });
-    });
+    // One deadline for the socket and the login together, DerpConnection's
+    // DialTimeout: a flow cut during the upgrade or the greeting leaves a
+    // socket that neither opens nor fails, and the wait for it was as long as
+    // the runtime cared to make it. The caller's signal ends the same two
+    // waits; `giveUp` is whichever of them is running.
+    let giveUp = null;
+    const deadline = setTimeout(
+      () => giveUp?.(new Error(`the relay at ${url} did not finish connecting within ${DIAL_TIMEOUT_MS} ms`)),
+      DIAL_TIMEOUT_MS,
+    );
+    const onAbort = () => giveUp?.(signal.reason ?? new Error("aborted"));
+    signal?.addEventListener("abort", onAbort, { once: true });
 
-    const conn = new DerpConnection(socket, privateKey, publicKey, { liveness });
-    await conn.#login();
-    return conn;
+    let conn = null;
+    try {
+      await new Promise((resolve, reject) => {
+        giveUp = reject;
+        socket.onopen = resolve;
+        socket.onerror = () => reject(new Error(`could not reach ${url}`));
+        if (signal?.aborted) onAbort();
+      });
+
+      conn = new DerpConnection(socket, privateKey, publicKey, { liveness });
+      await Promise.race([
+        conn.#login(),
+        new Promise((_, reject) => {
+          giveUp = reject;
+        }),
+      ]);
+      return conn;
+    } catch (error) {
+      // Whatever ended it — a socket that would not open, a greeting that is
+      // wrong, the deadline, the caller — the socket and its liveness timer
+      // are nobody's to close but this call's.
+      if (conn) conn.close();
+      else socket.close();
+      throw error;
+    } finally {
+      clearTimeout(deadline);
+      // Off again once connected: the signal is the link's, and lives as long
+      // as it does. Left on, every connection a link ever made stayed
+      // reachable through its listener — thousands, on a link that reconnects
+      // every few seconds for a day.
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   get closed() {

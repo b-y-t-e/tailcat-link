@@ -65,7 +65,21 @@ internal sealed class OutboundTransfer(
     /// <returns>How many bytes were read; zero at the end of the content.</returns>
     public async ValueTask<int> ReadAsync(Memory<byte> block, CancellationToken cancellationToken)
     {
-        int read = await Content.ReadAsync(block, cancellationToken).ConfigureAwait(false);
+        int read;
+        try
+        {
+            read = await Content.ReadAsync(block, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            // Said apart from everything the transport fails with, because
+            // from here on the two are the same types: an IOException out of
+            // the application's file read as the session dying, so a healthy
+            // session was ended — every channel and stream on it too — and
+            // the exchange was tried again on the next, where the same read
+            // failed and ended that one.
+            throw new LinkContentException($"the content could not be read: {ex.Message}", ex);
+        }
         _readAhead = read;
         return read;
     }

@@ -317,12 +317,41 @@ public static class DerpMapFetcher
         }
         try
         {
-            return JsonSerializer.Deserialize<DerpMap>(data, JsonOptions);
+            DerpMap? dm = JsonSerializer.Deserialize<DerpMap>(data, JsonOptions);
+            return dm is not null && IsWellFormed(dm) ? dm : null;
         }
         catch (JsonException)
         {
             return null;
         }
+    }
+
+    // An explicit JSON null lands in a property declared non-nullable, and
+    // everything that walks a map dereferences those. Go's nil map and nil
+    // slice are safe to read; here such a map is an invalid one, which lets
+    // the fetch fall back to the copy it had before.
+    private static bool IsWellFormed(DerpMap dm)
+    {
+        if (dm.Regions is null)
+        {
+            return false;
+        }
+        foreach (DerpRegion? r in dm.Regions.Values)
+        {
+            if (r?.Nodes is null || r.RegionCode is null || r.RegionName is null)
+            {
+                return false;
+            }
+            foreach (DerpNode? n in r.Nodes)
+            {
+                if (n is null || n.Name is null || n.HostName is null || n.CertName is null
+                    || n.IPv4 is null || n.IPv6 is null)
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static async Task<byte[]> ReadLimitedAsync(HttpResponseMessage res, CancellationToken cancellationToken)

@@ -24,6 +24,12 @@ public readonly struct DiscoPrivate : IEquatable<DiscoPrivate>
 
     private readonly byte[]? _raw;
 
+    // The key without the copy Raw32 makes: a key is a dictionary key in
+    // every session table, and each lookup hashed and compared clones.
+    private static readonly byte[] Zero = new byte[RawLen];
+
+    private ReadOnlySpan<byte> Bytes => _raw ?? Zero;
+
     private DiscoPrivate(byte[] raw) => _raw = raw;
 
     /// <summary>Generates a new random disco private key.</summary>
@@ -53,8 +59,19 @@ public readonly struct DiscoPrivate : IEquatable<DiscoPrivate>
         {
             throw new InvalidOperationException("can't derive a disco key from the zero NodePrivate");
         }
-        byte[] raw = HMACSHA256.HashData(node.Raw32(), DerivationLabel);
-        return FromRaw32(raw);
+        // Raw32 hands out a copy of the node's private key, and FromRaw32
+        // copies the derived one: neither temporary should outlive this call.
+        byte[] nodeRaw = node.Raw32();
+        byte[] raw = HMACSHA256.HashData(nodeRaw, DerivationLabel);
+        try
+        {
+            return FromRaw32(raw);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(nodeRaw);
+            CryptographicOperations.ZeroMemory(raw);
+        }
     }
 
     /// <summary>Builds a private key from its 32 raw bytes, which are copied and clamped.</summary>
@@ -93,14 +110,16 @@ public readonly struct DiscoPrivate : IEquatable<DiscoPrivate>
         raw[31] = (byte)((raw[31] & 127) | 64);
     }
 
-    public bool Equals(DiscoPrivate other) => Raw32().AsSpan().SequenceEqual(other.Raw32());
+    // Fixed time, as PresharedKey compares: the key is a secret, and a
+    // comparison that stops at the first differing byte says where.
+    public bool Equals(DiscoPrivate other) => CryptographicOperations.FixedTimeEquals(Bytes, other.Bytes);
 
     public override bool Equals(object? obj) => obj is DiscoPrivate other && Equals(other);
 
     public override int GetHashCode()
     {
         HashCode h = new();
-        h.AddBytes(Raw32());
+        h.AddBytes(Bytes);
         return h.ToHashCode();
     }
 

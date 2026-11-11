@@ -24,14 +24,14 @@ internal sealed partial class LinkLog(ILogger? logger, Action<string>? sink)
     public void Say(string message)
     {
         LogSaid(_logger, message);
-        sink?.Invoke(message);
+        Tell(message);
     }
 
     /// <summary>Reports something that went wrong but did not stop the link.</summary>
     public void Warn(string message)
     {
         LogWarned(_logger, message);
-        sink?.Invoke(message);
+        Tell(message);
     }
 
     /// <summary>The same, keeping the exception itself for whoever can use it.</summary>
@@ -47,14 +47,31 @@ internal sealed partial class LinkLog(ILogger? logger, Action<string>? sink)
     public void Say(string message, Exception cause)
     {
         LogSaidAbout(_logger, message, cause);
-        sink?.Invoke(message);
+        Tell(message);
     }
 
     /// <inheritdoc cref="Say(string, Exception)"/>
     public void Warn(string message, Exception cause)
     {
         LogWarnedAbout(_logger, message, cause);
-        sink?.Invoke(message);
+        Tell(message);
+    }
+
+    // The sink is the application's code, called from the loops that keep a
+    // link alive and from catch blocks inside them. Events raised there are
+    // guarded for the same reason: a text box that has been closed must not
+    // be what stops a link reconnecting, or a host listening.
+    private void Tell(string message)
+    {
+        try
+        {
+            sink?.Invoke(message);
+        }
+#pragma warning disable CA1031 // Whatever a log sink throws, the thing being reported matters more than the report.
+        catch (Exception)
+#pragma warning restore CA1031
+        {
+        }
     }
 
     [LoggerMessage(EventId = 1, Level = LogLevel.Information, Message = "{Message}")]

@@ -500,27 +500,40 @@ public sealed class TailcatNode : IAsyncDisposable
         // and which region to answer in; then wait for the same in return.
         Relay1Ephemeral? ephemeral = _transports.Contains(PeerTransport.Relay1) ? new Relay1Ephemeral() : null;
         session.Ephemeral = ephemeral;
-        PeerHello hello = new(
-            sessionId,
-            _identity.Fingerprint,
-            await LocalEndpointsAsync(cts.Token).ConfigureAwait(false),
-            HomeRegionId,
-            _transports,
-            ephemeral?.PublicKey);
-        byte[] msg = PeerMessage.Seal(PeerMessageType.Hello, hello.Encode(), _identity.PrivateKey, peer);
-
         PeerHello ack;
         try
         {
+            PeerHello hello = new(
+                sessionId,
+                _identity.Fingerprint,
+                await LocalEndpointsAsync(cts.Token).ConfigureAwait(false),
+                HomeRegionId,
+                _transports,
+                ephemeral?.PublicKey);
+            byte[] msg = PeerMessage.Seal(PeerMessageType.Hello, hello.Encode(), _identity.PrivateKey, peer);
             ack = await SendUntilAnsweredAsync(relay, peer, msg, session.HelloAck, cts.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            await CloseSessionAsync(peer).ConfigureAwait(false);
+            // The caller gave up. The session and its probe loop were left in
+            // place for that, pinging the relay until the node was disposed.
+            await AbandonSessionAsync(peer, session).ConfigureAwait(false);
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            await AbandonSessionAsync(peer, session).ConfigureAwait(false);
             string reason = $"no answer within {_handshakeTimeout}";
             _observer.HandshakeFailed(peer, reason);
             TailcatMetrics.SessionsFailed.Add(1);
             throw new TailcatException($"peer {peer} in region {peerRegionId} did not answer: {reason}");
+        }
+        catch
+        {
+            // Anything else the hello fails with leaves the same session and
+            // the same probe loop behind, and is no more this dial's to keep.
+            await AbandonSessionAsync(peer, session).ConfigureAwait(false);
+            throw;
         }
 
         // The answer names the one transport the peer chose out of what was
@@ -530,7 +543,7 @@ public sealed class TailcatNode : IAsyncDisposable
         // anyone could act on.
         if (ack.Transports.Count != 1 || !_transports.Contains(ack.Transports[0]))
         {
-            await CloseSessionAsync(peer).ConfigureAwait(false);
+            await AbandonSessionAsync(peer, session).ConfigureAwait(false);
             string reason =
                 $"no transport in common: this node speaks [{Describe(_transports)}], " +
                 $"the peer [{Describe(ack.Transports)}]";
@@ -541,9 +554,17 @@ public sealed class TailcatNode : IAsyncDisposable
 
         if (ack.Transports[0] == PeerTransport.Relay1)
         {
-            return await StartRelayedAsync(
-                    peer, peerRegionId, session, relay, ack, isDialer: true, startedAt, cts.Token)
-                .ConfigureAwait(false);
+            try
+            {
+                return await StartRelayedAsync(
+                        peer, peerRegionId, session, relay, ack, isDialer: true, startedAt, cts.Token)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                await AbandonSessionAsync(peer, session).ConfigureAwait(false);
+                throw;
+            }
         }
 
         link.AddCandidates(ack.Endpoints);
@@ -580,7 +601,7 @@ public sealed class TailcatNode : IAsyncDisposable
             // would keep a socket and a probe loop alive for a session that
             // never existed.
             await bridge.DisposeAsync().ConfigureAwait(false);
-            await CloseSessionAsync(peer).ConfigureAwait(false);
+            await AbandonSessionAsync(peer, session).ConfigureAwait(false);
             _observer.HandshakeFailed(peer, ex.Message);
             TailcatMetrics.SessionsFailed.Add(1);
             throw;
@@ -900,7 +921,13 @@ public sealed class TailcatNode : IAsyncDisposable
             }
         }
 
-        _resolvedFallback = resolved;
+        // Only an answer is worth keeping. One lookup that failed while the
+        // network was still coming up used to be remembered as "there are
+        // none", and the node stayed on the relay for as long as it ran.
+        if (resolved.Count > 0)
+        {
+            _resolvedFallback = resolved;
+        }
         return resolved;
     }
 
@@ -1002,7 +1029,16 @@ public sealed class TailcatNode : IAsyncDisposable
             // happens underneath, and packets keep arriving here.
             await foreach (DerpReceivedPacket packet in _relays.Packets.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                await HandlePacketAsync(packet.Source, packet.Payload, from: null, ct).ConfigureAwait(false);
+                try
+                {
+                    await HandlePacketAsync(packet.Source, packet.Payload, from: null, ct).ConfigureAwait(false);
+                }
+                catch (ObjectDisposedException) when (!_disposed)
+                {
+                    // One session's link or bridge, disposed while its packet
+                    // was on the way in. As on the UDP loop, that must not
+                    // take every other peer's traffic down with it.
+                }
             }
         }
         catch (OperationCanceledException)
@@ -1111,7 +1147,12 @@ public sealed class TailcatNode : IAsyncDisposable
         {
             if (type == PeerMessageType.HelloAck)
             {
-                if (_sessions.TryGetValue(source, out Session? waiting))
+                // An answer to the dial before this one — late through a slow
+                // relay, or resent after a cut — names that dial's session.
+                // Taking it gave a relay1 session the previous attempt's key:
+                // nothing either end sent would open, and it stayed silent
+                // until a heartbeat gave up on it.
+                if (_sessions.TryGetValue(source, out Session? waiting) && waiting.SessionId == hello.SessionId)
                 {
                     waiting.HelloAck.TrySetResult(hello);
                 }
@@ -1270,16 +1311,30 @@ public sealed class TailcatNode : IAsyncDisposable
 
         if (agreed.Value == PeerTransport.Relay1)
         {
-            ITailcatConnection relayed = await StartRelayedAsync(
-                    peer, peerRegion, session, relay, hello, isDialer: false, _time.GetTimestamp(), ct)
-                .ConfigureAwait(false);
+            ITailcatConnection relayed;
+            try
+            {
+                relayed = await StartRelayedAsync(
+                        peer, peerRegion, session, relay, hello, isDialer: false, _time.GetTimestamp(), ct)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                // The session is already in place, and a repeated hello is
+                // answered from it. Left there after a key that would not
+                // derive or an answer that would not send, it is a session
+                // the dialler is told it has and nobody here serves — and,
+                // from a stranger, a link probing the relay for good.
+                await AbandonSessionAsync(peer, session).ConfigureAwait(false);
+                throw;
+            }
 
             if (!_incoming.Writer.TryWrite(relayed))
             {
                 _observer.HandshakeFailed(peer, "the inbound session queue is full");
                 TailcatMetrics.SessionsFailed.Add(1);
                 await relayed.DisposeAsync().ConfigureAwait(false);
-                await CloseSessionAsync(peer).ConfigureAwait(false);
+                await AbandonSessionAsync(peer, session).ConfigureAwait(false);
             }
             return;
         }
@@ -1507,6 +1562,17 @@ public sealed class TailcatNode : IAsyncDisposable
     // their own saying why. This is the wording for those.
     private Task CloseSessionAsync(NodePublic peer) =>
         CloseSessionAsync(peer, "this session was closed");
+
+    // For an attempt that failed: closes the session only if it is still the
+    // one in place. By key alone, a dial that gave up after the peer had
+    // dialled back would close the peer's working session instead of its own.
+    private async Task AbandonSessionAsync(NodePublic peer, Session session)
+    {
+        if (_sessions.TryRemove(new KeyValuePair<NodePublic, Session>(peer, session)))
+        {
+            await ReleaseSessionAsync(session, "this session was closed").ConfigureAwait(false);
+        }
+    }
 
     private async Task CloseSessionAsync(NodePublic peer, string reason)
     {

@@ -27,6 +27,10 @@ import {
 import { Relay1Session, deriveKeys } from "@tailcat/link/internal/relay1.js";
 import { nacl } from "@tailcat/link/internal/nacl.js";
 
+// How long a relay connection must last to count as one that held:
+// DerpConnection.StablePeriod.
+const STABLE_MS = 10_000;
+
 // Sessions handed up and not yet taken. A stranger who knows the address can
 // open as many as it has keys, and each waits for a handshake; past this they
 // are refused at the door rather than queued without end, as the .NET node's
@@ -203,10 +207,14 @@ export class RelayHub {
           return;
         }
         this.#home = relay;
-        failures = 0;
+        const upSince = Date.now();
         if (!this.#homeUp.settled) this.#homeUp.resolve();
         this.#emit("relay-connected", { regionId: this.#homeRegionId });
         ended = await this.#pump(relay);
+        // A connection that stood for a while says nothing about the relay
+        // when it drops; one that is accepted and dropped straight away does,
+        // and earns the longer wait — DerpConnection's rule and its period.
+        failures = Date.now() - upSince >= STABLE_MS ? 0 : failures + 1;
       } catch (error) {
         if (this.#closed) return;
         failures++;

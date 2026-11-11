@@ -144,7 +144,10 @@ internal sealed class Relay1Stream : Stream
             }
         }
 
-        await GrantCreditIfDueAsync(cancellationToken).ConfigureAwait(false);
+        // Not the caller's token: the bytes are already taken out, and a read
+        // that threw here would lose them and the credit both. The far end's
+        // writer parks for good on credit it is never given back.
+        await GrantCreditIfDueAsync(CancellationToken.None).ConfigureAwait(false);
         return taken;
     }
 

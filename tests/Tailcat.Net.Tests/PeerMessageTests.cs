@@ -40,6 +40,31 @@ public class PeerMessageTests
         Assert.Equal(payload, got);
     }
 
+    /// <summary>
+    /// A box too short to hold its own authenticator, zeros or not, is a
+    /// message that does not open. The sealing library throws an
+    /// OverflowException on sixteen zero bytes, and one such packet from
+    /// anyone who knew the node's key ended the loop every packet arrives on.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(15)]
+    [InlineData(16)]
+    [InlineData(31)]
+    public void AMessageWithATruncatedBoxDoesNotOpen(int boxLength)
+    {
+        (NodePrivate aPriv, NodePublic aPub) = Node();
+        (NodePrivate bPriv, NodePublic bPub) = Node();
+        byte[] real = PeerMessage.Seal(PeerMessageType.Hello, "hello"u8, aPriv, bPub);
+        int boxStart = real.Length - ("hello".Length + 16);
+
+        // The header and nonce of a real message, then nothing but zeros.
+        byte[] packet = new byte[boxStart + boxLength];
+        real.AsSpan(0, boxStart).CopyTo(packet);
+
+        Assert.False(PeerMessage.TryOpen(packet, bPriv, aPub, out _, out _));
+    }
+
     /// <summary>The payload must not be readable by anyone else.</summary>
     [Fact]
     public void SealedMessageIsUnreadableByAThirdParty()
