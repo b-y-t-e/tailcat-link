@@ -143,6 +143,43 @@ link.onStream("echo", async (stream) => {
 | `transferStallTimeout` | 120 s | the same for `LinkContent` and transfers |
 | `heartbeatInterval` | 20 s | how often silence is tested for |
 | `minReconnectDelay` / `maxReconnectDelay` | 0.5 s / 30 s | backoff bounds |
+| `directPath` | `false` | `true`, or `{ iceServers }`: leave the relay when the host can (below) |
+
+## Leaving the relay
+
+A relay is for finding each other, and a slow way to talk. With `directPath`
+on at both ends, a link to a JavaScript host moves to a WebRTC data channel
+between the two machines as soon as one can be made, and says so:
+
+```js
+const link = await TailcatLink.join({
+  appName: "game",
+  invitationCode,
+  directPath: { iceServers: [{ urls: "stun:stun.example.org:3478" }] },
+});
+link.events.addEventListener("route-changed", (e) => console.log(e.detail)); // "relayed", "direct", "none"
+link.route; // the same, now
+```
+
+Nothing else changes: the session still starts on the relay, requests,
+channels and streams neither know nor care, and a host that has no direct
+path — a .NET one, or a JavaScript one that did not ask — leaves the link
+exactly where it was.
+
+- **`directPath: true` tries the machines' own networks only**, and asks
+  nothing of anybody else: enough for two machines on one LAN. Machines on
+  different networks need a STUN server in `iceServers` to learn their public
+  addresses, and whichever you name sees both machines' addresses. There is
+  no default one for that reason.
+- **The host learns this machine's addresses, and it learns the host's** —
+  the local ones too, where the browser gives them out. They are sent only
+  after the host has accepted the pairing, and only to it.
+- **A direct path that dies ends the session.** The link reconnects by the
+  relay and carries on, as after any cut, and waits before trying a direct
+  path again. A channel or stream open at the time ends with the session, as
+  it would have.
+- Some pairs of networks cannot be connected this way at all. Those stay
+  relayed, and `route` says so.
 
 ## The DERP map has to be same-origin
 
@@ -176,6 +213,7 @@ obvious place to land on the other.
 | `src/idle-timeout.js` | `IdleTimeout.cs` | silence, not duration, is what times a request |
 | `src/exchange-ledger.js` | `ExchangeLedger.cs` | a retried request answered again, never run again |
 | `src/relay1.js` | `Relay1*.cs` | key schedule, records, stream multiplexing |
+| `src/direct-path.js` | — | the same records over a WebRTC data channel, when both ends ask |
 | `src/peer.js` | `PeerMessage.cs` | sealed hellos and the transport negotiation |
 | `src/derp.js` | `DerpClient.cs`, `DerpLivenessWatch.cs` | the relay, over a WebSocket, and noticing it went silent |
 | `src/address.js` | `ConnBlob.cs`, `InvitationCode.cs` | invitation codes and the CBOR in an address |
@@ -251,8 +289,10 @@ modules run unchanged; what differs is the TLS stack and IndexedDB.
   process that publishes a code and admits the machines that join it. A page
   is a host only while it stays open, which is why Node is the usual place
   for one.
-- **Leave the relay.** There is no direct path from a browser, ever. Every
-  byte crosses the relay twice, and a session is as fast as the relay is.
+- **Leave the relay by itself, or with a .NET host.** A direct path is
+  WebRTC, has to be asked for at both ends (`directPath`), and exists only
+  between two JavaScript ends. Otherwise every byte crosses the relay twice,
+  and a session is as fast as the relay is.
 - **Survive a dropped record.** A gap in the counter ends the session and the
   link reconnects. That is the trade `relay1` makes for being small; the
   reasoning is in [docs/relay1.md](../../docs/relay1.md).

@@ -126,6 +126,12 @@ export class LinkPeer {
     return this.#connected && this.#link.connected;
   }
 
+  /// How traffic reaches the machine now: "none", "relayed" or "direct".
+  /// `ILinkPeer.Route` on the .NET side; `route-changed` on `events` says when.
+  get route() {
+    return this.#link.route;
+  }
+
   /// Asks the machine something; see `TailcatLink.request`. Waits through
   /// reconnections, and the machine's handler runs once.
   request(message, options) {

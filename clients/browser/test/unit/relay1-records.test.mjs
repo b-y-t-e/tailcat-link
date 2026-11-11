@@ -8,7 +8,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { decodeHello, encodeHello } from "../../src/peer.js";
-import { encodeFrame, keySchedule, openRecord, readVarint, sealRecord, writeVarint } from "../../src/relay1.js";
+import {
+  CONTROL_STREAM,
+  FrameFlags,
+  encodeFrame,
+  keySchedule,
+  openRecord,
+  readVarint,
+  sealRecord,
+  writeVarint,
+} from "../../src/relay1.js";
+import { decodeSignal, encodeSignal } from "../../src/direct-path.js";
 import { hex, recordVectors, unhex } from "./vectors.mjs";
 
 const importKey = (keyHex) =>
@@ -119,5 +129,16 @@ test("a hello the .NET side wrote reads back field for field", () => {
       vector.endpoints.map((endpoint) => endpoint.addressHex),
       vector.name,
     );
+  }
+});
+
+test("what is said on the control stream is laid out as the shared vectors say", () => {
+  // Only this side says any of it so far. The vectors are where the .NET
+  // half will be held to the same bytes the day it has one.
+  for (const vector of recordVectors.controlCases) {
+    const payload = encodeSignal(vector.kind, vector.text);
+    assert.equal(hex(payload), vector.payloadHex, vector.name);
+    assert.equal(hex(encodeFrame(CONTROL_STREAM, FrameFlags.None, payload)), vector.frameHex, vector.name);
+    assert.deepEqual(decodeSignal(unhex(vector.payloadHex)), { kind: vector.kind, text: vector.text }, vector.name);
   }
 });

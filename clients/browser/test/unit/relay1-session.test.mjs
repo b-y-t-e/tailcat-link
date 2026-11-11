@@ -295,3 +295,113 @@ test("a FIN for the older of two out-of-order streams does not reopen it", async
   const nothingElse = Symbol("nothing else");
   assert.equal(await Promise.race([dialer.accepted.next(), Promise.resolve(nothingElse)]), nothingElse);
 });
+
+// ---- two paths -------------------------------------------------------------
+
+/// A dialler whose records are kept rather than delivered, and the host they
+/// are for: the order they arrive in is then the test's to choose.
+async function capturedPair() {
+  const keys = await sessionKeys();
+  const records = [];
+  const dialer = new Relay1Session({
+    derp: { sendPacket: (_peerPublic, record) => records.push(record) },
+    peerPublic: new Uint8Array(32),
+    keys: keys.dialer,
+    isDialer: true,
+  });
+  const host = new Relay1Session({
+    derp: { sendPacket: () => {} },
+    peerPublic: new Uint8Array(32),
+    keys: keys.host,
+    isDialer: false,
+  });
+  return { dialer, host, records };
+}
+
+test("a control frame reaches the other end and opens no stream", async () => {
+  const { dialer, host, settled } = await connectedPair();
+  const heard = [];
+  host.oncontrol = (payload) => heard.push(str(payload));
+
+  await dialer.sendControl(utf8("about the session"));
+  const out = dialer.openStream();
+  await out.write(utf8("."));
+  await settled();
+
+  assert.deepEqual(heard, ["about the session"]);
+  // The stream written after it is the first one the host is handed.
+  assert.equal((await host.accepted.next()).id, out.id);
+  assert.equal(host.closed, false);
+});
+
+test("an end that listens for no control frames ignores them", async () => {
+  const { dialer, host, settled } = await connectedPair();
+
+  await dialer.sendControl(utf8("an offer from a newer version"));
+  const out = dialer.openStream();
+  await out.write(utf8("still talking"));
+  await out.finish();
+  await settled();
+
+  assert.equal(await readAll(await host.accepted.next()), "still talking");
+});
+
+test("with a second path expected, a record ahead of its turn waits for the one before it", async () => {
+  const { dialer, host, records } = await capturedPair();
+  host.expectTwoPaths();
+
+  const out = dialer.openStream();
+  await out.write(utf8("one "));
+  await out.write(utf8("two "));
+  await out.write(utf8("three"));
+  await out.finish();
+
+  // The last three overtake the first, as records on a fast path overtake
+  // what is still crossing the relay.
+  for (const index of [2, 3, 1, 1, 0]) await host.handleRecord(records[index]);
+
+  assert.equal(host.closed, false);
+  assert.equal(await readAll(await host.accepted.next()), "one two three");
+});
+
+test("a record that never arrives on either path still ends the session", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { dialer, host, records } = await capturedPair();
+  host.expectTwoPaths();
+  let ended = null;
+  host.onClosed((error) => (ended = error));
+
+  const out = dialer.openStream();
+  await out.write(utf8("lost"));
+  await out.write(utf8("held"));
+  await out.write(utf8("held too"));
+  await host.handleRecord(records[1]);
+  t.mock.timers.tick(9_000);
+  // A later arrival behind the same gap does not buy it more time.
+  await host.handleRecord(records[2]);
+  assert.equal(host.closed, false);
+
+  t.mock.timers.tick(1_000);
+  assert.equal(host.closed, true);
+  assert.match(ended.message, /record 0 never arrived/);
+});
+
+test("a path that fails with a record ends the session, because the far end is owed it", async () => {
+  const { dialer } = await capturedPair();
+  const sent = [];
+  let broken = false;
+  dialer.sendOn({
+    send: async (record) => {
+      if (broken) throw new Error("the direct path was lost");
+      sent.push(record);
+    },
+  });
+
+  const out = dialer.openStream();
+  await out.write(utf8("by the path"));
+  assert.equal(sent.length, 1);
+
+  broken = true;
+  await assert.rejects(out.write(utf8("into nothing")), /direct path was lost/);
+  assert.equal(dialer.closed, true);
+});

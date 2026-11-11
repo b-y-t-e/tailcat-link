@@ -87,5 +87,28 @@
       "encodedByBrowser": false,
       "encodedByDotnet": false
     }
+  ],
+  "controlCases": [
+    {
+      "name": "a direct path offered: the kind, then the session description as text",
+      "kind": 1,
+      "text": "v=0",
+      "payloadHex": "01763d30",
+      "frameHex": "000001763d30"
+    },
+    {
+      "name": "declined: a kind and nothing after it",
+      "kind": 0,
+      "text": "",
+      "payloadHex": "00",
+      "frameHex": "000000"
+    },
+    {
+      "name": "a candidate, as the JSON of an RTCIceCandidateInit",
+      "kind": 3,
+      "text": "{\"candidate\":\"a\"}",
+      "payloadHex": "037b2263616e646964617465223a2261227d",
+      "frameHex": "0000037b2263616e646964617465223a2261227d"
+    }
   ]
 }

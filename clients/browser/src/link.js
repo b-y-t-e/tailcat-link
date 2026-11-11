@@ -39,6 +39,9 @@ export const DEFAULTS = {
   minReconnectDelay: 500,
   maxReconnectDelay: 30_000,
   handshakeTimeout: 20_000,
+  // Off until asked for: `true`, or `{ iceServers, RTCPeerConnection }`. See
+  // direct-path.js for what it does and README.md for what it gives away.
+  directPath: false,
 };
 
 export class TailcatLink {
@@ -54,6 +57,7 @@ export class TailcatLink {
   #channels = new Map();
   #streams = new Map();
   #session = null;
+  #route = "none";
   #connected = new Deferred();
   #stopped = false;
   #fatal = null;
@@ -246,6 +250,13 @@ export class TailcatLink {
     return this.#session !== null && !this.#session.closed;
   }
 
+  /// How traffic reaches the other machine now: "none" while there is no
+  /// session, "relayed" through the relay, "direct" between the two machines.
+  /// `ILink.Route` on the .NET side; a `route-changed` event says when.
+  get route() {
+    return this.#route;
+  }
+
   /// Resolves once a session is up. Sending does not need it — a request
   /// waits by itself — but a page that wants to show a state does.
   async waitUntilConnected(timeout = this.#options.requestDeadline) {
@@ -336,7 +347,14 @@ export class TailcatLink {
           return;
         }
 
-        this.#session = this.#openSession(connection);
+        const session = this.#openSession(connection);
+        this.#session = session;
+        // Ignored once the session is no longer the current one: a path that
+        // opens as its session ends would otherwise describe the next.
+        connection.onroute = (route) => {
+          if (this.#session === session && !session.closed) this.#setRoute(route);
+        };
+        this.#setRoute(connection.route ?? "relayed");
         upSince = Date.now();
         if (!this.#connected.settled) this.#connected.resolve();
         this.#emit("connected");
@@ -348,6 +366,7 @@ export class TailcatLink {
 
       this.#session?.close();
       this.#session = null;
+      this.#setRoute("none");
       // Wakes every exchange that was waiting for this session to end before
       // trying again, so the next attempt meets the next session.
       this.#sessionEnded.resolve();
@@ -405,6 +424,12 @@ export class TailcatLink {
     }
     if (!this.#connected.settled) this.#connected.reject(error);
     this.#emit("failed", error);
+  }
+
+  #setRoute(route) {
+    if (this.#route === route) return;
+    this.#route = route;
+    this.#emit("route-changed", route);
   }
 
   #emit(name, detail) {

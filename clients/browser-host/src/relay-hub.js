@@ -25,6 +25,13 @@ import {
   seal,
 } from "@tailcat/link/internal/peer.js";
 import { Relay1Session, deriveKeys } from "@tailcat/link/internal/relay1.js";
+import {
+  DirectPath,
+  DirectSignal,
+  decodeSignal,
+  directPathConfig,
+  encodeSignal,
+} from "@tailcat/link/internal/direct-path.js";
 import { nacl } from "@tailcat/link/internal/nacl.js";
 
 // How long a relay connection must last to count as one that held:
@@ -68,11 +75,20 @@ export class HostedConnection {
   #trusted = false;
   #unopened = 0;
   #ignored = 0;
+  #directConfig;
+  #path = null;
 
-  constructor({ session, relay, peer }) {
+  /// @param directConfig what `directPathConfig` made of the host's option,
+  ///   or null for a host that takes no direct path.
+  constructor({ session, relay, peer, directConfig = null }) {
     this.#session = session;
     this.#relay = relay;
+    this.#directConfig = directConfig;
+    /// Called with "direct" when the session's records leave the relay for a
+    /// path between the two machines.
+    this.onroute = null;
     session.onignored = () => this.#ignored++;
+    session.oncontrol = (payload) => this.#onControl(payload);
     /// The dialling machine's public key: the only thing about it a session
     /// authenticates.
     this.peer = peer;
@@ -90,13 +106,49 @@ export class HostedConnection {
     return this.#session.openStream();
   }
 
+  /// How the session's records travel: "relayed", or "direct".
+  get route() {
+    return this.#path?.open ? "direct" : "relayed";
+  }
+
   /// Resolves once what was written has left the socket.
   flush(timeoutMs) {
-    return this.#relay.flush(timeoutMs);
+    return this.#path?.open ? this.#path.flush(timeoutMs) : this.#relay.flush(timeoutMs);
   }
 
   close(error = new Error("the session was closed")) {
     this.#session.close(error);
+    this.#path?.close();
+  }
+
+  // What the dialler says about a direct path. Nothing is answered before the
+  // pairing handshake has let the machine in: the answer names this host's
+  // addresses on its own network, and anyone who knows the host's address can
+  // open a session and ask.
+  #onControl(payload) {
+    if (!this.#trusted) return;
+    const signal = decodeSignal(payload);
+    if (!signal) return;
+    // Only an offer starts one, and the host never makes it: two ends
+    // offering at once would each hold a channel the other did not answer.
+    // A second offer in one session is the dialler trying again after an
+    // attempt that came to nothing; the one before it is let go of here too,
+    // or it would be the one handed every answer from then on.
+    if (signal.kind === DirectSignal.Offer && !this.#path?.open) {
+      this.#path?.close();
+      this.#path = null;
+      if (!this.#directConfig) {
+        // Told, rather than left to wait out its patience.
+        this.#session.sendControl(encodeSignal(DirectSignal.Decline)).catch(() => {});
+        return;
+      }
+      this.#path = new DirectPath({
+        session: this.#session,
+        config: this.#directConfig,
+        onopen: () => this.onroute?.("direct"),
+      });
+    }
+    this.#path?.handle(signal);
   }
 
   /// Lifts the bound on what the peer may send, once pairing has let it in.
@@ -153,6 +205,7 @@ export class RelayHub {
   #reserved = 0;
   #closing = new AbortController();
   #closed = false;
+  #directConfig;
 
   /// @param identity this host's key pair; its public half is the address.
   /// @param connectRelay `({ regionId, identity, signal }) => DerpConnection`:
@@ -164,6 +217,7 @@ export class RelayHub {
     this.#homeRegionId = homeRegionId;
     this.#connect = connectRelay;
     this.#options = options;
+    this.#directConfig = directPathConfig(options.directPath);
     this.#emit = emit;
     /// Sessions that have finished the relay's handshake and wait for the
     /// pairing one: `HostedConnection`s, in the order they arrived.
@@ -439,7 +493,7 @@ export class RelayHub {
     if (this.#closed) return;
 
     const session = new Relay1Session({ derp: relay, peerPublic: source, keys, isDialer: false });
-    const connection = new HostedConnection({ session, relay, peer: source });
+    const connection = new HostedConnection({ session, relay, peer: source, directConfig: this.#directConfig });
     const entry = { sessionId, ephemeral, connection, regionId, relay };
     session.onclose = () => {
       if (this.#sessions.get(key) === entry) this.#sessions.delete(key);

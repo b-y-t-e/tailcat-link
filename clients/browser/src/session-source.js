@@ -21,6 +21,7 @@ import {
   seal,
 } from "./peer.js";
 import { Relay1Session, deriveKeys } from "./relay1.js";
+import { DirectPath, DirectPathBackoff, decodeSignal, directPathConfig } from "./direct-path.js";
 import { offerPairing } from "./pairing-handshake.js";
 import { nacl } from "./nacl.js";
 
@@ -32,14 +33,71 @@ export class RelayedConnection {
   #derp;
   #session;
   #peerPublic;
+  #direct;
+  #path = null;
+  #retry = null;
 
-  constructor({ derp, session, peerPublic }) {
+  /// @param direct `{ config, backoff }` when a direct path may be offered on
+  ///   this session, or null: see `direct-path.js`.
+  constructor({ derp, session, peerPublic, direct = null }) {
     this.#derp = derp;
     this.#session = session;
     this.#peerPublic = peerPublic;
+    this.#direct = direct;
     this.relayInfo = derp.serverInfo;
+    /// Called with "direct" when the session's records leave the relay for a
+    /// path between the two machines.
+    this.onroute = null;
     derp.onclose = (error) => session.close(error);
+    session.oncontrol = (payload) => {
+      const signal = decodeSignal(payload);
+      // Only answers to an offer this end made: a page is not asked by its
+      // host for a path, and a host that asks is told nothing.
+      if (signal && this.#path) this.#path.handle(signal);
+    };
+    session.onClosed(() => clearTimeout(this.#retry));
     this.#pumpRecords();
+  }
+
+  /// How the session's records travel: "relayed", or "direct".
+  get route() {
+    return this.#path?.open ? "direct" : "relayed";
+  }
+
+  /// Offers the host a direct path, if this link asks for one — now, or once
+  /// the wait after a failed one is over. Called once the host has let this
+  /// end in, never before: the offer names this machine's addresses, and
+  /// until the pairing handshake has been answered nothing says the machine
+  /// at the other end is one this end means to tell them to.
+  startDirectPath() {
+    const direct = this.#direct;
+    if (!direct || this.#session.closed || (this.#path && !this.#path.ended)) return;
+    clearTimeout(this.#retry);
+    this.#retry = null;
+
+    // Waited out inside the session, not left for the next one: the session
+    // that follows a lost path is up within half a second, well inside the
+    // wait, and asked only at its start it stayed relayed for as long as it
+    // lived — which for a session nothing disturbs is for good.
+    const wait = direct.backoff.dueInMs;
+    if (wait > 0) {
+      this.#retry = setTimeout(() => this.startDirectPath(), wait);
+      this.#retry.unref?.();
+      return;
+    }
+
+    this.#path = new DirectPath({
+      session: this.#session,
+      config: direct.config,
+      onopen: () => this.onroute?.("direct"),
+      onend: (outcome) => {
+        direct.backoff.ended(outcome);
+        // An attempt that came to nothing left the session where it was, on
+        // the relay; it is tried again from there.
+        this.startDirectPath();
+      },
+    });
+    this.#path.offer();
   }
 
   get accepted() {
@@ -57,11 +115,13 @@ export class RelayedConnection {
   /// Resolves once everything written has left the socket. Written is not
   /// sent: closing on top of a full send buffer throws the answers away.
   flush(timeoutMs) {
-    return this.#derp.flush(timeoutMs);
+    return this.#path?.open ? this.#path.flush(timeoutMs) : this.#derp.flush(timeoutMs);
   }
 
   close(error = new Error("the session was closed")) {
     this.#session.close(error);
+    clearTimeout(this.#retry);
+    this.#path?.close();
     this.#derp.close();
   }
 
@@ -111,6 +171,9 @@ export class DialingSessionSource {
       // Before anything else is asked, because until it has run the host will
       // refuse everything anyway.
       await withTimeout(offerPairing(connection, this.#hello), this.#handshakeTimeout, "the host");
+      // Optional, because `dial` is a seam and a test's connection need not
+      // know about paths.
+      connection.startDirectPath?.();
       return connection;
     } catch (error) {
       connection.close(error);
@@ -122,6 +185,11 @@ export class DialingSessionSource {
 /// Reaches the host over a relay: the DERP map, the WebSocket, the sealed
 /// hello, the ephemeral exchange, and a relay1 session on top of the lot.
 export function relayDialer({ options, identity, peer }) {
+  const config = directPathConfig(options.directPath);
+  // One for every session this link dials, because what it remembers is how
+  // the sessions before this one fared.
+  const direct = config ? { config, backoff: new DirectPathBackoff({ firstMs: config.retryMs }) } : null;
+
   return async (signal) => {
     // `connectRelay` is the seam a test stands the whole handshake up on
     // without a socket, as TailcatNodeOptions.ConnectRelay is on the .NET side.
@@ -137,7 +205,7 @@ export function relayDialer({ options, identity, peer }) {
     try {
       const keys = await negotiate({ derp, options, identity, peer });
       const session = new Relay1Session({ derp, peerPublic: peer.serverPublic, keys, isDialer: true });
-      return new RelayedConnection({ derp, session, peerPublic: peer.serverPublic });
+      return new RelayedConnection({ derp, session, peerPublic: peer.serverPublic, direct });
     } catch (error) {
       derp.close();
       throw error;

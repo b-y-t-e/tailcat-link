@@ -29,8 +29,11 @@ choice of transport is made below them, per session, and never surfaces.
 
 ## What it is not
 
-- Not a direct path. A `relay1` session is relayed for its whole life. There
-  is no STUN, no hole punching, and no path switching.
+- Not a direct path of its own. A `relay1` session starts on the relay and,
+  between two .NET machines or with one, stays there for its whole life.
+  Between two JavaScript ends it may move its records to a WebRTC data
+  channel once it is up — *A direct path*, below — which is WebRTC finding
+  the path, not this transport.
 - Not a replacement for QUIC. Two nodes that can both speak QUIC always do —
   see *Cost*, below.
 - Not lossless. It inherits exactly what a DERP relay gives and no more.
@@ -124,7 +127,9 @@ PeerMessageType.Relay1Record = 0x07
 - **Associated data**: none.
 - **The counter must arrive strictly in sequence.** A gap means the relay
   dropped a record, and there is no way to recover the stream it belonged to,
-  so the session is closed. See *Cost*.
+  so the session is closed. See *Cost*. The one exception is an end that is
+  setting a direct path up: there a record ahead of its turn is held until
+  the ones before it arrive, within bounds — see *A direct path*.
 - **A record that does not open is ignored**, not treated as the end of the
   session. The usual one belongs to the session before: a sender whose relay
   connection died resends what it sent just before, and when that session has
@@ -201,6 +206,101 @@ from memory rather than run twice. So `relay1` needs no retransmission, no
 sequence recovery and no session resumption of its own; it needs only to fail
 loudly and quickly.
 
+## A direct path
+
+Two JavaScript ends can take a session off the relay. A page has no UDP
+socket, so it cannot do what `PeerLink` does; what it has is WebRTC, which
+finds a path with ICE and hands back a reliable, ordered data channel. That
+channel is used as **a second way of carrying the same records**, not as a
+transport of its own: the hello, the keys, the counter, the frames and
+everything above them are unchanged. `direct-path.js` is all of it;
+`clients/browser` offers and `clients/browser-host` answers. The .NET side
+has no half yet, and ignores the offer.
+
+It is off unless both ends ask for it (`directPath`), and a session that
+never gets one behaves exactly as it did before there was such a thing.
+
+### The control stream
+
+Stream id 0 is no stream: neither end can open it, and both implementations
+have always dropped a frame that names it. A frame on it now carries what one
+end says to the other about the session itself:
+
+```
+frame on stream 0, no flags:   kind (1B) | text (UTF-8)
+
+0  Decline     nothing follows: "this end takes no direct path"
+1  Offer       the dialler's session description (SDP)
+2  Answer      the host's
+3  Candidate   one ICE candidate, the JSON of an RTCIceCandidateInit
+```
+
+An unknown kind is ignored. Being frames in records, these are sealed under
+the session's keys, arrive in order, and can come from nobody but the other
+end of the session — which is the whole authentication of the channel: its
+DTLS fingerprint is in the SDP, so only the holder of the session's keys can
+be at the far end of it.
+
+### Who may ask, and when
+
+- **Only the dialler offers**, once per session, and **only after the host
+  has answered the pairing handshake.** The host **answers nothing on the
+  control stream until that handshake has let the machine in**
+  (`HostedConnection.trust`). An offer and its answer name the machines'
+  addresses on their own networks, and a session can be opened by anyone who
+  knows a host's address. This is why the gate is the link's and not the
+  transport's: `relay1` does not know what "paired" means.
+- A host that knows the offer and will not take it says `Decline`; one that
+  does not know it says nothing, and the dialler gives up after 15 s. Either
+  way the session carries on by the relay.
+- With no `iceServers` configured, only the machines' own addresses are
+  tried and nothing outside the two is asked anything. Two machines on
+  different networks need a STUN server to find each other, and naming one
+  is the application's decision: it learns both machines' public addresses.
+
+### Moving, and what it costs
+
+Each end moves its *sending* to the channel when the channel opens there, and
+never moves it back. Two consequences, and they are the whole of what the
+record layer had to learn:
+
+- **Records overtake each other once.** What an end sent by the relay just
+  before it moved is still crossing — the relay is the slow path — when its
+  first record on the channel arrives. So an end that has begun setting a
+  path up (`expectTwoPaths`) holds a record that arrives ahead of its turn
+  instead of ending the session on it: at most 4 MiB of them, and for at most
+  10 s from the moment a gap opens, not from the newest record behind it.
+  Past either bound the missing record is taken for lost and the session
+  ends, as it always did. Held only after it has opened, so nothing forged
+  takes up the room. A record seen before is still ignored, whichever path
+  brought it. An attempt that comes to nothing takes the allowance back.
+- **A path that dies takes the session with it.** What the channel accepted
+  and did not deliver cannot be known — there are no acknowledgements here —
+  so there is no going back to the relay mid-session without a gap. Once ICE
+  has connected, a channel that closes, fails, or stops answering for 3 s
+  ends the session; the link dials again and its exchanges resume, as after
+  any cut. Before ICE has connected neither end has sent anything on the
+  channel, and an attempt that fails then costs the session nothing.
+
+So that a path which forms and dies does not take every session in turn, the
+dialler waits before offering again: 5 s, doubling to 5 minutes, and back to
+none after a path that carried a session for a minute
+(`DirectPathBackoff`). It outlives sessions, which is the point. Two details
+that were each wrong at first:
+
+- **The wait is sat out inside a session**, and the offer made when it ends.
+  The session that follows a lost path is up within half a second, well
+  inside the wait; asked only as a session starts, it stayed relayed for as
+  long as it lived.
+- **Only a path that gave out is counted.** A session that ended for reasons
+  of its own — its relay connection was cut, the link was closed — says
+  nothing about the path. A dialler cannot tell a host that closed the
+  session from a path that died, though: both close the channel, and both
+  count.
+
+The relay connection stays up under a session that has gone direct, and the
+session still ends with it. That is deliberate for now: see *Open questions*.
+
 ## Cost
 
 Being honest about what is given up against QUIC:
@@ -211,7 +311,8 @@ Being honest about what is given up against QUIC:
   turns into a reconnect and a retried request, which is survivable, but it
   makes `relay1` measurably more brittle under load.
 - **Head-of-line blocking.** Every stream shares one relay connection.
-- **No direct path, ever.** Every byte crosses the relay twice.
+- **No direct path of its own.** Every byte crosses the relay twice, unless
+  both ends are JavaScript and have asked for WebRTC to carry the records.
 
 That is the argument for keeping QUIC as the default and `relay1` as what a
 browser asks for: nothing that can avoid these should pay for them.
@@ -342,5 +443,16 @@ peer.
 - Should a `relay1` session be allowed to migrate to a new relay connection
   rather than dying with it? It would need the record counters to survive,
   which is most of a real transport. Not until something demands it.
+- Should a session that has gone direct outlive its relay connection? Its
+  records no longer need the relay, and where relay connections are cut every
+  few seconds that would be the difference between a session and none. It
+  means a session with no relay under it — late candidates, `flush`, and the
+  host's "every session went with the connection" all assume one.
+- Should a direct path that dies fall back to the relay instead of ending the
+  session? It needs to know what the channel delivered, which is
+  acknowledgements, which is most of a real transport again.
+- The .NET half of the direct path: a WebRTC stack is a large dependency for
+  what a .NET machine already gets from QUIC, so it buys something only for
+  a .NET host with pages joining it.
 - Is per-stream credit enough, or does the connection need a window too?
 - Who reviews the key schedule.

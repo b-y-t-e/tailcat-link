@@ -171,6 +171,25 @@ library is, roughly how the relays work, and examples that compile.
   ignored and reported (`ITailcatObserver.Relay1RecordsIgnored`), not fatal,
   because after a cut the resend brings the session before's records to the
   new one.
+- **Two JavaScript ends may leave the relay, and it is still relay1.**
+  `directPath` (off by default, wanted at both ends) carries the session's
+  records over a WebRTC data channel: `clients/browser/src/direct-path.js`,
+  offered by the dialler and answered by `relay-hub.js`; *A direct path* in
+  `docs/relay1.md` is the specification. It is a second path for the same
+  sealed, counted records and not a transport — as a transport it would have
+  cost a timeout on every connect that could not go direct, or a new session
+  on every move, and a new session ends channels and streams. Four rules, each
+  of which is the fix for something: the signalling is frames on stream 0,
+  which both implementations have always dropped, so .NET ignores an offer;
+  the host answers nothing there before `trust()`, because a session exists
+  before pairing and the answer names its LAN addresses; an end setting a
+  path up holds records that arrive ahead of their turn (4 MiB, 10 s), because
+  the relay is slower than the channel and the move overtakes it; and a path
+  that dies after ICE connected ends the session, because nothing says what
+  the channel delivered — with a backoff on the dialler that outlives
+  sessions, or a flaky path would take each one in turn. The session still
+  ends with its relay connection. The tests use `fake-rtc.mjs`; a real WebRTC
+  stack is checked by hand.
 - **There is one exchange, and no size limit.** `RequestAsync`, `NotifyAsync`
   and `SendAsync`, in bytes or as `LinkContent`, are all the `Exchange` frame
   (7) with different flags: content of any size in blocks, resumed in both

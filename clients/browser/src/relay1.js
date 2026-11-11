@@ -84,6 +84,20 @@ export async function openRecord(record, key) {
 
 export const FrameFlags = { None: 0, Fin: 1, Reset: 2, Window: 4 };
 
+/// The id no stream has. A frame naming it is one end telling the other
+/// something about the session itself — so far, how to set a direct path up
+/// (`direct-path.js`). Both implementations have always ignored a frame for
+/// stream 0, which is what lets an end that knows nothing of this be offered
+/// it and carry on.
+export const CONTROL_STREAM = 0;
+
+// What a session carried on two paths may hold of records that arrived ahead
+// of their turn, and for how long the one before them may stay missing. The
+// relay is the slow path, so the wait is a relay's delay; past either bound
+// the record is taken for lost, which is what it was before there were two.
+const HELD_BYTES = 4 * 1024 * 1024;
+const HELD_PATIENCE_MS = 10_000;
+
 /// A write refused because the peer let go of the stream, which is what QUIC
 /// says with `StreamAborted`; `PeerReleasedStreamException` in .NET.
 export class PeerReleasedStreamError extends Error {}
@@ -303,6 +317,13 @@ export class Relay1Session {
   #retiredPeerStreams = new Set();
   #retiredBelowPeerStream;
   #sending = Promise.resolve();
+  #receiving = Promise.resolve();
+  #direct = null;
+  #twoPaths = false;
+  #held = new Map();
+  #heldBytes = 0;
+  #heldTimer = null;
+  #closeListeners = [];
   #closed = null;
 
   constructor({ derp, peerPublic, keys, isDialer }) {
@@ -320,10 +341,48 @@ export class Relay1Session {
     // then is the session before's; a steady stream with nothing else is two
     // ends whose keys disagree, which otherwise looks like a silent peer.
     this.onignored = null;
+    // Called with the payload of each frame on the control stream.
+    this.oncontrol = null;
   }
 
   get closed() {
     return this.#closed !== null;
+  }
+
+  /// Called once, when the session ends, with why. `onclose` is one slot and
+  /// belongs to whoever built the session; this is for what is attached later.
+  onClosed(listener) {
+    if (this.#closed) listener(this.#closed);
+    else this.#closeListeners.push(listener);
+  }
+
+  /// Says something about the session itself to the other end, in order with
+  /// everything else sent. An end that does not know the control stream
+  /// ignores it.
+  sendControl(payload) {
+    return this._sendFrame(CONTROL_STREAM, FrameFlags.None, payload);
+  }
+
+  /// Lets a record arrive ahead of its turn and wait for the ones before it.
+  /// Called by an end setting a second path up: the far end moves its sending
+  /// there at a moment of its own choosing, and what it sent just before is
+  /// still on its way through the relay, which is slower.
+  ///
+  /// Taken back with `false` when the second path comes to nothing: from then
+  /// on a record ahead of its turn is a record lost, as it was before, and
+  /// one already held is the proof.
+  expectTwoPaths(expected = true) {
+    this.#twoPaths = expected;
+    if (!expected && this.#held.size) {
+      this.close(new Error(`record ${this.#expectedCounter} never arrived; it was dropped`));
+    }
+  }
+
+  /// Sends every record from here on through `path` — `{ send(record) }` —
+  /// instead of the relay. One way: what `path` took and did not deliver
+  /// cannot be known, so a path that fails ends the session.
+  sendOn(path) {
+    this.#direct = path;
   }
 
   openStream() {
@@ -338,7 +397,16 @@ export class Relay1Session {
   /// Takes one record. One that arrives out of order ends the session: there
   /// is no way back from a hole in the middle of a message, and pretending
   /// otherwise hands the layer above corruption.
-  async handleRecord(record) {
+  ///
+  /// One at a time, whoever calls: the counter is checked after an await, and
+  /// with two paths there are two callers.
+  handleRecord(record) {
+    const handled = this.#receiving.then(() => this.#handle(record));
+    this.#receiving = handled.catch(() => {});
+    return handled;
+  }
+
+  async #handle(record) {
     if (this.#closed) return;
     let counter;
     let plaintext;
@@ -361,9 +429,53 @@ export class Relay1Session {
     // does the same.
     if (counter < this.#expectedCounter) return;
     if (counter !== this.#expectedCounter) {
-      this.close(new Error(`record ${counter} arrived where ${this.#expectedCounter} was expected; one was dropped`));
+      // Held only after it opened, so nothing forged takes up the room.
+      if (!this.#hold(counter, plaintext)) {
+        this.close(new Error(`record ${counter} arrived where ${this.#expectedCounter} was expected; one was dropped`));
+      }
       return;
     }
+
+    this.#take(plaintext);
+    let caughtUp = false;
+    while (!this.#closed && this.#held.size) {
+      const next = this.#held.get(this.#expectedCounter);
+      if (!next) break;
+      this.#held.delete(this.#expectedCounter);
+      this.#heldBytes -= next.length;
+      this.#take(next);
+      caughtUp = true;
+    }
+    // The gap that was being timed has closed; what is still held waits on a
+    // later one, with a wait of its own.
+    if (caughtUp || this.#heldTimer) this.#watchTheGap();
+  }
+
+  #hold(counter, plaintext) {
+    if (!this.#twoPaths) return false;
+    if (this.#held.has(counter)) return true;
+    if (this.#heldBytes + plaintext.length > HELD_BYTES) return false;
+    this.#held.set(counter, plaintext);
+    this.#heldBytes += plaintext.length;
+    // Timed from when the gap opened, not from the newest record behind it: a
+    // steady stream arriving past a lost record would otherwise never give up.
+    if (!this.#heldTimer) this.#watchTheGap();
+    return true;
+  }
+
+  #watchTheGap() {
+    clearTimeout(this.#heldTimer);
+    this.#heldTimer = null;
+    if (!this.#held.size || this.#closed) return;
+    const missing = this.#expectedCounter;
+    this.#heldTimer = setTimeout(() => {
+      this.close(new Error(`record ${missing} never arrived, on either path; it was dropped`));
+    }, HELD_PATIENCE_MS);
+    // A session nobody closed must not be what keeps a Node process alive.
+    this.#heldTimer.unref?.();
+  }
+
+  #take(plaintext) {
     this.#expectedCounter += 1n;
 
     let frame;
@@ -377,6 +489,16 @@ export class Relay1Session {
       frame = { streamId, flags: plaintext[read], payload: plaintext.slice(read + 1) };
     } catch (error) {
       this.close(error);
+      return;
+    }
+
+    if (frame.streamId === CONTROL_STREAM) {
+      try {
+        this.oncontrol?.(frame.payload);
+      } catch {
+        // What the far end says about a path is advice; a listener that
+        // cannot take it must not cost the session that works without it.
+      }
       return;
     }
 
@@ -405,7 +527,18 @@ export class Relay1Session {
       if (this.#closed) throw this.#closed;
       const record = await sealRecord(frame, this.#sendKey, this.#sendCounter);
       this.#sendCounter += 1n;
-      this.#derp.sendPacket(this.#peerPublic, record);
+      if (!this.#direct) {
+        this.#derp.sendPacket(this.#peerPublic, record);
+        return;
+      }
+      try {
+        await this.#direct.send(record);
+      } catch (error) {
+        // The counter is taken, so the far end is owed this record and will
+        // not get it: the session is over whether or not anyone says so.
+        this.close(error);
+        throw error;
+      }
     });
     this.#sending = send.catch(() => {});
     return send;
@@ -438,7 +571,12 @@ export class Relay1Session {
     for (const stream of this.#streams.values()) stream._onSessionClosed(error);
     this.#streams.clear();
     this.accepted.close(error);
+    clearTimeout(this.#heldTimer);
+    this.#heldTimer = null;
+    this.#held.clear();
+    this.#heldBytes = 0;
     this.onclose?.(error);
+    for (const listener of this.#closeListeners.splice(0)) listener(error);
   }
 
   // A frame naming an id this end did not open, and has not seen, is the peer
