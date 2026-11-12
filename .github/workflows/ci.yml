@@ -262,6 +262,81 @@ jobs:
           .\out\consumer.exe
           if ($LASTEXITCODE -ne 0) { throw 'the published consumer has no QUIC' }
 
+  # Windows 10's QUIC: the OpenSSL msquic.dll that Tailcat.Link.targets puts
+  # beside a framework-dependent consumer. There is no Windows 10 runner, so
+  # this holds the parts that fail silently: the DLL lands, it is the OpenSSL
+  # build at the version the targets name, the switch is left to run time,
+  # and that DLL loads and gives QUIC when the switch is on — which is what
+  # OpenSslQuicFallback does on a Windows below build 20145.
+  openssl-quic-fallback:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Pack
+        run: dotnet pack src/Tailcat.Link --configuration Release -o artifacts
+
+      - name: A framework-dependent consumer gets the OpenSSL build beside it
+        shell: pwsh
+        run: |
+          $pkg = Get-ChildItem artifacts -Filter 'Tailcat.Link.*.nupkg' |
+            Where-Object { $_.BaseName -match '^Tailcat\.Link\.\d' } | Select-Object -First 1
+          if (-not $pkg) { throw 'dotnet pack produced no Tailcat.Link package' }
+          $version = $pkg.BaseName.Substring('Tailcat.Link.'.Length)
+          $consumer = Join-Path $env:RUNNER_TEMP consumer
+          New-Item -ItemType Directory $consumer | Out-Null
+          Set-Location $consumer
+          @"
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+            <ItemGroup><PackageReference Include="Tailcat.Link" Version="$version" /></ItemGroup>
+          </Project>
+          "@ | Set-Content consumer.csproj
+          @'
+          #pragma warning disable CA1416
+          if (!System.Net.Quic.QuicListener.IsSupported) { Console.WriteLine("QUIC missing"); return 1; }
+          Console.WriteLine($"QUIC available beside {typeof(Tailcat.Link.TailcatLink).Assembly.GetName().Name}");
+          return 0;
+          '@ | Set-Content Program.cs
+          @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources><clear /><add key="nuget.org" value="https://api.nuget.org/v3/index.json" /><add key="local" value="$env:GITHUB_WORKSPACE\artifacts" /></packageSources>
+            <packageSourceMapping>
+              <packageSource key="local"><package pattern="Tailcat.*" /></packageSource>
+              <packageSource key="nuget.org"><package pattern="*" /></packageSource>
+            </packageSourceMapping>
+          </configuration>
+          "@ | Set-Content nuget.config
+          dotnet publish -c Release -o out
+          if ($LASTEXITCODE -ne 0) { throw 'publish failed' }
+
+          $named = ([regex]'<_TailcatLinkMsQuicOpenSslVersion>([^<]+)<').Match(
+            (Get-Content "$env:GITHUB_WORKSPACE\src\Tailcat.Link\buildTransitive\Tailcat.Link.targets" -Raw)).Groups[1].Value
+          $openssl = Join-Path $env:USERPROFILE ".nuget\packages\microsoft.native.quic.msquic.openssl\$named\build\native\bin\x64\msquic.dll"
+          if (-not (Test-Path $openssl)) { throw "the OpenSSL msquic $named was not restored" }
+          if (-not (Test-Path out\msquic.dll)) { throw 'no msquic.dll beside the consumer' }
+          if ((Get-FileHash out\msquic.dll).Hash -ne (Get-FileHash $openssl).Hash) { throw 'the msquic.dll beside the consumer is not the OpenSSL build' }
+          if ((Get-Content out\consumer.runtimeconfig.json -Raw) -match 'AppLocalMsQuic') { throw 'the switch was set at build time; the fallback decides at run time' }
+
+          # As published: this Windows has TLS 1.3 in Schannel, so the runtime's own copy.
+          dotnet out\consumer.dll
+          if ($LASTEXITCODE -ne 0) { throw 'the consumer has no QUIC' }
+
+          # With the switch on, as on Windows 10: the OpenSSL DLL must load and give QUIC.
+          $config = Get-Content out\consumer.runtimeconfig.json -Raw | ConvertFrom-Json
+          if (-not $config.runtimeOptions.configProperties) {
+            $config.runtimeOptions | Add-Member -NotePropertyName configProperties -NotePropertyValue ([pscustomobject]@{})
+          }
+          $config.runtimeOptions.configProperties | Add-Member -NotePropertyName 'System.Net.Quic.AppLocalMsQuic' -NotePropertyValue $true
+          $config | ConvertTo-Json -Depth 8 | Set-Content out\consumer.runtimeconfig.json
+          dotnet out\consumer.dll
+          if ($LASTEXITCODE -ne 0) { throw 'the OpenSSL msquic.dll gives no QUIC' }
+
   # The second implementation of relay1. Its offline tests read the same record
   # vectors as Relay1VectorTests on the .NET side, so a wire format that drifts
   # apart fails here rather than waiting for somebody to run the interop by
