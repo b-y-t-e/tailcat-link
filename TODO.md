@@ -40,13 +40,12 @@ reach a peer whose announcement was heard locally. Open questions:
   costs a few milliseconds. Not ours to fix: resolving `.local` needs mDNS in
   the host's WebRTC stack, and a host in a page has it.
 
-## QUIC on Windows 10: done, CI could hold it
+## ~~QUIC on Windows 10: done, CI could hold it~~
 
-Verified on a real Windows 10 (build 19045): the fallback gives a
-framework-dependent application QUIC and a direct path. A CI job could pack
-and consume the package framework-dependent and check that the OpenSSL
-`msquic.dll` lands beside it, as `single-file-quic` checks the runtime's;
-there is no Windows 10 runner to do more.
+Done: the CI job `openssl-quic-fallback` packs and consumes the package
+framework-dependent, checks that the OpenSSL `msquic.dll` lands beside it at
+the version the targets name, and that it loads and gives QUIC with the
+switch on. There is no Windows 10 runner to do more.
 
 ## ~~A direct path on a carrier gave up once in 30 s~~
 
