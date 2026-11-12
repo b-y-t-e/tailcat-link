@@ -66,6 +66,27 @@ public sealed class UdpBridge : IAsyncDisposable
     /// <summary>Starts pumping datagrams in both directions.</summary>
     public void Start() => _pump ??= Task.Run(() => PumpAsync(_cts.Token));
 
+    // MsQuic's socket on Windows lets the first datagram from an address it
+    // has not heard from go, and QUIC waits out its first probe timeout —
+    // a second, from a 333 ms initial RTT — before sending again. Every
+    // handshake paid it twice over: the listener dropped the client's first
+    // Initial, the client the server's first answer. One byte first, which
+    // QUIC discards as too short to be a packet, and the real ones get
+    // through: a loopback handshake took 1,050 ms, and 47 with this.
+    private static readonly byte[] FlowOpener = [0];
+
+    private async ValueTask OpenFlowAsync(IPEndPoint target, CancellationToken ct)
+    {
+        try
+        {
+            await _socket.SendToAsync(FlowOpener, SocketFlags.None, target, ct).ConfigureAwait(false);
+        }
+        catch (SocketException)
+        {
+            // Then the first datagram may go missing, which QUIC copes with.
+        }
+    }
+
     private void OnDatagramFromPeer(ReadOnlyMemory<byte> datagram)
     {
         IPEndPoint? target;
@@ -101,6 +122,13 @@ public sealed class UdpBridge : IAsyncDisposable
 
     private async Task PumpAsync(CancellationToken ct)
     {
+        // The accepting side knows its listener now, before anything arrives
+        // for it.
+        if (_quicEndPoint is { } listener)
+        {
+            await OpenFlowAsync(listener, ct).ConfigureAwait(false);
+        }
+
         byte[] buffer = new byte[64 * 1024];
         EndPoint any = new IPEndPoint(IPAddress.Loopback, 0);
         while (!ct.IsCancellationRequested)
@@ -111,11 +139,21 @@ public sealed class UdpBridge : IAsyncDisposable
                     .ReceiveFromAsync(buffer, SocketFlags.None, any, ct)
                     .ConfigureAwait(false);
 
+                IPEndPoint? learned = null;
                 lock (_mu)
                 {
                     // The connecting side learns its QUIC client's ephemeral
                     // port here, with the first packet it sends.
-                    _quicEndPoint ??= (IPEndPoint)res.RemoteEndPoint;
+                    if (_quicEndPoint is null)
+                    {
+                        _quicEndPoint = learned = (IPEndPoint)res.RemoteEndPoint;
+                    }
+                }
+                if (learned is not null)
+                {
+                    // Before the Initial goes on: its answer is the first
+                    // datagram the client hears from here.
+                    await OpenFlowAsync(learned, ct).ConfigureAwait(false);
                 }
 
                 await _link.SendDatagramAsync(buffer.AsMemory(0, res.ReceivedBytes), ct).ConfigureAwait(false);

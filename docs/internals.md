@@ -505,7 +505,10 @@ has no QUIC at all** — `QuicListener.IsSupported` is false, and until this
 existed a node there refused to start. It now offers `relay1`, connects, and
 works; measured between a Windows 11 machine and a Windows 10 one, the two
 agreed on `relay1` with neither configured for it, and the session came up in
-107 ms against QUIC's 3.3 seconds. There is no QUIC handshake to do.
+107 ms against QUIC's 3.3 seconds. There is no QUIC handshake to do. (Most
+of those seconds turned out to be a lost first datagram, not QUIC: see
+`UdpBridge.FlowOpener`. A QUIC session over the relay now comes up in
+0.2–0.45 s.)
 
 That left Windows 10 relayed for good, and the reason turned out to be
 narrower than "no QUIC". What it lacks is TLS 1.3 in Schannel, which the

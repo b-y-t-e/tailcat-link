@@ -110,10 +110,52 @@ public class UdpBridgeTests
             byte[] received = new byte[256];
             using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(5));
+            SocketReceiveFromResult res = await ReceiveSkippingTheOpenerAsync(quic, received, cts.Token);
+
+            Assert.Equal(payload, received[..res.ReceivedBytes]);
+        }
+    }
+
+    /// <summary>
+    /// The first thing the QUIC stack hears from the bridge is one byte, so
+    /// that MsQuic does not let the first real datagram go.
+    /// </summary>
+    [Fact]
+    public async Task TheQuicStackHearsOneByteBeforeAnythingReal()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (PeerLink link, FakeRelay relay, Socket udp) = NewLink();
+        using (udp)
+        await using (link)
+        await using (UdpBridge bridge = new(link))
+        {
+            bridge.Start();
+            using Socket quic = new(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            quic.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            await quic.SendToAsync("an initial"u8.ToArray(), SocketFlags.None, bridge.LocalEndPoint, ct);
+            Assert.NotNull(await WaitForSentAsync(relay, ct));
+
+            byte[] received = new byte[256];
+            using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(5));
             SocketReceiveFromResult res = await quic.ReceiveFromAsync(
                 received, SocketFlags.None, new IPEndPoint(IPAddress.Loopback, 0), cts.Token);
 
-            Assert.Equal(payload, received[..res.ReceivedBytes]);
+            Assert.Equal(1, res.ReceivedBytes);
+        }
+    }
+
+    private static async Task<SocketReceiveFromResult> ReceiveSkippingTheOpenerAsync(
+        Socket socket, byte[] buffer, CancellationToken ct)
+    {
+        while (true)
+        {
+            SocketReceiveFromResult res = await socket.ReceiveFromAsync(
+                buffer, SocketFlags.None, new IPEndPoint(IPAddress.Loopback, 0), ct);
+            if (res.ReceivedBytes > 1)
+            {
+                return res;
+            }
         }
     }
 

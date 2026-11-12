@@ -358,6 +358,14 @@ library is, roughly how the relays work, and examples that compile.
   `buildTransitive/Tailcat.Link.targets`, which copies it beside the executable
   on publish; `LinkHost` warns when a Windows that has QUIC reports none; the CI
   job `single-file-quic` publishes a consumer that way and fails without QUIC.
+- **MsQuic drops the first datagram from an address it has not heard from**
+  (Windows; Schannel and OpenSSL builds alike; plain sockets do not). Every
+  handshake lost the client's first Initial at the listener and the server's
+  first answer at the client, and waited out a 1 s probe timeout for each:
+  1.5–3 s over the relay, ~1 s even on loopback with no tailcat code at all.
+  `UdpBridge` sends one byte to its local QUIC endpoint before the first real
+  datagram (`FlowOpener`); a session over the relay is up in 0.2–0.45 s.
+  Anything else that hands datagrams to msquic from a new socket owes the same.
 - **On QUIC, a request waited for things that were not its answer.** Two, and
   each cost a whole round trip on a direct path (85 ms where the path took 41,
   found by `tools/field-test`): closing a `QuicStream` waits for the other end

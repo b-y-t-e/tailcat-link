@@ -28,10 +28,10 @@ reach a peer whose announcement was heard locally. Open questions:
   does: ~5 s), and STUN asks the fallback servers beside the map's relays,
   which answer no STUN, instead of after their timeout (~2 s at each end of
   every handshake).
-- **The QUIC handshake over the relay still takes 1.5–3 s**, against ~70 ms
-  for the hello it follows. Find out what it waits for — a PTO on a lost
-  Initial, msquic's initial RTT guess, the server certificate — with the
-  observer on both ends of a real relay.
+- ~~The QUIC handshake over the relay takes 1.5–3 s~~ — msquic's socket let
+  the first datagram from a new address go, at both ends, and QUIC waited a
+  1 s probe timeout each time; `UdpBridge` now sends one byte first. A session
+  over the relay is up in 0.2–0.45 s (Windows 10 to Windows 11, 90 ms relay).
 - ~~"The direct path was lost: the direct path closed" for a client that
   finished~~ — a channel the other end closes while ICE is up is reported as
   that, and not counted against the path.
