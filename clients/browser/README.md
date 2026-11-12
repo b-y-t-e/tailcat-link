@@ -175,10 +175,11 @@ exactly where it was.
 - **The host learns this machine's addresses, and it learns the host's** —
   the local ones too, where the browser gives them out. They are sent only
   after the host has accepted the pairing, and only to it.
-- **A direct path that dies ends the session.** The link reconnects by the
-  relay and carries on, as after any cut, and waits before trying a direct
-  path again. A channel or stream open at the time ends with the session, as
-  it would have.
+- **A direct path that dies sends the link back to the relay**, a few
+  seconds after it stopped answering, with nothing lost and nothing
+  reconnected: channels and streams carry on, slower. `route` says
+  `relayed`, and a direct path is tried again after a wait. Against a host
+  older than this, the session ends instead and the link reconnects.
 - Some pairs of networks cannot be connected this way at all. Those stay
   relayed, and `route` says so.
 

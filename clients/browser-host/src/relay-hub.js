@@ -146,6 +146,9 @@ export class HostedConnection {
         session: this.#session,
         config: this.#directConfig,
         onopen: () => this.onroute?.("direct"),
+        onend: ({ backOnRelay }) => {
+          if (backOnRelay) this.onroute?.("relayed");
+        },
       });
     }
     this.#path?.handle(signal);

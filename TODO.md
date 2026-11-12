@@ -48,24 +48,20 @@ and consume the package framework-dependent and check that the OpenSSL
 `msquic.dll` lands beside it, as `single-file-quic` checks the runtime's;
 there is no Windows 10 runner to do more.
 
-## A direct path on a carrier gave up once in 30 s
+## ~~A direct path on a carrier gave up once in 30 s~~
 
-On the phone, on a carrier, ICE reported "disconnected" for longer than the
-3 s grace once in a run and the session ended; the link was back, relayed, in
-1.8 s and direct again shortly after. A longer grace on a carrier, or a
-liveness check of the path's own, would ride such a gap out instead.
+Done differently: a path that stops answering now sends the session back to
+the relay instead of ending it (acknowledgements and a resend, *A direct
+path* in `docs/relay1.md`), so a gap on a carrier costs a few seconds on the
+relay, not a session. Verified on real stacks (Edge on Windows 10 against the
+Node host, UDP blocked for 12 s): no request failed, direct again 5 s after.
+Still worth trying on the phone itself, on a carrier.
 
 ## The direct path between JavaScript ends: what is left
 
 `directPath` (WebRTC carrying relay1 records, `docs/relay1.md`, *A direct
-path*) is in and off by default. Still open, in the order they would pay:
+path*) is in and on by default, through Google's STUN server. Still open:
 
-- **Try it in real browsers, across real networks.** The tests run on a fake
-  WebRTC and one run by hand on `node-datachannel`. Two browsers on one LAN
-  hide their addresses behind mDNS names, and whether that resolves depends
-  on the operating systems. Turn it on by default only after that.
-- **Fall back to the relay when the path dies**, instead of ending the
-  session. Needs to know what the channel delivered.
 - **The .NET half**, for a .NET host with pages joining it. A WebRTC stack is
   a large dependency.
 - **A liveness check of its own on the channel**, if ICE's 3 s of

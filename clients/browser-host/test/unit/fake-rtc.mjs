@@ -10,7 +10,9 @@
 /// @param connects whether two ends that have signalled can reach each
 ///   other. False is two networks that cannot: everything is exchanged and no
 ///   channel ever opens.
-export function fakeRtc({ connects = true } = {}) {
+/// @param delayMs how long a message is on its way; what is on its way when
+///   the network is cut never arrives.
+export function fakeRtc({ connects = true, delayMs = 0 } = {}) {
   const offers = new Map();
   const net = {
     connects,
@@ -27,6 +29,14 @@ export function fakeRtc({ connects = true } = {}) {
         pc.onconnectionstatechange?.();
       }
       for (const pc of net.connections) pc.channel?._end();
+    },
+    /// The same for one end only, as a network that went away where the other
+    /// end cannot hear it: what that end sends is lost, and its ICE never says.
+    cutOne(pc) {
+      pc.unheard = true;
+      pc.connectionState = "failed";
+      pc.onconnectionstatechange?.();
+      pc.channel?._end();
     },
   };
 
@@ -46,7 +56,8 @@ export function fakeRtc({ connects = true } = {}) {
       // `binaryType = "arraybuffer"` asks for; text stays text.
       const copy = typeof data === "string" ? data : Uint8Array.from(data).buffer;
       const peer = this.peer;
-      peer.delivery = peer.delivery.then(() => {
+      const wait = delayMs ? () => new Promise((resolve) => setTimeout(resolve, delayMs)) : () => {};
+      peer.delivery = peer.delivery.then(wait).then(() => {
         if (peer.readyState === "open") peer.onmessage?.({ data: copy });
       });
     }
@@ -158,6 +169,8 @@ export function fakeRtc({ connects = true } = {}) {
       // What a real stack does at the other end: ICE goes before the channel
       // says so. The double used to keep it up, and a check that relied on
       // that passed here and failed for real.
+      // Unless the network between them is gone, which nothing crosses.
+      if (this.unheard) return;
       const other = this.other;
       if (other && other.connectionState === "connected") {
         other.connectionState = "failed";

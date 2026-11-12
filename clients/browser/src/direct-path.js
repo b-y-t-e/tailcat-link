@@ -30,6 +30,14 @@ export const DirectSignal = {
   Answer: 2,
   /// One ICE candidate, as the JSON of an `RTCIceCandidateInit`.
   Candidate: 3,
+  /// How far an end has read what came by the channel: `RECEIVED_SIGNAL` in
+  /// relay1.js, which handles it — it is the session's, not the path's.
+  Received: 4,
+  /// "My end of the path is gone, I am on the relay": sent by the relay by an
+  /// end that fell back. The path may be dead only one way, or dead before
+  /// the goodbye could cross it, and the other end's ICE took twenty seconds
+  /// and more to notice — sending into it all the while.
+  Lost: 5,
 };
 
 export const encodeSignal = (kind, text = "") => concat(new Uint8Array([kind]), utf8(text));
@@ -53,7 +61,8 @@ const ESTABLISH_MS = 15_000;
 // "disconnected" is ICE saying its checks have stopped being answered, which
 // a moment of packet loss also does. Past this it is taken for the path being
 // gone — sooner than ICE's own half a minute, during which everything sent
-// queues behind a channel that will never deliver it.
+// queues behind a channel that will never deliver it. Short, because taking a
+// path for gone costs only a move back to the relay.
 const DISCONNECTED_GRACE_MS = 3_000;
 
 // The channel takes whatever it is given and buffers it; past its limit a
@@ -145,17 +154,20 @@ export class DirectPath {
   #drained = null;
   // Whether ICE ever connected. From then on the far end may have seen the
   // channel open and moved its sending there, so giving up quietly is no
-  // longer possible: its records would arrive nowhere.
+  // longer possible: its records would arrive nowhere, and only the far end
+  // knowing to send them again by the relay keeps the session.
   #connected = false;
   // Whether the other end said it was leaving: see LEAVING.
   #peerLeaving = false;
   #openedAt = null;
+  #backOnRelay = false;
   #state = "idle";
 
   /// @param onopen called when records start leaving on the channel.
-  /// @param onend called once with `{ heldMs, failed }`: how long the path
-  ///   carried the session in milliseconds, or null if it never did, and
-  ///   whether the path itself gave out rather than the session under it.
+  /// @param onend called once with `{ heldMs, failed, backOnRelay }`: how
+  ///   long the path carried the session in milliseconds, or null if it never
+  ///   did; whether the path itself gave out rather than the session under
+  ///   it; and whether the session carries on by the relay after it had moved.
   constructor({ session, config, onopen = () => {}, onend = () => {} }) {
     this.#session = session;
     this.#config = config;
@@ -209,6 +221,11 @@ export class DirectPath {
           return;
         case DirectSignal.Decline:
           if (this.#state === "connecting") this.#fail(new Error("the other end takes no direct path"));
+          return;
+        case DirectSignal.Lost:
+          // Only for a path that was up: one still being set up is a later
+          // attempt, which the signal, sent before it was offered, is not about.
+          if (this.#state === "open") this.#fail(new Error("the other end lost the direct path"));
           return;
         default:
           // A kind from a version after this one.
@@ -296,7 +313,7 @@ export class DirectPath {
       }
       // Not awaited: the session takes records one at a time by itself, and
       // one that will not open is its business to ignore.
-      this.#session.handleRecord(new Uint8Array(event.data)).catch(() => {});
+      this.#session.handleRecord(new Uint8Array(event.data), { direct: true }).catch(() => {});
     };
     channel.onclose = () => this.#fail(new Error("the direct path closed"));
     channel.onerror = (event) => this.#fail(event?.error ?? new Error("the direct path failed"));
@@ -352,23 +369,32 @@ export class DirectPath {
 
   // The attempt is over. Before ICE connected nothing was ever sent on the
   // channel by either end, and the session carries on by the relay as if
-  // nothing had been tried. After, it cannot: see `#connected`.
+  // nothing had been tried. After, it carries on there only by sending again
+  // what the far end has not owned up to (`leaveDirect`); the far end, seeing
+  // the channel go, does the same. Records keep arriving from either path
+  // until both have, so the session still expects two.
   //
   // `pathFailed` is false for a channel the other end closed while the path
-  // was up. The session ends all the same, but it is not reported as a path
-  // lost — every client that finished normally used to reach a host's log as
-  // one — and not counted against the path in the dialler's backoff.
+  // was up: it is closing the session, which ends here too, but is not
+  // reported as a path lost — every client that finished normally used to
+  // reach a host's log as one — and not counted against the path in the
+  // dialler's backoff.
   #fail(error, { pathFailed = !this.#peerLeaving } = {}) {
     if (this.#state === "closed") return;
     if (!pathFailed) error = new Error("the other end closed the direct path");
-    const sessionGoesToo = this.#connected;
+    const connected = this.#connected;
+    // Before the attempt ends, so a send waiting on the channel finds the
+    // session already back on the relay.
+    const carriesOn = connected && pathFailed && this.#session.leaveDirect();
+    this.#backOnRelay = carriesOn;
+    if (carriesOn) this.#signal(DirectSignal.Lost).catch(() => {});
     this.#finish(pathFailed);
-    if (sessionGoesToo) {
-      const message = error?.message ?? "closed";
-      this.#session.close(new Error(pathFailed ? `the direct path was lost: ${message}` : message));
-    } else {
+    if (!connected) {
       // One path again, and the rule for one: a gap is a record lost.
       this.#session.expectTwoPaths(false);
+    } else if (!carriesOn) {
+      const message = error?.message ?? "closed";
+      this.#session.close(new Error(pathFailed ? `the direct path was lost: ${message}` : message));
     }
   }
 
@@ -423,6 +449,9 @@ export class DirectPath {
       if (leaving) setTimeout(close, LEAVE_MS).unref?.();
       else close();
     }
-    if (wasBegun) this.onend({ heldMs: this.#openedAt === null ? null : Date.now() - this.#openedAt, failed });
+    if (wasBegun) {
+      const heldMs = this.#openedAt === null ? null : Date.now() - this.#openedAt;
+      this.onend({ heldMs, failed, backOnRelay: this.#backOnRelay });
+    }
   }
 }

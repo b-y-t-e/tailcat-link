@@ -190,9 +190,13 @@ library is, roughly how the relays work, and examples that compile.
   before pairing and the answer names its LAN addresses; an end setting a
   path up holds records that arrive ahead of their turn (4 MiB, 10 s), because
   the relay is slower than the channel and the move overtakes it; and a path
-  that dies after ICE connected ends the session, because nothing says what
-  the channel delivered — with a backoff on the dialler that outlives
-  sessions, or a flaky path would take each one in turn. An end that closes on
+  that dies after ICE connected sends the session back to the relay, which
+  needs to know what the channel delivered: each end says how far it read
+  (`Received`, kind 4), keeps what it sent there until covered, resends the
+  rest by the relay and says `Lost` (kind 5) there, because the far end's ICE
+  took 20+ s to notice a path dead one way. A far end that never said
+  `Received` still costs the session. The dialler backs off before offering
+  again, across sessions, or a flaky path would be retried without end. An end that closes on
   purpose sends the text `leaving` on the channel first, so the other end
   does not report a path lost; ICE's state could not tell them apart on a real
   stack, though it did on `fake-rtc.mjs` — which now closes like a real one,

@@ -98,6 +98,24 @@ export const CONTROL_STREAM = 0;
 const HELD_BYTES = 4 * 1024 * 1024;
 const HELD_PATIENCE_MS = 10_000;
 
+/// The control frame that says how far an end has read what came by the
+/// second path: this byte, then the counter it expects next (8 bytes). An end
+/// keeps every record it sent there until it is covered, and when the path
+/// gives out sends what is not by the relay — the far end skips what it
+/// already has by counter — so a lost path costs the session nothing. An end
+/// that never says it is one the session cannot fall back with, and ends with
+/// the path as it always did. Kind 4 among `DirectSignal`'s.
+export const RECEIVED_SIGNAL = 4;
+// How soon after records arrive on the second path they are owned up to; and
+// how many acknowledgements alone may arrive before they are acknowledged in
+// turn, which is only so the far end can let go of them too.
+const RECEIVED_EVERY_MS = 200;
+const RECEIVED_AFTER_RECEIPTS = 32;
+// What an end keeps of what it sent by the second path and has not heard
+// read. Past it the oldest go, and until the far end owns up to everything
+// past them the session cannot fall back.
+const KEPT_BYTES = 8 * 1024 * 1024;
+
 /// A write refused because the peer let go of the stream, which is what QUIC
 /// says with `StreamAborted`; `PeerReleasedStreamException` in .NET.
 export class PeerReleasedStreamError extends Error {}
@@ -323,6 +341,14 @@ export class Relay1Session {
   #held = new Map();
   #heldBytes = 0;
   #heldTimer = null;
+  #kept = [];
+  #keptBytes = 0;
+  #keptFrom = 0n;
+  #peerRead = 0n;
+  #peerSaysRead = false;
+  #owed = 0;
+  #owedData = false;
+  #receivedTimer = null;
   #closeListeners = [];
   #closed = null;
 
@@ -379,10 +405,32 @@ export class Relay1Session {
   }
 
   /// Sends every record from here on through `path` — `{ send(record) }` —
-  /// instead of the relay. One way: what `path` took and did not deliver
-  /// cannot be known, so a path that fails ends the session.
+  /// instead of the relay, keeping each until the far end says it has read
+  /// it (`RECEIVED_SIGNAL`).
   sendOn(path) {
     this.#direct = path;
+  }
+
+  /// Sends by the relay again, starting with every record the second path
+  /// took that the far end has not owned up to. Returns whether the session
+  /// carries on; when it cannot — the far end never says what it read, or
+  /// what it has not was let go of, or the relay is gone too — the caller
+  /// ends it.
+  leaveDirect() {
+    if (this.#closed) return false;
+    if (!this.#direct) return true;
+    this.#direct = null;
+    const kept = this.#kept;
+    this.#kept = [];
+    this.#keptBytes = 0;
+    if (!this.#peerSaysRead || this.#peerRead < this.#keptFrom || this.#derp.closed) return false;
+    // At once, so nothing sent after overtakes them: a send waiting on the
+    // dead path finds the session already back on the relay, and its record
+    // among these.
+    for (const { counter, record } of kept) {
+      if (counter >= this.#peerRead) this.#derp.sendPacket(this.#peerPublic, record);
+    }
+    return true;
   }
 
   openStream() {
@@ -400,13 +448,16 @@ export class Relay1Session {
   ///
   /// One at a time, whoever calls: the counter is checked after an await, and
   /// with two paths there are two callers.
-  handleRecord(record) {
-    const handled = this.#receiving.then(() => this.#handle(record));
+  ///
+  /// @param direct whether it came by the second path, whose sender keeps it
+  ///   until told it was read.
+  handleRecord(record, { direct = false } = {}) {
+    const handled = this.#receiving.then(() => this.#handle(record, direct));
     this.#receiving = handled.catch(() => {});
     return handled;
   }
 
-  async #handle(record) {
+  async #handle(record, direct) {
     if (this.#closed) return;
     let counter;
     let plaintext;
@@ -436,16 +487,19 @@ export class Relay1Session {
       return;
     }
 
-    this.#take(plaintext);
+    let data = !this.#take(plaintext);
+    let taken = 1;
     let caughtUp = false;
     while (!this.#closed && this.#held.size) {
       const next = this.#held.get(this.#expectedCounter);
       if (!next) break;
       this.#held.delete(this.#expectedCounter);
       this.#heldBytes -= next.length;
-      this.#take(next);
+      data = !this.#take(next) || data;
+      taken++;
       caughtUp = true;
     }
+    if (direct) this.#owe(taken, data);
     // The gap that was being timed has closed; what is still held waits on a
     // later one, with a wait of its own.
     if (caughtUp || this.#heldTimer) this.#watchTheGap();
@@ -475,6 +529,50 @@ export class Relay1Session {
     this.#heldTimer.unref?.();
   }
 
+  // Says how far this end has read, soon: at once would be a record back for
+  // every record, and the far end only needs it before its path gives out.
+  // Acknowledgements alone are owned up to only now and then, or two ends
+  // would answer each other's forever.
+  #owe(records, data) {
+    this.#owed += records;
+    this.#owedData ||= data;
+    if (this.#receivedTimer || (!this.#owedData && this.#owed < RECEIVED_AFTER_RECEIPTS)) return;
+    this.#receivedTimer = setTimeout(() => {
+      this.#receivedTimer = null;
+      this.#owed = 0;
+      this.#owedData = false;
+      if (this.#closed) return;
+      this.sendControl(concat(new Uint8Array([RECEIVED_SIGNAL]), u64be(this.#expectedCounter))).catch(() => {});
+    }, RECEIVED_EVERY_MS);
+    this.#receivedTimer.unref?.();
+  }
+
+  #onReceived(payload) {
+    if (payload.length < 9) return;
+    const read = readU64be(payload, 1);
+    this.#peerSaysRead = true;
+    if (read <= this.#peerRead) return;
+    this.#peerRead = read;
+    let dropped = 0;
+    while (dropped < this.#kept.length && this.#kept[dropped].counter < read) {
+      this.#keptBytes -= this.#kept[dropped].record.length;
+      dropped++;
+    }
+    if (dropped) this.#kept.splice(0, dropped);
+  }
+
+  #keep(counter, record) {
+    this.#kept.push({ counter, record });
+    this.#keptBytes += record.length;
+    while (this.#keptBytes > KEPT_BYTES && this.#kept.length > 1) {
+      const gone = this.#kept.shift();
+      this.#keptBytes -= gone.record.length;
+      this.#keptFrom = gone.counter + 1n;
+    }
+  }
+
+  // Returns whether the frame was an acknowledgement, which is not news that
+  // needs acknowledging.
   #take(plaintext) {
     this.#expectedCounter += 1n;
 
@@ -489,32 +587,37 @@ export class Relay1Session {
       frame = { streamId, flags: plaintext[read], payload: plaintext.slice(read + 1) };
     } catch (error) {
       this.close(error);
-      return;
+      return false;
     }
 
     if (frame.streamId === CONTROL_STREAM) {
+      if (frame.payload[0] === RECEIVED_SIGNAL) {
+        this.#onReceived(frame.payload);
+        return true;
+      }
       try {
         this.oncontrol?.(frame.payload);
       } catch {
         // What the far end says about a path is advice; a listener that
         // cannot take it must not cost the session that works without it.
       }
-      return;
+      return false;
     }
 
     const stream = this.#streamFor(frame.streamId);
-    if (!stream) return; // A late frame for a stream that has been closed.
+    if (!stream) return false; // A late frame for a stream that has been closed.
 
     if (frame.flags & FrameFlags.Window) {
       if (frame.payload.length >= 4) stream._onWindow(readU32be(frame.payload));
-      return;
+      return false;
     }
     if (frame.flags & FrameFlags.Reset) {
       stream._onReset(str(frame.payload));
-      return;
+      return false;
     }
     stream._onData(frame.payload);
     if (frame.flags & FrameFlags.Fin) stream._onFin();
+    return false;
   }
 
   async _sendFrame(streamId, flags, payload) {
@@ -525,17 +628,24 @@ export class Relay1Session {
     // like one the relay dropped.
     const send = this.#sending.then(async () => {
       if (this.#closed) throw this.#closed;
-      const record = await sealRecord(frame, this.#sendKey, this.#sendCounter);
+      const counter = this.#sendCounter;
+      const record = await sealRecord(frame, this.#sendKey, counter);
       this.#sendCounter += 1n;
-      if (!this.#direct) {
+      const direct = this.#direct;
+      if (!direct) {
         this.#derp.sendPacket(this.#peerPublic, record);
         return;
       }
+      // Before the send, which may wait on a full channel: a path that gives
+      // out meanwhile resends it with the rest.
+      this.#keep(counter, record);
       try {
-        await this.#direct.send(record);
+        await direct.send(record);
       } catch (error) {
-        // The counter is taken, so the far end is owed this record and will
-        // not get it: the session is over whether or not anyone says so.
+        // The counter is taken, so the far end is owed this record: by the
+        // relay with what else it has not read — already, if the path's end
+        // was noticed first — or the session is over.
+        if (this.#direct === direct ? this.leaveDirect() : !this.#closed) return;
         this.close(error);
         throw error;
       }
@@ -575,6 +685,8 @@ export class Relay1Session {
     this.#heldTimer = null;
     this.#held.clear();
     this.#heldBytes = 0;
+    clearTimeout(this.#receivedTimer);
+    this.#kept = [];
     this.onclose?.(error);
     for (const listener of this.#closeListeners.splice(0)) listener(error);
   }

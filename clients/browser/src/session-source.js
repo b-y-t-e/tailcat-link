@@ -92,6 +92,7 @@ export class RelayedConnection {
       onopen: () => this.onroute?.("direct"),
       onend: (outcome) => {
         direct.backoff.ended(outcome);
+        if (outcome.backOnRelay) this.onroute?.("relayed");
         // An attempt that came to nothing left the session where it was, on
         // the relay; it is tried again from there.
         this.startDirectPath();
@@ -151,8 +152,9 @@ export class RelayedConnection {
   // leaves on the channel and arrives from it, and ending it here ended
   // sessions that were working, every time a relay connection was cut. One
   // that has not gone direct has nothing else, and ends as it always did. If
-  // the path goes later, the session ends then, and the link dials again —
-  // over a new relay connection, which every dial opens anyway.
+  // the path goes later, the session has no relay to fall back on and ends
+  // then (`leaveDirect`), and the link dials again — over a new relay
+  // connection, which every dial opens anyway.
   #relayLost(error) {
     if (this.#path?.open) return;
     this.#session.close(error);

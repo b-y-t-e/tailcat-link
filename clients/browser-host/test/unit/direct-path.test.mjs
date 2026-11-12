@@ -167,7 +167,73 @@ test("two networks that cannot reach each other cost the link nothing", async ()
   }
 });
 
-test("a direct path that dies ends the session, and is offered again inside the next one", async () => {
+test("a direct path that dies goes back to the relay, the session and what is in flight with it", async () => {
+  // Each end keeps what it sent on the channel until the other says it read
+  // it, and sends the rest by the relay when the channel goes: a game on a
+  // path that drops for a moment slows down rather than reconnects.
+  const relay = memoryRelay();
+  // Slow enough that the cut catches records on the channel, which are lost.
+  const net = fakeRtc({ delayMs: 3 });
+  const host = await startHost(relay, { directPath: net });
+  host.onRequest(async (peer, text) => {
+    await delay(5);
+    return text;
+  });
+  const direct = { RTCPeerConnection: net.RTCPeerConnection, _retryMs: 150 };
+  const page = await joinPage(relay, { invitationCode: host.invitationCode, directPath: direct });
+  const routes = routesOf(page.events);
+  const disconnected = [];
+  page.events.addEventListener("disconnected", (event) => disconnected.push(event.detail));
+  try {
+    await until(() => page.route === "direct", "the page to go direct");
+    assert.equal(await page.request("before the cut"), "before the cut");
+    // Long enough for each end to have owned up to what it read.
+    await delay(300);
+
+    const inFlight = Array.from({ length: 20 }, (_, i) => page.request(`request ${i}`));
+    await delay(10);
+    net.cut();
+    assert.deepEqual(await Promise.all(inFlight), Array.from({ length: 20 }, (_, i) => `request ${i}`));
+    assert.equal(page.route, "relayed");
+    assert.deepEqual(disconnected, [], "the session ended with its path");
+
+    await until(() => page.route === "direct", "the path to be offered again");
+    assert.deepEqual(routes, ["relayed", "direct", "relayed", "direct"]);
+    assert.equal(await page.request("direct again"), "direct again");
+    assert.deepEqual(disconnected, []);
+  } finally {
+    await page.close();
+    await host.close();
+  }
+});
+
+test("an end whose path died says so by the relay, and the other end, which saw nothing, follows", async () => {
+  // A path can die one way, or before the goodbye crosses it; a real ICE then
+  // took twenty seconds and more to notice at the other end.
+  const relay = memoryRelay();
+  const net = fakeRtc();
+  const host = await startHost(relay, { directPath: net });
+  host.onRequest((peer, text) => text);
+  const page = await joinPage(relay, { invitationCode: host.invitationCode, directPath: { RTCPeerConnection: net.RTCPeerConnection, _retryMs: 60_000 } });
+  const disconnected = [];
+  page.events.addEventListener("disconnected", (event) => disconnected.push(event.detail));
+  try {
+    const peer = await host.waitForPeer();
+    await until(() => page.route === "direct" && peer.route === "direct", "both ends to go direct");
+    assert.equal(await page.request("before"), "before");
+    await delay(300);
+
+    net.cutOne(net.connections[0]);
+    await until(() => peer.route === "relayed", "the host to hear the path is gone");
+    assert.equal(await page.request("after"), "after");
+    assert.deepEqual(disconnected, []);
+  } finally {
+    await page.close();
+    await host.close();
+  }
+});
+
+test("a direct path that dies before either end said what it read ends the session, and is offered again inside the next one", async () => {
   const relay = memoryRelay();
   const net = fakeRtc();
   const host = await startHost(relay, { directPath: net });
@@ -178,8 +244,9 @@ test("a direct path that dies ends the session, and is offered again inside the 
   try {
     await until(() => page.route === "direct", "the page to go direct");
     net.cut();
-    // What the channel had taken cannot be known, so the session is over; the
-    // request is carried to the next one, as after any cut.
+    // Nothing has been owned up to yet, so what the channel took cannot be
+    // known and the session is over; the request is carried to the next one,
+    // as after any cut. (As with an end from before acknowledgements.)
     assert.equal(await page.request("after the cut"), "after the cut");
     assert.equal(page.route, "relayed");
     assert.deepEqual(routes, ["relayed", "direct", "none", "relayed"]);

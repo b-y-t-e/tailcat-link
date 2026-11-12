@@ -233,6 +233,8 @@ frame on stream 0, no flags:   kind (1B) | text (UTF-8)
 1  Offer       the dialler's session description (SDP)
 2  Answer      the host's
 3  Candidate   one ICE candidate, the JSON of an RTCIceCandidateInit
+4  Received    8 bytes, big-endian: the counter this end expects next
+5  Lost        nothing follows: "my end of the path is gone, I am on the relay"
 ```
 
 An unknown kind is ignored. Being frames in records, these are sealed under
@@ -262,8 +264,8 @@ be at the far end of it.
 ### Moving, and what it costs
 
 Each end moves its *sending* to the channel when the channel opens there, and
-never moves it back. Two consequences, and they are the whole of what the
-record layer had to learn:
+back to the relay only when the path gives out. Two consequences, and they
+are the whole of what the record layer had to learn:
 
 - **Records overtake each other once.** What an end sent by the relay just
   before it moved is still crossing — the relay is the slow path — when its
@@ -275,13 +277,26 @@ record layer had to learn:
   ends, as it always did. Held only after it has opened, so nothing forged
   takes up the room. A record seen before is still ignored, whichever path
   brought it. An attempt that comes to nothing takes the allowance back.
-- **A path that dies takes the session with it.** What the channel accepted
-  and did not deliver cannot be known — there are no acknowledgements here —
-  so there is no going back to the relay mid-session without a gap. Once ICE
-  has connected, a channel that closes, fails, or stops answering for 3 s
-  ends the session; the link dials again and its exchanges resume, as after
-  any cut. Before ICE has connected neither end has sent anything on the
-  channel, and an attempt that fails then costs the session nothing.
+- **A path that dies sends the session back to the relay.** What the channel
+  accepted and did not deliver cannot be known from the channel, so each end
+  says how far it has read what came by it: `Received`, at most 200 ms after
+  records arrive there (and after 32 acknowledgements alone, so the two ends
+  do not answer each other's for ever). An end keeps every record it sent on
+  the channel until it is covered, up to 8 MiB. Once ICE has connected, a
+  channel that closes, fails, or stops answering for 3 s makes an end send
+  by the relay again, starting with what it kept — the far end skips what it
+  already has by counter — and say `Lost` there, because a path can die one
+  way, or before anything crosses it, and a real ICE took more than twenty
+  seconds to notice at the other end, which sent into the dead channel all
+  that time. Measured on real stacks (Edge on Windows 10 against the
+  JavaScript host under Node, UDP blocked for 12 s): back on the relay about
+  10 s after the cut at both ends, no request failed, and direct again 5 s
+  later. The session ends instead, as it used to, when the far end has
+  never said `Received` (an end from before it, or a path that died within
+  its first 200 ms), when what it has not read was let go of past the 8 MiB,
+  or when the relay connection is gone too. Before ICE has connected neither
+  end has sent anything on the channel, and an attempt that fails then costs
+  the session nothing.
 
 **An end that closes on purpose says so first.** It sends the text message
 `leaving` on the channel — the only text the channel carries; everything else
@@ -316,8 +331,8 @@ no longer cross the relay, and ending it with the relay ended working
 sessions every time a relay connection was cut. A session that has not gone
 direct has nothing else, and ends with its relay as it always did. A host
 keeps such a session listed, so a machine that dials again still replaces it.
-If the path goes later, the session ends then and the link dials again, over
-a new relay connection.
+If the path goes later, there is no relay to fall back to: the session ends
+then and the link dials again, over a new relay connection.
 
 ## Cost
 
@@ -461,9 +476,6 @@ peer.
 - Should a `relay1` session be allowed to migrate to a new relay connection
   rather than dying with it? It would need the record counters to survive,
   which is most of a real transport. Not until something demands it.
-- Should a direct path that dies fall back to the relay instead of ending the
-  session? It needs to know what the channel delivered, which is
-  acknowledgements, which is most of a real transport again.
 - The .NET half of the direct path: a WebRTC stack is a large dependency for
   what a .NET machine already gets from QUIC, so it buys something only for
   a .NET host with pages joining it.
