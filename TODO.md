@@ -18,6 +18,23 @@ reach a peer whose announcement was heard locally. Open questions:
   in an invitation code;
 - `clients/browser` cannot do it (no UDP), so it stays .NET-only.
 
+## From the field test (tools/field-test/RESULTS.md)
+
+- **A .NET request over a direct QUIC path costs two round trips**: 85 ms on
+  a path that probes at 41 ms, where a browser on the same networks took
+  48 ms. Find out where the second one goes (stream opening, an
+  acknowledgement before the answer, QUIC's ACK delay) before anything
+  interactive leans on .NET-to-.NET.
+- **A .NET client connects in ~10 s from cold** (6 s building the node and
+  measuring regions, 4 s of QUIC handshake over the relay); a page in under
+  one. The region measurement could run beside the dial rather than before it.
+- **"The direct path was lost: the direct path closed"** is what a host logs
+  for a client that simply finished. Tell a channel closed by the other end
+  apart from one that failed.
+- **The LAN path from a browser to a Node host runs through the router**, as
+  Edge's address is an mDNS name `node-datachannel` does not resolve. Works;
+  costs a little latency.
+
 ## QUIC on Windows 10: try it on one
 
 `Microsoft.Native.Quic.MsQuic.OpenSSL` referenced by the application gives

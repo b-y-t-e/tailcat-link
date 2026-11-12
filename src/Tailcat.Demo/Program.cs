@@ -50,6 +50,13 @@ if (args.Length == 0 || args[0] is "-h" or "--help")
               few seconds and answers what it asks, uppercased. The code is
               needed the first time only; --forget drops the stored pairing.
 
+          tailcat-demo field-host [--reports <file>]
+          tailcat-demo field-join <invitation-code> [--name <n>] [--seconds <s>]
+              The .NET half of tools/field-test: a host that answers pings and
+              collects what each client reports, and a client that pings it
+              for a while and reports the route and round trips it saw. Either
+              pairs with the JavaScript ones; see tools/field-test/README.md.
+
           --relay-only
               Offers only the relayed transport, whatever this machine can
               do. What a browser and a Windows 10 machine get, on a machine
@@ -103,6 +110,17 @@ try
         case "join":
             return await JoinAsync(args.Length >= 2 && !args[1].StartsWith("--", StringComparison.Ordinal) ? args[1] : null, args.Contains("--forget"), cts.Token);
 
+        case "field-host":
+            return await Tailcat.Demo.FieldTest.HostAsync(relayOnly, OptionAfter("--reports"), cts.Token);
+
+        case "field-join" when args.Length >= 2:
+            return await Tailcat.Demo.FieldTest.JoinAsync(
+                args[1],
+                OptionAfter("--name") ?? Environment.MachineName,
+                int.Parse(OptionAfter("--seconds") ?? "30", System.Globalization.CultureInfo.InvariantCulture),
+                relayOnly,
+                cts.Token);
+
         default:
             Console.Error.WriteLine($"unknown command: {string.Join(' ', args)}");
             return 2;
@@ -117,6 +135,12 @@ catch (Exception ex)
 {
     Console.Error.WriteLine($"error: {ex.Message}");
     return 1;
+}
+
+string? OptionAfter(string name)
+{
+    int at = Array.IndexOf(args, name);
+    return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
 }
 
 static async Task<TailcatNode> StartNodeAsync(bool relayOnly, CancellationToken ct)

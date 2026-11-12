@@ -1,0 +1,18 @@
+{
+  "name": "tailcat-field-test",
+  "private": true,
+  "type": "module",
+  "description": "Every pairing of the .NET and JavaScript ends, on real machines and networks",
+  "scripts": {
+    "host": "node host.mjs",
+    "serve": "node web/serve.mjs",
+    "summary": "node summary.mjs"
+  },
+  "dependencies": {
+    "node-datachannel": "0.33.6",
+    "playwright-core": "1.65.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

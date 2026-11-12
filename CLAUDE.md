@@ -45,6 +45,11 @@ npm --prefix clients/browser-host test
 npm --prefix clients/browser-host run live -- --self   # hosts and joins itself over a real relay
 npm --prefix clients/browser-host run live             # hosts; then tailcat-demo join <code>
 
+# Every pairing of the .NET and JavaScript ends on real machines, networks and
+# a phone: not CI, see tools/field-test/README.md and RESULTS.md (the last run)
+node tools/field-test/host.mjs                  # JavaScript host, real WebRTC
+dotnet run --project src/Tailcat.Demo -- field-host | field-join <code>
+
 dotnet pack -c Release -o artifacts   # builds the four published packages
 python Deploy/publish.py --dry-run    # everything a release does but the push
 ```
