@@ -52,7 +52,7 @@ jobs:
             echo "::endgroup::"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: test-results-${{ matrix.os }}
@@ -197,7 +197,7 @@ jobs:
           done
           dotnet run
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nupkg
           path: artifacts/*.*nupkg
