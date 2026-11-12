@@ -194,7 +194,9 @@ library is, roughly how the relays work, and examples that compile.
   needs to know what the channel delivered: each end says how far it read
   (`Received`, kind 4), keeps what it sent there until covered, resends the
   rest by the relay and says `Lost` (kind 5) there, because the far end's ICE
-  took 20+ s to notice a path dead one way. A far end that never said
+  took 20+ s to notice a path dead one way. Each end also pulses `alive` on
+  the channel when idle 500 ms and leaves a path silent 2.5 s, once it has
+  heard the far end pulse: ICE alone took ~10 s. A far end that never said
   `Received` still costs the session. The dialler backs off before offering
   again, across sessions, or a flaky path would be retried without end. An end that closes on
   purpose sends the text `leaving` on the channel first, so the other end

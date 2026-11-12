@@ -30,6 +30,11 @@ export function fakeRtc({ connects = true, delayMs = 0 } = {}) {
       }
       for (const pc of net.connections) pc.channel?._end();
     },
+    /// Lets nothing through either way and says nothing about it: ICE stays
+    /// "connected", as a real one does for seconds after a path dies.
+    silence() {
+      net.silent = true;
+    },
     /// The same for one end only, as a network that went away where the other
     /// end cannot hear it: what that end sends is lost, and its ICE never says.
     cutOne(pc) {
@@ -52,6 +57,7 @@ export function fakeRtc({ connects = true, delayMs = 0 } = {}) {
     send(data) {
       if (this.readyState !== "open") throw new Error("the channel is not open");
       net.sent++;
+      if (net.silent) return;
       // Copied, as a real channel does, and as an ArrayBuffer, which is what
       // `binaryType = "arraybuffer"` asks for; text stays text.
       const copy = typeof data === "string" ? data : Uint8Array.from(data).buffer;

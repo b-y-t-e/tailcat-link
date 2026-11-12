@@ -175,7 +175,7 @@ exactly where it was.
 - **The host learns this machine's addresses, and it learns the host's** —
   the local ones too, where the browser gives them out. They are sent only
   after the host has accepted the pairing, and only to it.
-- **A direct path that dies sends the link back to the relay**, a few
+- **A direct path that dies sends the link back to the relay**, about two
   seconds after it stopped answering, with nothing lost and nothing
   reconnected: channels and streams carry on, slower. `route` says
   `relayed`, and a direct path is tried again after a wait. Against a host

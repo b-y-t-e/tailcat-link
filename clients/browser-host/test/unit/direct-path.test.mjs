@@ -233,6 +233,59 @@ test("an end whose path died says so by the relay, and the other end, which saw 
   }
 });
 
+test("a path that goes silent while ICE still says connected is left within seconds", async () => {
+  // A real ICE said "disconnected" 6–7 s after a path died, and the grace
+  // came on top; each end's own pulse notices sooner.
+  const relay = memoryRelay();
+  const net = fakeRtc();
+  const direct = { RTCPeerConnection: net.RTCPeerConnection, _aliveMs: 20, _silentMs: 150, _retryMs: 60_000 };
+  const host = await startHost(relay, { directPath: direct });
+  host.onRequest((peer, text) => text);
+  const page = await joinPage(relay, { invitationCode: host.invitationCode, directPath: direct });
+  const disconnected = [];
+  page.events.addEventListener("disconnected", (event) => disconnected.push(event.detail));
+  try {
+    const peer = await host.waitForPeer();
+    await until(() => page.route === "direct" && peer.route === "direct", "both ends to go direct");
+    assert.equal(await page.request("before"), "before");
+    await delay(300);
+
+    net.silence();
+    const asked = page.request("across the silence");
+    await until(() => page.route === "relayed" && peer.route === "relayed", "both ends to leave the silent path");
+    assert.equal(await asked, "across the silence");
+    assert.deepEqual(disconnected, []);
+  } finally {
+    await page.close();
+    await host.close();
+  }
+});
+
+test("an end that never pulses is not taken for dead when it is only quiet", async () => {
+  // An end from before the pulse says nothing when idle; only one that has
+  // pulsed once is held to it.
+  const relay = memoryRelay();
+  const net = fakeRtc();
+  const host = await startHost(relay, {
+    directPath: { RTCPeerConnection: net.RTCPeerConnection, _aliveMs: 60_000 },
+    heartbeatInterval: 60_000,
+  });
+  host.onRequest((peer, text) => text);
+  const page = await joinPage(relay, {
+    invitationCode: host.invitationCode,
+    directPath: { RTCPeerConnection: net.RTCPeerConnection, _aliveMs: 20, _silentMs: 100 },
+    heartbeatInterval: 60_000,
+  });
+  try {
+    await until(() => page.route === "direct", "the page to go direct");
+    await delay(400);
+    assert.equal(page.route, "direct");
+  } finally {
+    await page.close();
+    await host.close();
+  }
+});
+
 test("a direct path that dies before either end said what it read ends the session, and is offered again inside the next one", async () => {
   const relay = memoryRelay();
   const net = fakeRtc();

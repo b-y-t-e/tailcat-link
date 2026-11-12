@@ -283,15 +283,21 @@ are the whole of what the record layer had to learn:
   records arrive there (and after 32 acknowledgements alone, so the two ends
   do not answer each other's for ever). An end keeps every record it sent on
   the channel until it is covered, up to 8 MiB. Once ICE has connected, a
-  channel that closes, fails, or stops answering for 3 s makes an end send
+  channel that closes, fails, goes silent (below), or that ICE calls
+  "disconnected" for 3 s makes an end send
   by the relay again, starting with what it kept — the far end skips what it
   already has by counter — and say `Lost` there, because a path can die one
   way, or before anything crosses it, and a real ICE took more than twenty
   seconds to notice at the other end, which sent into the dead channel all
   that time. Measured on real stacks (Edge on Windows 10 against the
-  JavaScript host under Node, UDP blocked for 12 s): back on the relay about
-  10 s after the cut at both ends, no request failed, and direct again 5 s
-  later. The session ends instead, as it used to, when the far end has
+  JavaScript host under Node, UDP blocked for 12 s): back on the relay
+  1.6–2 s after the cut at both ends, no request failed, and direct again as
+  soon as the block lifted. ICE alone took about 10 s: its "disconnected"
+  came 6–7 s after the path died. So **each end pulses**: the text `alive`
+  on the channel whenever it has sent nothing there for 500 ms, and an end
+  that has heard `alive` once takes 2.5 s with nothing at all arriving for
+  the path being gone. Only once heard, so an end from before it, which
+  never pulses, is not taken for dead when it is merely quiet. The session ends instead, as it used to, when the far end has
   never said `Received` (an end from before it, or a path that died within
   its first 200 ms), when what it has not read was let go of past the 8 MiB,
   or when the relay connection is gone too. Before ICE has connected neither
@@ -299,8 +305,8 @@ are the whole of what the record layer had to learn:
   the session nothing.
 
 **An end that closes on purpose says so first.** It sends the text message
-`leaving` on the channel — the only text the channel carries; everything else
-is records — closes the channel, and closes the peer connection a quarter of
+`leaving` on the channel — text is about the path (`leaving`, `alive`);
+everything else is records — closes the channel, and closes the peer connection a quarter of
 a second later. The other end then reports the session as ended by the other
 end, not as a path lost, and does not count it against the path. Telling the
 two apart by ICE's state was right on the test double and wrong on a real

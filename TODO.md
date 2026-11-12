@@ -64,5 +64,5 @@ path*) is in and on by default, through Google's STUN server. Still open:
 
 - **The .NET half**, for a .NET host with pages joining it. A WebRTC stack is
   a large dependency.
-- **A liveness check of its own on the channel**, if ICE's 3 s of
-  "disconnected" proves too slow or too jumpy in the field.
+- ~~A liveness check of its own on the channel~~ — the `alive` pulse: a dead
+  path is left in 1.6–2 s rather than ~10 s (Edge on Windows 10, UDP blocked).

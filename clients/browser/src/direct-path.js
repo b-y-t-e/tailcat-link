@@ -48,8 +48,18 @@ export const decodeSignal = (payload) =>
 const CHANNEL_LABEL = "tailcat-relay1";
 
 /// What an end sends on the channel, as text, just before closing it on
-/// purpose. The only text message: everything else on the channel is records.
+/// purpose. Text is for the path itself: everything else is records.
 export const LEAVING = "leaving";
+
+/// What an end sends on the channel, as text, when it has sent nothing else
+/// there for `ALIVE_MS`. An end that has heard it once takes `SILENT_MS` with
+/// nothing at all arriving for the path being gone, and goes back to the
+/// relay: ICE's own "disconnected" came 6–7 s after a real path died, plus its
+/// grace, and a game stood still for all of it. Only once heard, so an end
+/// from before it, which never says it, is not taken for dead when idle.
+export const ALIVE = "alive";
+const ALIVE_MS = 500;
+const SILENT_MS = 2_500;
 
 // How long the goodbye gets to leave before the peer connection is closed.
 const LEAVE_MS = 250;
@@ -98,6 +108,8 @@ export function directPathConfig(option) {
     RTCPeerConnection,
     iceServers: given.iceServers ?? DEFAULT_ICE_SERVERS,
     establishMs: given._establishMs ?? ESTABLISH_MS,
+    aliveMs: given._aliveMs ?? ALIVE_MS,
+    silentMs: given._silentMs ?? SILENT_MS,
     retryMs: given._retryMs ?? RETRY_MS,
   };
 }
@@ -161,6 +173,10 @@ export class DirectPath {
   #peerLeaving = false;
   #openedAt = null;
   #backOnRelay = false;
+  #pulse = null;
+  #lastHeard = 0;
+  #lastSent = 0;
+  #peerPulses = false;
   #state = "idle";
 
   /// @param onopen called when records start leaving on the channel.
@@ -305,10 +321,12 @@ export class DirectPath {
     channel.onopen = () => this.#opened();
     channel.onmessage = (event) => {
       if (this.#state === "closed") return;
-      // The one text message: the other end is closing on purpose. Any other
-      // text is from a version after this one, and means nothing here.
+      this.#lastHeard = Date.now();
+      // Text is about the path. Any other text is from a version after this
+      // one, and means nothing here.
       if (typeof event.data === "string") {
         if (event.data === LEAVING) this.#peerLeaving = true;
+        else if (event.data === ALIVE) this.#peerPulses = true;
         return;
       }
       // Not awaited: the session takes records one at a time by itself, and
@@ -331,8 +349,27 @@ export class DirectPath {
     this.#state = "open";
     this.#connected = true;
     this.#openedAt = Date.now();
+    this.#lastHeard = this.#lastSent = this.#openedAt;
+    this.#pulse = setInterval(() => this.#checkPulse(), this.#config.aliveMs);
+    this.#pulse.unref?.();
     this.#session.sendOn({ send: (record) => this.#send(record) });
     this.onopen();
+  }
+
+  #checkPulse() {
+    if (this.#state !== "open") return;
+    const now = Date.now();
+    if (this.#peerPulses && now - this.#lastHeard > this.#config.silentMs) {
+      this.#fail(new Error("the direct path went silent"));
+      return;
+    }
+    if (now - this.#lastSent < this.#config.aliveMs) return;
+    try {
+      this.#channel.send(ALIVE);
+      this.#lastSent = now;
+    } catch {
+      // The channel is going; it says so itself.
+    }
   }
 
   async #send(record) {
@@ -342,6 +379,7 @@ export class DirectPath {
     }
     if (this.#state !== "open") throw new Error("the direct path was lost");
     this.#channel.send(record);
+    this.#lastSent = Date.now();
   }
 
   #onConnectionState(state) {
@@ -403,6 +441,7 @@ export class DirectPath {
     const wasBegun = this.#state !== "idle";
     this.#state = "closed";
     clearTimeout(this.#deadline);
+    clearInterval(this.#pulse);
     clearTimeout(this.#grace);
     const drained = this.#drained;
     this.#drained = null;
