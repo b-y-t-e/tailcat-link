@@ -306,7 +306,7 @@ internal sealed class ExchangeSender
         }
         if (peer.HasFlag(PeerCapabilities.LargeFrames))
         {
-            return SendAsFramesAsync(session, exchange, cancellationToken);
+            return SendAsFramesAsync(session, exchange, _options.TimeProvider, cancellationToken);
         }
         throw new RemoteHandlerException("the other machine says it takes neither exchanges nor frames");
     }
@@ -318,6 +318,7 @@ internal sealed class ExchangeSender
     private static async Task SendAsFramesAsync(
         LinkSession session,
         OutboundExchange exchange,
+        TimeProvider time,
         CancellationToken cancellationToken)
     {
         if (exchange.Flags.HasFlag(ExchangeFlags.Transfer))
@@ -334,17 +335,51 @@ internal sealed class ExchangeSender
         ReadOnlyMemory<byte> whole = await exchange.WholeContentAsync(cancellationToken).ConfigureAwait(false);
         EnsureFitsOneFrame(whole.Length);
 
-        if (exchange.Flags.HasFlag(ExchangeFlags.Answer))
+        // One frame says nothing about its progress until it has all gone and
+        // been answered, and the exchange's patience — how long nothing has
+        // moved — is asked between attempts. So an attempt that kept sixteen
+        // megabytes moving for longer than RequestDeadline, on a busy machine,
+        // and then lost its session, left an exchange that looked silent for
+        // the whole attempt: it was given up on instead of resent. The
+        // session's own bytes moving stand in for the frame's.
+        using CancellationTokenSource sent = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task watching = MovedWhileTheSessionMovesAsync(session, exchange, time, sent.Token);
+        try
         {
-            byte[] answer = await session.RequestAsync(exchange.Id, whole, cancellationToken).ConfigureAwait(false);
-            exchange.TakeWholeAnswer(answer);
-            return;
-        }
+            if (exchange.Flags.HasFlag(ExchangeFlags.Answer))
+            {
+                byte[] answer = await session.RequestAsync(exchange.Id, whole, cancellationToken).ConfigureAwait(false);
+                exchange.TakeWholeAnswer(answer);
+                return;
+            }
 
-        // That machine cannot recognise a notification it has already had,
-        // so it gets one attempt.
-        exchange.OnlyOnce = true;
-        await session.NotifyAsync(whole, cancellationToken).ConfigureAwait(false);
+            // That machine cannot recognise a notification it has already had,
+            // so it gets one attempt.
+            exchange.OnlyOnce = true;
+            await session.NotifyAsync(whole, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await sent.CancelAsync().ConfigureAwait(false);
+            await watching.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        }
+    }
+
+    private static async Task MovedWhileTheSessionMovesAsync(
+        LinkSession session,
+        OutboundExchange exchange,
+        TimeProvider time,
+        CancellationToken cancellationToken)
+    {
+        TimeSpan every = TimeSpan.FromSeconds(1);
+        using PeriodicTimer timer = new(every, time);
+        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (session.Movement.MovedWithin(every))
+            {
+                exchange.Moved();
+            }
+        }
     }
 
     /// <summary>
