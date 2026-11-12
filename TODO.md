@@ -40,15 +40,20 @@ reach a peer whose announcement was heard locally. Open questions:
   costs a few milliseconds. Not ours to fix: resolving `.local` needs mDNS in
   the host's WebRTC stack, and a host in a page has it.
 
-## QUIC on Windows 10: try it on one
+## QUIC on Windows 10: done, CI could hold it
 
-`Microsoft.Native.Quic.MsQuic.OpenSSL` referenced by the application gives
-Windows 10 QUIC (`Tailcat.Link.targets`, the Tailcat.Link README). Loaded and
-tested under Windows 11 only. On a Windows 10 machine:
-`dotnet run --project src/Tailcat.Demo -p:OpenSslQuic=true -- listen`, connect
-to it from another machine, and see the route go direct. If it does, consider
-a CI job that publishes a consumer with the reference, as `single-file-quic`
-does without it.
+Verified on a real Windows 10 (build 19045): the fallback gives a
+framework-dependent application QUIC and a direct path. A CI job could pack
+and consume the package framework-dependent and check that the OpenSSL
+`msquic.dll` lands beside it, as `single-file-quic` checks the runtime's;
+there is no Windows 10 runner to do more.
+
+## A direct path on a carrier gave up once in 30 s
+
+On the phone, on a carrier, ICE reported "disconnected" for longer than the
+3 s grace once in a run and the session ended; the link was back, relayed, in
+1.8 s and direct again shortly after. A longer grace on a carrier, or a
+liveness check of the path's own, would ride such a gap out instead.
 
 ## The direct path between JavaScript ends: what is left
 
@@ -59,9 +64,6 @@ path*) is in and off by default. Still open, in the order they would pay:
   WebRTC and one run by hand on `node-datachannel`. Two browsers on one LAN
   hide their addresses behind mDNS names, and whether that resolves depends
   on the operating systems. Turn it on by default only after that.
-- **Let a direct session outlive its relay connection.** Today it still ends
-  with it, so a relay that is cut every few seconds ends sessions that no
-  longer need it.
 - **Fall back to the relay when the path dies**, instead of ending the
   session. Needs to know what the channel delivered.
 - **The .NET half**, for a .NET host with pages joining it. A WebRTC stack is

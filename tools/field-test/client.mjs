@@ -10,6 +10,9 @@ await page.goto(url);
 try {
   await page.waitForFunction(() => document.title === "done", null, { timeout: Number(max) * 1000 });
   console.log("CLIENT DONE");
+  // The page closed its link; a moment for that to reach the other end before
+  // the browser goes, or the host sees a page that vanished instead.
+  if (!process.env.ABRUPT) await page.waitForTimeout(1000);
 } catch {
   console.log("CLIENT TIMEOUT");
   console.log(await page.evaluate(() => document.getElementById("log")?.textContent));

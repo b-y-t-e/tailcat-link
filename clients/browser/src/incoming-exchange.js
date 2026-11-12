@@ -12,6 +12,7 @@ import { LinkError } from "./errors.js";
 import {
   ExchangeFlags,
   announcesPipelinedContent,
+  coalescing,
   decodeExchangeHeader,
   drainBlocks,
   encodeAnswerHeader,
@@ -133,10 +134,14 @@ export class IncomingExchange {
     }
 
     const content = answer ?? LinkContent.empty;
-    await writeFrame(stream, FrameStatus.Ok, this.#id, encodeAnswerHeader(content), along);
+    // The answer's header, its blocks and the end marker as one write when
+    // small: see `coalescing`.
+    const out = coalescing(stream);
+    await writeFrame(out, FrameStatus.Ok, this.#id, encodeAnswerHeader(content), along);
     // Content in a page is always in memory, so an answer can always be read
     // again from wherever the sender says it got to.
-    await writeBlocks(stream, content.bytes, Math.min(header.answerOffset, content.length), along);
+    await writeBlocks(out, content.bytes, Math.min(header.answerOffset, content.length), along);
+    await out.send(along?.signal);
     this.#announceAnswered(content);
     return this.#acknowledged(stream, signal);
   }

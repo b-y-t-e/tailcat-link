@@ -63,6 +63,9 @@ const HEADER_LENGTH = 1 + EXCHANGE_LEN + 4;
 // transfer can say that it is still moving.
 const PROGRESS_CHUNK_BYTES = 64 * 1024;
 
+// Up to which a frame's payload goes out with its header in one write.
+const SMALL_FRAME_BYTES = 16 * 1024;
+
 /// A fresh exchange id. Sixteen random bytes, written big-endian, which is
 /// what a .NET Guid written big-endian is.
 export const newExchange = () => randomBytes(EXCHANGE_LEN);
@@ -75,6 +78,13 @@ export function encodeHeader(tag, exchange, payload) {
 /// slow transfer is not mistaken for a dead one; it is absent where the caller
 /// imposes no limit.
 export async function writeFrame(stream, tag, exchange, payload, idle) {
+  // Header and a small payload as one write: on relay1 every write is a record
+  // of its own, and on a direct path a data-channel message.
+  if (payload.length <= SMALL_FRAME_BYTES) {
+    await stream.write(concat(encodeHeader(tag, exchange, payload), payload), idle?.signal);
+    idle?.restart();
+    return;
+  }
   await stream.write(encodeHeader(tag, exchange, payload), idle?.signal);
   for (let sent = 0; sent < payload.length; sent += PROGRESS_CHUNK_BYTES) {
     await stream.write(payload.subarray(sent, sent + PROGRESS_CHUNK_BYTES), idle?.signal);

@@ -107,10 +107,15 @@ internal sealed class LinkHost : ILinkHost, ILinkHandlers, IDisposable
         {
             // Said for the same reason: relayed works, so nothing else would
             // ever point at the cause, and here there is something to do.
+            // The fallback comes beside a framework-dependent application by
+            // itself; what is left without it is a self-contained or
+            // single-file one, which carries the runtime's own msquic.dll
+            // under the same name.
             _log.Warn(
                 "This Windows has no QUIC of its own (it arrived with Windows 11 and Server 2022), so every session " +
-                "will go through the relay with no direct path. Referencing the Microsoft.Native.Quic.MsQuic.OpenSSL " +
-                "package from the application gives it one; see the Tailcat.Link README.");
+                "will go through the relay with no direct path. A framework-dependent application gets one from " +
+                "Tailcat.Link by itself; a self-contained or single-file one needs a reference to " +
+                "Microsoft.Native.Quic.MsQuic.OpenSSL; see the Tailcat.Link README.");
         }
     }
 

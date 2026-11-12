@@ -10,47 +10,73 @@
     brings its own TLS 1.3 and runs on Windows 10, and System.Net.Quic asks
     which build it was handed before it asks which Windows it is on.
 
-    So an application that references that build is given it:
+    Two ways that build reaches an application:
 
-      <PackageReference Include="Microsoft.Native.Quic.MsQuic.OpenSSL" Version="…"
-                        GeneratePathProperty="true" ExcludeAssets="all" />
+    - By default, as a fallback. Tailcat.Link depends on the package, and this
+      puts its msquic.dll beside a framework-dependent application, where the
+      runtime does not look unless told to. Tailcat.Net tells it to when it
+      loads, on a Windows below build 20145 only (OpenSslQuicFallback.cs), so
+      Windows 11 keeps the copy Windows Update maintains. A self-contained or
+      single-file application has the runtime's own msquic.dll in that very
+      place, under that very name; it gets no fallback, and a Windows 10
+      running it is relayed, as before.
 
-    The reference is the switch. It is the application's to make, not this
-    package's: it changes the TLS stack under QUIC on every Windows the
-    application runs on, not only the ones that needed it, and the binary is
-    one the application then has to keep up to date.
+    - On every Windows, when the application asks: it references the package
+      itself, and the reference is the switch —
 
-    Three things have to be true together, and each is here because leaving
-    it out fails silently, as a link that is merely relayed:
-    the DLL sits beside the application; the runtime is told to load it from
-    there rather than from beside System.Net.Quic, where its own is; and its
-    own is not also published under the same name.
+        <PackageReference Include="Microsoft.Native.Quic.MsQuic.OpenSSL"
+                          GeneratePathProperty="true" ExcludeAssets="all" />
+
+      That changes the TLS stack under QUIC on Windows 11 too, and works for a
+      self-contained or single-file application, whose own copy is dropped.
+
+    Each of the three parts of the second — the DLL beside the application,
+    the runtime told to load it from there, the runtime's own kept out — is
+    here because leaving it out fails silently, as a link that is merely
+    relayed.
   -->
-  <PropertyGroup Condition="'$(PkgMicrosoft_Native_Quic_MsQuic_OpenSSL)' != ''">
+  <PropertyGroup>
+    <!-- In step with Directory.Packages.props; LinkPackagingTests holds the two together. -->
+    <_TailcatLinkMsQuicOpenSslVersion>2.6.4</_TailcatLinkMsQuicOpenSslVersion>
+
     <_TailcatLinkMsQuicArch Condition="$(RuntimeIdentifier.StartsWith('win')) and $(RuntimeIdentifier.EndsWith('-x64'))">x64</_TailcatLinkMsQuicArch>
     <_TailcatLinkMsQuicArch Condition="$(RuntimeIdentifier.StartsWith('win')) and $(RuntimeIdentifier.EndsWith('-x86'))">x86</_TailcatLinkMsQuicArch>
     <_TailcatLinkMsQuicArch Condition="$(RuntimeIdentifier.StartsWith('win')) and $(RuntimeIdentifier.EndsWith('-arm64'))">arm64</_TailcatLinkMsQuicArch>
     <!--
       No runtime named. What the application says it is built for comes first:
       a 32-bit one built on a 64-bit machine was handed that machine's DLL,
-      which it cannot load, and the switch below leaves it no other. That is
-      QUIC gone on every Windows, the ones that had it included. Only an
+      which it cannot load, and with the switch set it is left no other. That
+      is QUIC gone on every Windows, the ones that had it included. Only an
       application that says nothing is taken to run where it was built.
     -->
     <_TailcatLinkMsQuicArch Condition="'$(RuntimeIdentifier)' == '' and '$(OS)' == 'Windows_NT' and ('$(PlatformTarget)' == 'x64' or '$(PlatformTarget)' == 'x86' or '$(PlatformTarget)' == 'arm64')">$(PlatformTarget.ToLowerInvariant())</_TailcatLinkMsQuicArch>
     <_TailcatLinkMsQuicArch Condition="'$(RuntimeIdentifier)' == '' and '$(OS)' == 'Windows_NT' and '$(_TailcatLinkMsQuicArch)' == ''">$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant())</_TailcatLinkMsQuicArch>
-    <_TailcatLinkOpenSslMsQuic Condition="'$(_TailcatLinkMsQuicArch)' != ''">$(PkgMicrosoft_Native_Quic_MsQuic_OpenSSL)\build\native\bin\$(_TailcatLinkMsQuicArch)\msquic.dll</_TailcatLinkOpenSslMsQuic>
+
+    <!-- Asked for on every Windows: the application's own reference. -->
+    <_TailcatLinkOpenSslEverywhere Condition="'$(PkgMicrosoft_Native_Quic_MsQuic_OpenSSL)' != ''">true</_TailcatLinkOpenSslEverywhere>
+    <_TailcatLinkOpenSslRoot Condition="'$(_TailcatLinkOpenSslEverywhere)' == 'true'">$(PkgMicrosoft_Native_Quic_MsQuic_OpenSSL)</_TailcatLinkOpenSslRoot>
+    <!-- Otherwise the fallback, from the copy this package's dependency restored.
+         NuGetPackageRoot comes with a trailing slash or without, depending on
+         how the package folder was configured; without one, the path ran
+         into the folder's name and the fallback silently found nothing. -->
+    <_TailcatLinkOpenSslRoot Condition="'$(_TailcatLinkOpenSslEverywhere)' != 'true' and '$(SelfContained)' != 'true' and '$(PublishSingleFile)' != 'true' and '$(NuGetPackageRoot)' != ''">$([MSBuild]::EnsureTrailingSlash('$(NuGetPackageRoot)'))microsoft.native.quic.msquic.openssl\$(_TailcatLinkMsQuicOpenSslVersion)</_TailcatLinkOpenSslRoot>
+
+    <_TailcatLinkOpenSslMsQuic Condition="'$(_TailcatLinkOpenSslRoot)' != '' and '$(_TailcatLinkMsQuicArch)' != ''">$(_TailcatLinkOpenSslRoot)\build\native\bin\$(_TailcatLinkMsQuicArch)\msquic.dll</_TailcatLinkOpenSslMsQuic>
     <_TailcatLinkOpenSslMsQuic Condition="'$(_TailcatLinkOpenSslMsQuic)' != '' and !Exists('$(_TailcatLinkOpenSslMsQuic)')"></_TailcatLinkOpenSslMsQuic>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(_TailcatLinkOpenSslMsQuic)' != ''">
-    <RuntimeHostConfigurationOption Include="System.Net.Quic.AppLocalMsQuic" Value="true" />
     <None Include="$(_TailcatLinkOpenSslMsQuic)"
           Link="msquic.dll"
           Visible="false"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest"
           ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+  <!-- Only when asked for everywhere; the fallback decides at run time. -->
+  <ItemGroup Condition="'$(_TailcatLinkOpenSslMsQuic)' != '' and '$(_TailcatLinkOpenSslEverywhere)' == 'true'">
+    <RuntimeHostConfigurationOption Include="System.Net.Quic.AppLocalMsQuic" Value="true" />
   </ItemGroup>
 
   <!--
@@ -60,7 +86,7 @@
   -->
   <Target Name="TailcatLinkDropTheRuntimesMsQuic"
           AfterTargets="ResolveRuntimePackAssets"
-          Condition="'$(_TailcatLinkOpenSslMsQuic)' != ''">
+          Condition="'$(_TailcatLinkOpenSslMsQuic)' != '' and '$(_TailcatLinkOpenSslEverywhere)' == 'true'">
     <ItemGroup>
       <RuntimePackAsset Remove="@(RuntimePackAsset)" Condition="'%(Filename)%(Extension)' == 'msquic.dll'" />
     </ItemGroup>
@@ -72,11 +98,11 @@
     unsupported and every session is carried by the relay, with no direct path
     and no retransmission. The executable finds msquic.dll next to itself, so
     that is where it goes. Nothing to set: it happens on publish. Not when the
-    OpenSSL build is in use, which is already beside the executable.
+    OpenSSL build was asked for everywhere, which is already beside it.
   -->
   <Target Name="TailcatLinkKeepMsQuicBesideSingleFile"
           BeforeTargets="_ComputeFilesToBundle"
-          Condition="'$(_TailcatLinkOpenSslMsQuic)' == '' and '$(PublishSingleFile)' == 'true' and '$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.StartsWith('win'))">
+          Condition="'$(_TailcatLinkOpenSslEverywhere)' != 'true' and '$(PublishSingleFile)' == 'true' and '$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.StartsWith('win'))">
     <ItemGroup>
       <_TailcatLinkMsQuic Include="@(RuntimePackAsset)" Condition="'%(Filename)%(Extension)' == 'msquic.dll'" />
       <ResolvedFileToPublish Include="@(_TailcatLinkMsQuic)"

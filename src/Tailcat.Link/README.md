@@ -286,29 +286,33 @@ on Windows 10, the link still works: the two ends negotiate `relay1` instead
 and the session stays on the relay, slower but no different to use. See
 `docs/relay1.md`.
 
-**Windows 10 can be given QUIC**, and with it the direct path. What it lacks
-is TLS 1.3 in Schannel, which the `msquic.dll` .NET ships depends on;
-Microsoft also publishes msquic built against OpenSSL, which does not. An
-application that references it gets it, with nothing else to set:
+**Windows 10 gets QUIC by itself**, and with it the direct path. What it
+lacks is TLS 1.3 in Schannel, which the `msquic.dll` .NET ships depends on;
+Microsoft also publishes msquic built against OpenSSL, which does not. This
+package depends on that build, puts its `msquic.dll` beside a
+framework-dependent application, and tells .NET to load it on a Windows below
+build 20145 only — Windows 10, Server 2019. Windows 11 keeps the copy Windows
+Update maintains. Nothing to set.
+
+A self-contained or single-file application carries .NET's own `msquic.dll`
+in that place, under that name, so it gets no such fallback: on Windows 10 it
+is relayed, and `LinkHost` says so. To have the OpenSSL build there — on
+*every* Windows it runs on, Windows 11 included — reference it yourself:
 
 ```xml
 <PackageReference Include="Microsoft.Native.Quic.MsQuic.OpenSSL" Version="2.6.4"
                   GeneratePathProperty="true" ExcludeAssets="all" />
 ```
 
-`GeneratePathProperty` is what lets this package find the DLL; without it the
-reference does nothing. The DLL is then copied beside the application —
-built, published, self-contained or single-file — and .NET is told to load
-that one. One DLL is copied, for the architecture the application is built
-for (`RuntimeIdentifier`, else `PlatformTarget`, else the machine building
-it), so a build with neither that is carried to a machine of another
-architecture has no QUIC there: name the runtime when you publish for one.
-Know what you are choosing: the application uses that build on
-*every* Windows it runs on, Windows 11 included, the binary is yours to keep
-up to date, and .NET does not test against it on Windows 10. Verified here
-by loading it and running this library's tests on it under Windows 11; on a
-Windows 10 machine, check that `link.Route` reaches `Direct` before relying
-on it.
+`GeneratePathProperty` is what lets this package find the DLL. One DLL is
+copied, for the architecture the application is built for
+(`RuntimeIdentifier`, else `PlatformTarget`, else the machine building it),
+so a build with neither carried to a machine of another architecture has no
+QUIC there: name the runtime when you publish for one. The fallback is
+decided when this library loads; an application that used QUIC before
+touching it has decided already. .NET does not test against the OpenSSL
+build on Windows 10; it has been checked here on a real Windows 10 (build
+19045), framework-dependent, connecting directly to a Windows 11 host.
 
 A browser can hold one of these links too, over the same `relay1`: the host
 is written exactly as above and never learns which arrived. The JavaScript

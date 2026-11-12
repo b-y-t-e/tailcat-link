@@ -78,6 +78,11 @@ export function memoryRelay({ delayMs = 0 } = {}) {
       }
     },
 
+    /// Every connection open now.
+    connections() {
+      return [...clients.values()];
+    },
+
     /// The connections a key holds, by region.
     connectionsOf(publicKey) {
       return [...clients.values()].filter((c) => hex(c.publicKey) === hex(publicKey));

@@ -43,8 +43,8 @@ export function fakeRtc({ connects = true } = {}) {
       if (this.readyState !== "open") throw new Error("the channel is not open");
       net.sent++;
       // Copied, as a real channel does, and as an ArrayBuffer, which is what
-      // `binaryType = "arraybuffer"` asks for.
-      const copy = Uint8Array.from(data).buffer;
+      // `binaryType = "arraybuffer"` asks for; text stays text.
+      const copy = typeof data === "string" ? data : Uint8Array.from(data).buffer;
       const peer = this.peer;
       peer.delivery = peer.delivery.then(() => {
         if (peer.readyState === "open") peer.onmessage?.({ data: copy });
@@ -53,7 +53,9 @@ export function fakeRtc({ connects = true } = {}) {
 
     close() {
       this._end();
-      this.peer?._end();
+      // Behind whatever was sent before it, as a real channel's close is.
+      const peer = this.peer;
+      if (peer) peer.delivery = peer.delivery.then(() => peer._end());
     }
 
     _open() {
@@ -153,6 +155,14 @@ export function fakeRtc({ connects = true } = {}) {
     close() {
       if (this.connectionState === "closed") return;
       this.connectionState = "closed";
+      // What a real stack does at the other end: ICE goes before the channel
+      // says so. The double used to keep it up, and a check that relied on
+      // that passed here and failed for real.
+      const other = this.other;
+      if (other && other.connectionState === "connected") {
+        other.connectionState = "failed";
+        other.onconnectionstatechange?.();
+      }
       this.channel?.close();
     }
   }

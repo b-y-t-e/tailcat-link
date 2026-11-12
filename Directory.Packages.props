@@ -12,16 +12,13 @@
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <!-- QUIC for a Windows without its own; in step with Tailcat.Link.targets. -->
+    <PackageVersion Include="Microsoft.Native.Quic.MsQuic.OpenSSL" Version="2.6.4" />
     <PackageVersion Include="Sodium.Core" Version="1.4.1" />
     <PackageVersion Include="System.Formats.Cbor" Version="10.0.15" />
     <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
   </ItemGroup>
 
-  <!-- Not a dependency of any package: tailcat-demo takes it when asked to
-       (-p:OpenSslQuic=true), to try QUIC on a Windows that has none. -->
-  <ItemGroup Label="Demo">
-    <PackageVersion Include="Microsoft.Native.Quic.MsQuic.OpenSSL" Version="2.6.4" />
-  </ItemGroup>
 
   <ItemGroup Label="Test">
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.0" />

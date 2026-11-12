@@ -282,6 +282,18 @@ record layer had to learn:
   any cut. Before ICE has connected neither end has sent anything on the
   channel, and an attempt that fails then costs the session nothing.
 
+**An end that closes on purpose says so first.** It sends the text message
+`leaving` on the channel — the only text the channel carries; everything else
+is records — closes the channel, and closes the peer connection a quarter of
+a second later. The other end then reports the session as ended by the other
+end, not as a path lost, and does not count it against the path. Telling the
+two apart by ICE's state was right on the test double and wrong on a real
+stack, where the far end closing its peer connection takes ICE down before the
+channel says anything; and the channel is closed at once, not with the peer
+connection, because a page closing its link on its way out may not live for
+the delay. A machine that vanishes says nothing, and is noticed when ICE or
+the heartbeat gives up on it.
+
 So that a path which forms and dies does not take every session in turn, the
 dialler waits before offering again: 5 s, doubling to 5 minutes, and back to
 none after a path that carried a session for a minute
@@ -298,8 +310,13 @@ that were each wrong at first:
   session from a path that died, though: both close the channel, and both
   count.
 
-The relay connection stays up under a session that has gone direct, and the
-session still ends with it. That is deliberate for now: see *Open questions*.
+**A session that has gone direct outlives its relay connection.** Its records
+no longer cross the relay, and ending it with the relay ended working
+sessions every time a relay connection was cut. A session that has not gone
+direct has nothing else, and ends with its relay as it always did. A host
+keeps such a session listed, so a machine that dials again still replaces it.
+If the path goes later, the session ends then and the link dials again, over
+a new relay connection.
 
 ## Cost
 
@@ -443,11 +460,6 @@ peer.
 - Should a `relay1` session be allowed to migrate to a new relay connection
   rather than dying with it? It would need the record counters to survive,
   which is most of a real transport. Not until something demands it.
-- Should a session that has gone direct outlive its relay connection? Its
-  records no longer need the relay, and where relay connections are cut every
-  few seconds that would be the difference between a session and none. It
-  means a session with no relay under it — late candidates, `flush`, and the
-  host's "every session went with the connection" all assume one.
 - Should a direct path that dies fall back to the relay instead of ending the
   session? It needs to know what the channel delivered, which is
   acknowledgements, which is most of a real transport again.

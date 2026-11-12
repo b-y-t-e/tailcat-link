@@ -192,8 +192,14 @@ library is, roughly how the relays work, and examples that compile.
   the relay is slower than the channel and the move overtakes it; and a path
   that dies after ICE connected ends the session, because nothing says what
   the channel delivered — with a backoff on the dialler that outlives
-  sessions, or a flaky path would take each one in turn. The session still
-  ends with its relay connection. The tests use `fake-rtc.mjs`; a real WebRTC
+  sessions, or a flaky path would take each one in turn. An end that closes on
+  purpose sends the text `leaving` on the channel first, so the other end
+  does not report a path lost; ICE's state could not tell them apart on a real
+  stack, though it did on `fake-rtc.mjs` — which now closes like a real one,
+  ICE first and channels in order. Once direct, a
+  session no longer ends with its relay connection (`#relayLost` in
+  `session-source.js`, `#endSessions` in `relay-hub.js`): its records no
+  longer cross it. The tests use `fake-rtc.mjs`; a real WebRTC
   stack is checked by hand.
 - **There is one exchange, and no size limit.** `RequestAsync`, `NotifyAsync`
   and `SendAsync`, in bytes or as `LinkContent`, are all the `Exchange` frame
@@ -409,18 +415,27 @@ let one bounced probe abort the receive a peer's answer was arriving on. The
 path will not form, because a failed punch looks exactly like a peer that is
 switched off.
 
-**Windows 10 can be given QUIC, by the application.** What it lacks is TLS 1.3
-in Schannel, not QUIC: `System.Net.Quic` checks the Windows version only when
-the msquic it loaded says its TLS is Schannel. An application that references
-`Microsoft.Native.Quic.MsQuic.OpenSSL` with `GeneratePathProperty="true"` gets
-that build copied beside it by `Tailcat.Link.targets`, which also sets
-`System.Net.Quic.AppLocalMsQuic` and drops the runtime's own `msquic.dll` from
-a self-contained publish (same name, and a publish error). All three or it
-fails the silent way, relayed. It is not a dependency of the package on
-purpose: it changes the TLS stack on every Windows the application runs on.
+**Windows 10 gets QUIC by itself.** What it lacks is TLS 1.3 in Schannel, not
+QUIC: `System.Net.Quic` checks the Windows version only when the msquic it
+loaded says its TLS is Schannel. `Tailcat.Link` depends on
+`Microsoft.Native.Quic.MsQuic.OpenSSL`; `Tailcat.Link.targets` puts its
+`msquic.dll` beside a framework-dependent application, and
+`OpenSslQuicFallback` — a module initializer in `Tailcat.Net`, because the
+runtime reads the switch once — sets `System.Net.Quic.AppLocalMsQuic` on a
+Windows below build 20145 only, so Windows 11 stays on the copy Windows Update
+patches. Self-contained and single-file applications have the runtime's own
+`msquic.dll` in that place and get no fallback, unless they reference the
+package themselves with `GeneratePathProperty="true"`, which means OpenSSL on
+every Windows (the switch in runtimeconfig, the runtime's copy dropped). Two
+things that failed silently on the way, each found by packing and consuming:
+NuGet leaves a dependency with every asset excluded out of the nuspec (one
+asset, `native`, stays included), and `NuGetPackageRoot` may come without its
+trailing slash.
 `dotnet run --project src/Tailcat.Demo -p:OpenSslQuic=true -- …` is the demo
-on it. Checked by running the tests on that DLL under Windows 11; nobody has
-yet run it on a Windows 10 machine.
+on it. Verified on a real Windows 10 Pro, build 19045 (2026-11-12): a
+framework-dependent application consuming the packed package got QUIC from
+the fallback and went direct to a Windows 11 host, 7.6 ms; a self-contained
+one did not, as documented.
 
 **QUIC is narrower than "Windows, Linux, macOS"**: Windows 10 has none of its
 own and Linux needs `libmsquic` from the distro. That is no longer fatal — such a

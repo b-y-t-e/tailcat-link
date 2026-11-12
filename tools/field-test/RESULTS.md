@@ -69,6 +69,18 @@ counted run.
 | .NET client, start to connected | ~10 s | 2.5–4.3 s |
 | host's log for a page that finished | "the direct path was lost" | "the other end closed the direct path" |
 
+### Windows 10 and the phone, later the same day
+
+- **A real Windows 10 Pro, build 19045**, framework-dependent application on
+  the packed package: the fallback chose the OpenSSL msquic, QUIC came up,
+  and it went direct to a Windows 11 .NET host — 7.6 ms median, connected in
+  4.4 s. Self-contained on the same machine: no QUIC, as documented.
+- **The phone on a carrier, old against new request path, alternated:** 7+6
+  data-channel messages a request before, 4+2 after; the request took 69–77 ms
+  before and 70–73 ms after, on a path ICE timed at 37–58 ms. Fewer messages
+  ease the relay; on the phone the time is the network's, not the protocol's.
+  WebCrypto costs 1–2 ms a request there.
+
 Earlier runs that did not count, each for a reason now in the README: a WAN
 path through Tailscale's tunnel (twice: once via `100.x`, once via its IPv6
 range, which the first filter missed), a .NET client against a host on a

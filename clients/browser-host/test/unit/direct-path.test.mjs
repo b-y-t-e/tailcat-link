@@ -84,7 +84,8 @@ test("two ends that ask for a direct path move to it, and the relay carries noth
     await page.close();
     await host.close();
   }
-  assert.ok(net.connections.every((pc) => pc.connectionState === "closed"), "a peer connection outlived its link");
+  // A moment after, once each end's goodbye has left (direct-path.js, LEAVE_MS).
+  await until(() => net.connections.every((pc) => pc.connectionState === "closed"), "every peer connection to close");
 });
 
 test("what was on its way through a slow relay when the path opened still arrives in order", async () => {
@@ -199,27 +200,53 @@ test("a direct path that dies ends the session, and is offered again inside the 
   }
 });
 
-test("a session that ends for reasons of its own does not count against the path", async () => {
+test("a direct session outlives the relay connections under it", async () => {
+  // Its records no longer cross the relay, and cutting the relay used to end
+  // a session that was working, every time.
   const relay = memoryRelay();
   const net = fakeRtc();
-  const host = await startHost(relay, { directPath: net });
+  const store = memoryStore();
+  const host = await startHost(relay, { directPath: net, store });
   host.onRequest((peer, text) => text);
-  let pageRelay = null;
-  const page = await joinPage(relay, {
-    invitationCode: host.invitationCode,
-    directPath: net,
-    connectRelay: (args) => (pageRelay = relay.connect(args)),
-  });
+  const page = await joinPage(relay, { invitationCode: host.invitationCode, directPath: net });
+  const disconnected = [];
+  page.events.addEventListener("disconnected", (e) => disconnected.push(e.detail));
   try {
     await until(() => page.route === "direct", "the page to go direct");
-    // The relay under the session goes, and the session with it. The path
-    // was working; the wait after a failed one is 5 s, and none is owed.
+    const peer = await host.waitForPeer();
+    for (const connection of relay.connections()) connection.close(new Error("the relay went away"));
+    await delay(30);
+
+    assert.equal(await page.request("still direct"), "still direct");
+    assert.equal(page.route, "direct");
+    assert.equal(peer.route, "direct");
+    assert.deepEqual(disconnected, [], "a working direct session ended with its relay");
+  } finally {
+    await page.close();
+    await host.close();
+  }
+});
+
+test("a session the other end ended does not count against the path", async () => {
+  // A host that restarts closes the channel while ICE is up: nothing to do
+  // with the path, so the page goes straight back to it rather than waiting
+  // out the backoff a failed path earns.
+  const relay = memoryRelay();
+  const net = fakeRtc();
+  const store = memoryStore();
+  let host = await startHost(relay, { directPath: net, store });
+  host.onRequest((peer, text) => text);
+  const page = await joinPage(relay, { invitationCode: host.invitationCode, directPath: net });
+  try {
+    await until(() => page.route === "direct", "the page to go direct");
     const routes = routesOf(page.events);
-    const cutAt = Date.now();
-    pageRelay.close(new Error("the relay went away"));
+    await host.close();
+    host = await startHost(relay, { directPath: net, store });
+    host.onRequest((peer, text) => text);
+    const restartedAt = Date.now();
     await until(() => routes.includes("none") && page.route === "direct", "the next session to go direct");
-    assert.ok(Date.now() - cutAt < 2_000, "the path was held back as if it had failed");
-    assert.equal(await page.request("after the relay"), "after the relay");
+    assert.ok(Date.now() - restartedAt < 2_000, "the path was held back as if it had failed");
+    assert.equal(await page.request("after the restart"), "after the restart");
   } finally {
     await page.close();
     await host.close();

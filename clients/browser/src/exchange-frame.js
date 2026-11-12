@@ -145,6 +145,38 @@ export async function writeBlocks(stream, content, from, idle, advanced = () => 
   await stream.write(encodeBlockHeader(0), idle?.signal);
 }
 
+/// Holds writes back and hands them to `stream` as one, on `send()`: a small
+/// exchange is a frame, a block and the end marker, and written one by one
+/// each was a relay1 record of its own — and on a direct path a data-channel
+/// message — seven a request where one or two do (tools/field-test). What is
+/// held past `COALESCE_BYTES` goes out first, unchanged. `CoalescingStream`
+/// is the .NET half.
+export const COALESCE_BYTES = 16 * 1024;
+
+export function coalescing(stream) {
+  let held = [];
+  let size = 0;
+  const sendHeld = async (signal) => {
+    if (!held.length) return;
+    const bytes = held.length === 1 ? held[0] : concat(...held);
+    held = [];
+    size = 0;
+    await stream.write(bytes, signal);
+  };
+  return {
+    async write(bytes, signal) {
+      if (size + bytes.length <= COALESCE_BYTES) {
+        held.push(bytes.slice());
+        size += bytes.length;
+        return;
+      }
+      await sendHeld(signal);
+      await stream.write(bytes, signal);
+    },
+    send: sendHeld,
+  };
+}
+
 /// Reads blocks and throws them away, up to and including the end. For content
 /// that arrived ahead of a refusal: left unread, the refusal behind it would
 /// reach nobody.

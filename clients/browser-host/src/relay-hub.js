@@ -520,9 +520,13 @@ export class RelayHub {
     relay.sendPacket(peer, seal(PeerMessageType.HelloAck, ack, this.#identity.secretKey, peer));
   }
 
+  // Not the ones that have gone direct: their records no longer cross the
+  // relay, and a relay connection that was cut took working sessions with it.
+  // They stay listed, so a machine that dials again still replaces its old
+  // session rather than holding two.
   #endSessions(which, error) {
     for (const [key, entry] of [...this.#sessions]) {
-      if (!which(entry)) continue;
+      if (!which(entry) || entry.connection.route === "direct") continue;
       this.#sessions.delete(key);
       entry.connection.close(error);
     }

@@ -12,6 +12,44 @@ import { TailcatLink, memoryStore } from "/src/index.js";
 import { STUN, chosenPath, tailscaleFree } from "/filter.js";
 
 const params = new URLSearchParams(location.search);
+
+// With profile=1, where a request's time goes on this end: how long WebCrypto
+// took, and how many messages crossed the data channel each way. A phone
+// measured 40 ms a request on a path ICE timed at 7, where a PC took 2 on
+// its own (RESULTS.md); this is what tells the device from the protocol.
+const profile = { cryptoMs: 0, sent: 0, received: 0 };
+if (params.get("profile") === "1") {
+  for (const name of ["encrypt", "decrypt", "importKey", "sign"]) {
+    const original = crypto.subtle[name].bind(crypto.subtle);
+    crypto.subtle[name] = async (...args) => {
+      const t = performance.now();
+      try {
+        return await original(...args);
+      } finally {
+        profile.cryptoMs += performance.now() - t;
+      }
+    };
+  }
+  const send = RTCDataChannel.prototype.send;
+  RTCDataChannel.prototype.send = function (data) {
+    profile.sent++;
+    return send.call(this, data);
+  };
+  const dispatch = RTCDataChannel.prototype.dispatchEvent;
+  const countIn = (event) => event.type === "message" && profile.received++;
+  const listen = RTCDataChannel.prototype.addEventListener;
+  Object.defineProperty(RTCDataChannel.prototype, "onmessage", {
+    set(handler) {
+      if (!handler) return;
+      listen.call(this, "message", (event) => {
+        countIn(event);
+        handler(event);
+      });
+    },
+    configurable: true,
+  });
+  void dispatch;
+}
 const code = params.get("code");
 const name = params.get("name") ?? "page";
 const seconds = Number(params.get("seconds") ?? 40);
@@ -59,10 +97,18 @@ const deadline = performance.now() + seconds * 1000;
 while (performance.now() < deadline) {
   const route = link.route;
   const t = performance.now();
+  const before = { ...profile };
   try {
     await link.request("ping", { timeout: 10_000 });
     const rtt = Math.round(performance.now() - t);
-    samples.push({ at: at(), route, rtt });
+    samples.push({
+      at: at(),
+      route,
+      rtt,
+      cryptoMs: Math.round((profile.cryptoMs - before.cryptoMs) * 10) / 10,
+      sent: profile.sent - before.sent,
+      received: profile.received - before.received,
+    });
     log(`ping ${rtt} ms (${route})`);
   } catch (error) {
     samples.push({ at: at(), route, error: error.message });
@@ -88,6 +134,14 @@ const report = {
   directSamples: of("direct").length,
   failures: samples.filter((s) => s.error).length,
   path: await chosenPath(),
+  profile:
+    params.get("profile") === "1"
+      ? (() => {
+          const direct = samples.filter((x) => x.route === "direct" && x.rtt !== undefined);
+          const avg = (k) => (direct.length ? Math.round((direct.reduce((a, x) => a + x[k], 0) / direct.length) * 10) / 10 : null);
+          return { cryptoMsPerRequest: avg("cryptoMs"), messagesOutPerRequest: avg("sent"), messagesInPerRequest: avg("received") };
+        })()
+      : undefined,
   publicIp: await fetch("https://api.ipify.org", { signal: AbortSignal.timeout(5000) }).then((r) => r.text()).catch(() => null),
   events,
 };

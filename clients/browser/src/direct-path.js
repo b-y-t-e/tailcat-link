@@ -39,6 +39,13 @@ export const decodeSignal = (payload) =>
 
 const CHANNEL_LABEL = "tailcat-relay1";
 
+/// What an end sends on the channel, as text, just before closing it on
+/// purpose. The only text message: everything else on the channel is records.
+export const LEAVING = "leaving";
+
+// How long the goodbye gets to leave before the peer connection is closed.
+const LEAVE_MS = 250;
+
 // How long ICE gets. Two machines that can reach each other do it in a second
 // or two; the rest is for a slow relay carrying the candidates.
 const ESTABLISH_MS = 15_000;
@@ -132,10 +139,8 @@ export class DirectPath {
   // channel open and moved its sending there, so giving up quietly is no
   // longer possible: its records would arrive nowhere.
   #connected = false;
-  // Whether ICE says the path is up right now. A channel that closes while it
-  // is was closed by the other end — its link closing, or its session
-  // replaced — not lost; one that closes after ICE has gone is the path.
-  #iceUp = false;
+  // Whether the other end said it was leaving: see LEAVING.
+  #peerLeaving = false;
   #openedAt = null;
   #state = "idle";
 
@@ -274,16 +279,18 @@ export class DirectPath {
     channel.bufferedAmountLowThreshold = LOW_WATER;
     channel.onopen = () => this.#opened();
     channel.onmessage = (event) => {
-      // Text is nothing this protocol sends.
-      if (typeof event.data === "string" || this.#state === "closed") return;
+      if (this.#state === "closed") return;
+      // The one text message: the other end is closing on purpose. Any other
+      // text is from a version after this one, and means nothing here.
+      if (typeof event.data === "string") {
+        if (event.data === LEAVING) this.#peerLeaving = true;
+        return;
+      }
       // Not awaited: the session takes records one at a time by itself, and
       // one that will not open is its business to ignore.
       this.#session.handleRecord(new Uint8Array(event.data)).catch(() => {});
     };
-    channel.onclose = () =>
-      this.#iceUp
-        ? this.#fail(new Error("the other end closed the direct path"), { pathFailed: false })
-        : this.#fail(new Error("the direct path closed"));
+    channel.onclose = () => this.#fail(new Error("the direct path closed"));
     channel.onerror = (event) => this.#fail(event?.error ?? new Error("the direct path failed"));
     channel.onbufferedamountlow = () => {
       const drained = this.#drained;
@@ -316,10 +323,11 @@ export class DirectPath {
     if (this.#state === "closed") return;
     clearTimeout(this.#grace);
     this.#grace = null;
-    this.#iceUp = state === "connected" || state === "completed";
-    if (this.#iceUp) {
+    if (state === "connected" || state === "completed") {
       this.#connected = true;
     } else if (state === "failed" || state === "closed") {
+      // Before the channel says so, on a real stack: the other end closing
+      // its peer connection takes ICE down with it.
       this.#fail(new Error(`the direct path ${state}`));
     } else if (state === "disconnected") {
       this.#grace = setTimeout(
@@ -342,8 +350,9 @@ export class DirectPath {
   // was up. The session ends all the same, but it is not reported as a path
   // lost — every client that finished normally used to reach a host's log as
   // one — and not counted against the path in the dialler's backoff.
-  #fail(error, { pathFailed = true } = {}) {
+  #fail(error, { pathFailed = !this.#peerLeaving } = {}) {
     if (this.#state === "closed") return;
+    if (!pathFailed) error = new Error("the other end closed the direct path");
     const sessionGoesToo = this.#connected;
     this.#finish(pathFailed);
     if (sessionGoesToo) {
@@ -365,15 +374,46 @@ export class DirectPath {
     this.#drained = null;
     drained?.resolve();
     const channel = this.#channel;
-    if (channel) channel.onopen = channel.onmessage = channel.onclose = channel.onerror = null;
+    // Said before closing, so the other end can tell an end it chose from a
+    // path that broke: ordered, it arrives after every record. Telling them
+    // apart by ICE's state was right on a test double and wrong on a real
+    // stack, where closing the peer connection takes ICE down first.
+    let leaving = false;
+    if (!failed && channel?.readyState === "open") {
+      try {
+        channel.send(LEAVING);
+        leaving = true;
+      } catch {
+        // Closing anyway.
+      }
+    }
+    if (channel) {
+      channel.onopen = channel.onmessage = channel.onclose = channel.onerror = null;
+      // The channel at once, which goes out behind the goodbye: a page closing
+      // its link on its way out may not live for the delay below, and the
+      // other end should hear now, not when ICE gives up half a minute later.
+      if (leaving) {
+        try {
+          channel.close();
+        } catch {
+          // Closing anyway.
+        }
+      }
+    }
     const pc = this.#pc;
     if (pc) {
       pc.onicecandidate = pc.onconnectionstatechange = pc.oniceconnectionstatechange = pc.ondatachannel = null;
-      try {
-        pc.close();
-      } catch {
-        // Already closed, which is what was wanted.
-      }
+      const close = () => {
+        try {
+          pc.close();
+        } catch {
+          // Already closed, which is what was wanted.
+        }
+      };
+      // A moment for the goodbye to leave: closing at once raced it, and the
+      // other end heard its ICE go down before the message that explained it.
+      if (leaving) setTimeout(close, LEAVE_MS).unref?.();
+      else close();
     }
     if (wasBegun) this.onend({ heldMs: this.#openedAt === null ? null : Date.now() - this.#openedAt, failed });
   }

@@ -48,7 +48,7 @@ export class RelayedConnection {
     /// Called with "direct" when the session's records leave the relay for a
     /// path between the two machines.
     this.onroute = null;
-    derp.onclose = (error) => session.close(error);
+    derp.onclose = (error) => this.#relayLost(error);
     session.oncontrol = (payload) => {
       const signal = decodeSignal(payload);
       // Only answers to an offer this end made: a page is not asked by its
@@ -142,9 +142,20 @@ export class RelayedConnection {
           await this.#session.handleRecord(packet.payload);
         }
       } catch (error) {
-        this.#session.close(error);
+        this.#relayLost(error);
       }
     })();
+  }
+
+  // A session that has gone direct no longer needs the relay: every record
+  // leaves on the channel and arrives from it, and ending it here ended
+  // sessions that were working, every time a relay connection was cut. One
+  // that has not gone direct has nothing else, and ends as it always did. If
+  // the path goes later, the session ends then, and the link dials again —
+  // over a new relay connection, which every dial opens anyway.
+  #relayLost(error) {
+    if (this.#path?.open) return;
+    this.#session.close(error);
   }
 }
 

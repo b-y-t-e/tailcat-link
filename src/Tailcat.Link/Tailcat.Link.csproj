@@ -87,6 +87,14 @@
          because the projects that reference them are not packages. Declared
          here so a consumer still gets them restored. -->
     <PackageReference Include="BouncyCastle.Cryptography" />
+    <!-- Restored so that Tailcat.Link.targets can put its msquic.dll beside an
+         application, for a Windows without QUIC of its own; nothing of it is
+         used here. Every asset is excluded but "native", which this package
+         has none of: excluding that too makes NuGet leave the dependency out
+         of the nuspec altogether, and no application ever restored it. The
+         build assets, its C++ targets, stay out of every project. -->
+    <PackageReference Include="Microsoft.Native.Quic.MsQuic.OpenSSL"
+                      ExcludeAssets="compile;runtime;contentfiles;build;buildtransitive;analyzers" />
     <PackageReference Include="Sodium.Core" />
     <PackageReference Include="System.Formats.Cbor" />
   </ItemGroup>

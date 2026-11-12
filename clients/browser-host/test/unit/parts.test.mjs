@@ -143,6 +143,10 @@ test("hellos from many machines at once wait no more than the bound allows", asy
         ),
       );
     }
+    // Until the bound is reached rather than for a fixed 200 ms: deriving a
+    // hundred keys took longer than that on a machine running the rest of the
+    // suite at once. Then a while longer, to see that nothing goes past it.
+    for (let waited = 0; hub.incoming.length < 64 && waited < 5_000; waited += 10) await delay(10);
     await delay(200);
     assert.equal(hub.incoming.length, 64);
   } finally {

@@ -8,6 +8,7 @@ import { LinkClosedError, LinkError, LinkTimeoutError, PairingRefusedError, Remo
 import {
   BLOCK_BYTES,
   ExchangeFlags,
+  coalescing,
   decodeAnswerHeader,
   decodeOffset,
   encodeExchangeHeader,
@@ -138,8 +139,11 @@ async function sendContent(stream, exchange, moving) {
   const pipelined = exchange.takeFirstAttempt();
   const header = exchange.headerFor(pipelined);
   moving.restart();
-  await writeFrame(stream, FrameKind.Exchange, exchange.id, encodeExchangeHeader(header), moving);
-  if (pipelined) await writeContent(stream, exchange, moving);
+  // Header and pipelined content as one write when small: see `coalescing`.
+  const out = coalescing(stream);
+  await writeFrame(out, FrameKind.Exchange, exchange.id, encodeExchangeHeader(header), moving);
+  if (pipelined) await writeContent(out, exchange, moving);
+  await out.send(moving.signal);
 
   const taken = await readFrame(stream, moving);
   throwIfRefused(taken.tag, taken.payload, exchange.flags);
