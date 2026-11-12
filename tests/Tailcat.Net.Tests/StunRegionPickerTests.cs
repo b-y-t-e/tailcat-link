@@ -229,6 +229,42 @@ public class StunRegionPickerTests
         Assert.Equal(2, best);
     }
 
+    /// <summary>
+    /// A relay that advertises STUN and never answers it — what tailcat's own
+    /// map does — is ranked by TCP without waiting out the STUN probes first.
+    /// Waiting cost every node four seconds of its start.
+    /// </summary>
+    [Fact]
+    public async Task SilentStunDoesNotHoldUpARankingTcpCanMake()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using FakeStunServer silent = new(TimeSpan.Zero, answer: false);
+        using Socket listening = new(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        listening.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        listening.Listen(4);
+        IPEndPoint relay = (IPEndPoint)listening.LocalEndPoint!;
+
+        DerpRegion region = new()
+        {
+            RegionID = 7,
+            Nodes =
+            [
+                new DerpNode
+                {
+                    Name = "7a", HostName = "derp7.example", IPv4 = relay.Address.ToString(),
+                    STUNPort = silent.EndPoint.Port, DERPPort = relay.Port,
+                },
+            ],
+        };
+
+        StunRegionPicker picker = new(timeout: TimeSpan.FromSeconds(5));
+        System.Diagnostics.Stopwatch took = System.Diagnostics.Stopwatch.StartNew();
+        int best = await picker.PickBestRegionAsync(MapOf(region), ct);
+
+        Assert.Equal(7, best);
+        Assert.True(took.Elapsed < TimeSpan.FromSeconds(4), $"took {took.Elapsed}: the STUN probes were waited out");
+    }
+
     /// <summary>A node marked as having no STUN (-1) can't be probed.</summary>
     [Fact]
     public void NodesWithoutStunAreSkipped()

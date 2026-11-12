@@ -64,30 +64,54 @@ public sealed class StunRegionPicker : IRegionPicker
     {
         ArgumentNullException.ThrowIfNull(derpMap);
 
-        Dictionary<int, Task<TimeSpan?>> probes = [];
+        // Both clocks at once. Asked one after the other, a map whose relays
+        // run no STUN — tailcat's own — cost every node two probes' timeouts,
+        // four seconds of its start, before the TCP handshakes that do answer
+        // were even begun.
+        Dictionary<int, Task<TimeSpan?>> stun = [];
+        Dictionary<int, Task<TimeSpan?>> tcp = [];
         foreach (DerpRegion region in derpMap.Regions.Values)
         {
-            IPEndPoint? stun = StunEndpointOf(region);
-            if (stun is not null)
+            if (StunEndpointOf(region) is IPEndPoint stunServer)
             {
-                probes[region.RegionID] = MeasureAsync(stun, cancellationToken);
+                stun[region.RegionID] = MeasureAsync(stunServer, cancellationToken);
+            }
+            if (RelayEndpointOf(region) is IPEndPoint relay)
+            {
+                tcp[region.RegionID] = MeasureTcpAsync(relay, cancellationToken);
             }
         }
 
-        Dictionary<int, TimeSpan> latencies = ProbesToLatencies(
-            await GatherAsync(probes).ConfigureAwait(false));
+        // STUN is the better clock and is preferred wherever it answered.
+        // Whichever set is in first decides: STUN all in with answers is the
+        // ranking; TCP all in with answers is, unless some relay has answered
+        // STUN by then — one that answers STUN has, by the time the slowest
+        // handshake is in, and one still silent is not waited for. Only a set
+        // that ranked nothing makes the other one waited out.
+        Task stunDone = Task.WhenAll(stun.Values);
+        Task tcpDone = Task.WhenAll(tcp.Values);
+        await Task.WhenAny(stunDone, tcpDone).ConfigureAwait(false);
 
-        if (latencies.Count == 0)
+        Dictionary<int, TimeSpan> latencies = AnsweredSoFar(stun);
+        if (stunDone.IsCompleted)
         {
-            Dictionary<int, Task<TimeSpan?>> tcp = [];
-            foreach (DerpRegion region in derpMap.Regions.Values)
+            if (latencies.Count == 0)
             {
-                if (RelayEndpointOf(region) is IPEndPoint relay)
-                {
-                    tcp[region.RegionID] = MeasureTcpAsync(relay, cancellationToken);
-                }
+                await tcpDone.ConfigureAwait(false);
+                latencies = AnsweredSoFar(tcp);
             }
-            latencies = ProbesToLatencies(await GatherAsync(tcp).ConfigureAwait(false));
+        }
+        else
+        {
+            if (latencies.Count == 0)
+            {
+                latencies = AnsweredSoFar(tcp);
+            }
+            if (latencies.Count == 0)
+            {
+                await stunDone.ConfigureAwait(false);
+                latencies = AnsweredSoFar(stun);
+            }
         }
 
         LastLatencies = latencies;
@@ -107,29 +131,14 @@ public sealed class StunRegionPicker : IRegionPicker
         return best;
     }
 
-    private static async Task<Dictionary<int, TimeSpan?>> GatherAsync(Dictionary<int, Task<TimeSpan?>> probes)
-    {
-        Dictionary<int, TimeSpan?> done = [];
-        if (probes.Count == 0)
-        {
-            return done;
-        }
-        await Task.WhenAll(probes.Values).ConfigureAwait(false);
-        foreach ((int regionId, Task<TimeSpan?> probe) in probes)
-        {
-            done[regionId] = await probe.ConfigureAwait(false);
-        }
-        return done;
-    }
-
-    private static Dictionary<int, TimeSpan> ProbesToLatencies(Dictionary<int, TimeSpan?> probes)
+    private static Dictionary<int, TimeSpan> AnsweredSoFar(Dictionary<int, Task<TimeSpan?>> probes)
     {
         Dictionary<int, TimeSpan> latencies = [];
-        foreach ((int regionId, TimeSpan? rtt) in probes)
+        foreach ((int regionId, Task<TimeSpan?> probe) in probes)
         {
-            if (rtt is not null)
+            if (probe.IsCompletedSuccessfully && probe.Result is TimeSpan rtt)
             {
-                latencies[regionId] = rtt.Value;
+                latencies[regionId] = rtt;
             }
         }
         return latencies;

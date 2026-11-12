@@ -28,6 +28,10 @@ reach a peer whose announcement was heard locally. Open questions:
   does: ~5 s), and STUN asks the fallback servers beside the map's relays,
   which answer no STUN, instead of after their timeout (~2 s at each end of
   every handshake).
+- ~~A node takes 5–7 s to start~~ — 4.3 s of it was the region picker
+  waiting out two STUN probes the map's relays never answer before timing
+  TCP; it now times both at once and takes whichever ranks first. A node is
+  up in ~1.3 s (0.6 s of it fetching the DERP map, 0.3 s the relay).
 - ~~The QUIC handshake over the relay takes 1.5–3 s~~ — msquic's socket let
   the first datagram from a new address go, at both ends, and QUIC waited a
   1 s probe timeout each time; `UdpBridge` now sends one byte first. A session
