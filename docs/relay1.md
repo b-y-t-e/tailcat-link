@@ -217,7 +217,7 @@ everything above them are unchanged. `direct-path.js` is all of it;
 `clients/browser` offers and `clients/browser-host` answers. The .NET side
 has no half yet, and ignores the offer.
 
-It is off unless both ends ask for it (`directPath`), and a session that
+It is on unless either end turns it off (`directPath: false`), and a session that
 never gets one behaves exactly as it did before there was such a thing.
 
 ### The control stream
@@ -253,10 +253,11 @@ be at the far end of it.
 - A host that knows the offer and will not take it says `Decline`; one that
   does not know it says nothing, and the dialler gives up after 15 s. Either
   way the session carries on by the relay.
-- With no `iceServers` configured, only the machines' own addresses are
-  tried and nothing outside the two is asked anything. Two machines on
-  different networks need a STUN server to find each other, and naming one
-  is the application's decision: it learns both machines' public addresses.
+- Two machines on different networks need a STUN server to find each
+  other, and it learns both machines' public addresses. With no `iceServers`
+  given, Google's (`stun.l.google.com:19302`) is asked; `iceServers: []`
+  tries only the machines' own addresses and asks nobody. A STUN server that
+  does not answer costs the direct path, not the session.
 
 ### Moving, and what it costs
 

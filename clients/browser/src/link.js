@@ -39,9 +39,11 @@ export const DEFAULTS = {
   minReconnectDelay: 500,
   maxReconnectDelay: 30_000,
   handshakeTimeout: 20_000,
-  // Off until asked for: `true`, or `{ iceServers, RTCPeerConnection }`. See
-  // direct-path.js for what it does and README.md for what it gives away.
-  directPath: false,
+  // On: `false` keeps a link on the relay, `{ iceServers, RTCPeerConnection }`
+  // names other STUN servers (`[]` for none) or a WebRTC for Node. Where there is no WebRTC it is
+  // off by itself. See direct-path.js for what it does and README.md for what
+  // it gives away.
+  directPath: true,
 };
 
 export class TailcatLink {

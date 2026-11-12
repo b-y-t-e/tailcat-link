@@ -143,12 +143,12 @@ link.onStream("echo", async (stream) => {
 | `transferStallTimeout` | 120 s | the same for `LinkContent` and transfers |
 | `heartbeatInterval` | 20 s | how often silence is tested for |
 | `minReconnectDelay` / `maxReconnectDelay` | 0.5 s / 30 s | backoff bounds |
-| `directPath` | `false` | `true`, or `{ iceServers }`: leave the relay when the host can (below) |
+| `directPath` | `true` | `false`, or `{ iceServers }`: leave the relay when the host can (below) |
 
 ## Leaving the relay
 
 A relay is for finding each other, and a slow way to talk. With `directPath`
-on at both ends, a link to a JavaScript host moves to a WebRTC data channel
+on at both ends, which is the default, a link to a JavaScript host moves to a WebRTC data channel
 between the two machines as soon as one can be made, and says so:
 
 ```js
@@ -166,11 +166,12 @@ channels and streams neither know nor care, and a host that has no direct
 path — a .NET one, or a JavaScript one that did not ask — leaves the link
 exactly where it was.
 
-- **`directPath: true` tries the machines' own networks only**, and asks
-  nothing of anybody else: enough for two machines on one LAN. Machines on
-  different networks need a STUN server in `iceServers` to learn their public
-  addresses, and whichever you name sees both machines' addresses. There is
-  no default one for that reason.
+- **By default Google's STUN server is asked** (`stun.l.google.com:19302`):
+  machines on different networks need one to learn their public addresses,
+  and it sees both machines' addresses. Name your own in `iceServers`, or
+  `iceServers: []` to try the machines' own networks only — enough for two
+  machines on one LAN. A STUN server that does not answer leaves the link on
+  the relay, slower, not broken.
 - **The host learns this machine's addresses, and it learns the host's** —
   the local ones too, where the browser gives them out. They are sent only
   after the host has accepted the pairing, and only to it.
@@ -289,8 +290,8 @@ modules run unchanged; what differs is the TLS stack and IndexedDB.
   process that publishes a code and admits the machines that join it. A page
   is a host only while it stays open, which is why Node is the usual place
   for one.
-- **Leave the relay by itself, or with a .NET host.** A direct path is
-  WebRTC, has to be asked for at both ends (`directPath`), and exists only
+- **Leave the relay with a .NET host.** A direct path is
+  WebRTC, is on at both ends unless turned off (`directPath`), and exists only
   between two JavaScript ends. Otherwise every byte crosses the relay twice,
   and a session is as fast as the relay is.
 - **Survive a dropped record.** A gap in the counter ends the session and the

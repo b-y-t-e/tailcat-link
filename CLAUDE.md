@@ -177,7 +177,7 @@ library is, roughly how the relays work, and examples that compile.
   because after a cut the resend brings the session before's records to the
   new one.
 - **Two JavaScript ends may leave the relay, and it is still relay1.**
-  `directPath` (off by default, wanted at both ends) carries the session's
+  `directPath` (on by default, off if either end says `false`) carries the session's
   records over a WebRTC data channel: `clients/browser/src/direct-path.js`,
   offered by the dialler and answered by `relay-hub.js`; *A direct path* in
   `docs/relay1.md` is the specification. It is a second path for the same

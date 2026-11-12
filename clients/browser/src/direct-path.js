@@ -64,11 +64,19 @@ const LOW_WATER = 256 * 1024;
 // The first wait before a path that failed is offered again; it doubles.
 const RETRY_MS = 5_000;
 
+// Asked when an application names none. Without a STUN server only the
+// machines' own addresses are tried, which joins two machines on one LAN and
+// no others; and a STUN server that is down costs only the direct path — the
+// session stays on the relay. It sees both machines' public addresses, which
+// is why `iceServers` can name another, or `[]` for none.
+export const DEFAULT_ICE_SERVERS = Object.freeze([{ urls: "stun:stun.l.google.com:19302" }]);
+
 /// What the `directPath` option asks for, or null for "relay only".
 ///
 /// @param option `false`, `true`, or `{ iceServers, RTCPeerConnection }`.
-///   `iceServers` is WebRTC's own list; with none, only addresses on the
-///   machines' own networks are tried, and nothing outside either is asked.
+///   `iceServers` is WebRTC's own list, Google's STUN server when not given;
+///   with `[]`, only addresses on the machines' own networks are tried, and
+///   nothing outside either is asked.
 ///   `RTCPeerConnection` is for where there is no global one — Node.
 export function directPathConfig(option) {
   if (!option) return null;
@@ -79,7 +87,7 @@ export function directPathConfig(option) {
   if (!RTCPeerConnection) return null;
   return {
     RTCPeerConnection,
-    iceServers: given.iceServers ?? [],
+    iceServers: given.iceServers ?? DEFAULT_ICE_SERVERS,
     establishMs: given._establishMs ?? ESTABLISH_MS,
     retryMs: given._retryMs ?? RETRY_MS,
   };

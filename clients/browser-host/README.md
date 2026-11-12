@@ -77,19 +77,20 @@ and is written readable by its owner only.
 
 ## What it does not do
 
-- **Leave the relay unless asked.** A host here offers `relay1` only: there is
+- **Leave the relay for QUIC.** A host here offers `relay1` only: there is
   no UDP in a page, so no QUIC. A .NET machine that could use QUIC agrees to
   relay1 because it offers it second, and every byte to it crosses the relay.
-  A JavaScript machine that joins can be reached directly, over WebRTC, when
-  both ends say `directPath` — `true`, or `{ iceServers }`; under Node, where
+  A JavaScript machine that joins can be reached directly, over WebRTC, unless
+  either end says `directPath: false` (`{ iceServers }` adds a STUN server); under Node, where
   there is no WebRTC, `{ RTCPeerConnection }` from a package that has one
   (`node-datachannel/polyfill` is one that has been tried). `peer.route` and
   `route-changed` on `peer.events` say which it is. A host answers an offer
   only from a machine it has already admitted, because the answer names its
   addresses. The joining end's README says what else to know.
-- **Survive its own relay connection.** When it drops, every session goes with
-  it — relay1 has no resend here — and the machines at the other end dial
-  again; exchanges carry on from where each end got to.
+- **Survive its own relay connection, relayed.** When it drops, every session
+  still on the relay goes with it — relay1 has no resend here — and the
+  machines at the other end dial again; exchanges carry on from where each end
+  got to. A session that went direct carries on.
 - **Stay up in a tab nobody looks at.** A page that is closed, reloaded or put
   to sleep by the browser is a host that is gone until it comes back. Under
   Node it is a host like any other.
