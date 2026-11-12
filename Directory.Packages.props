@@ -9,8 +9,8 @@
 
   <ItemGroup Label="Runtime">
     <PackageVersion Include="BouncyCastle.Cryptography" Version="2.7.0" />
-    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.0" />
-    <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.0" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
+    <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
     <!-- QUIC for a Windows without its own; in step with Tailcat.Link.targets. -->
     <PackageVersion Include="Microsoft.Native.Quic.MsQuic.OpenSSL" Version="2.6.4" />
