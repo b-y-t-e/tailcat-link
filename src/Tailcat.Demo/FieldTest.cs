@@ -1,3 +1,6 @@
+// Copyright (c) Andrzej Ból and contributors
+// SPDX-License-Identifier: BSD-3-Clause
+
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;

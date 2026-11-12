@@ -18,8 +18,14 @@ export function fakeRtc({ connects = true } = {}) {
     connections: [],
     /// Messages handed to a channel.
     sent: 0,
-    /// Ends every open channel without a word, as a network that went away.
+    /// Ends every open channel without a word, as a network that went away:
+    /// ICE notices first, as it does for real, and then the channels go.
     cut() {
+      for (const pc of net.connections) {
+        if (pc.connectionState !== "connected") continue;
+        pc.connectionState = "failed";
+        pc.onconnectionstatechange?.();
+      }
       for (const pc of net.connections) pc.channel?._end();
     },
   };

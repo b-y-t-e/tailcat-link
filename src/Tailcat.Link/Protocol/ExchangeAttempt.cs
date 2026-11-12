@@ -101,8 +101,11 @@ internal sealed class ExchangeAttempt
         bool pipelined = exchange.TakeFirstAttempt();
         ExchangeHeader header = exchange.HeaderFor(pipelined);
         idle.Restart();
+        // Header and pipelined content in one write when they are small: see
+        // CoalescingStream. Without pipelining only the header goes now.
+        using CoalescingStream coalesced = new(stream);
         await LinkFrame.WriteAsync(
-            stream,
+            coalesced,
             (byte)LinkFrameKind.Exchange,
             exchange.Id,
             ExchangeFrame.EncodeHeader(header),
@@ -110,8 +113,9 @@ internal sealed class ExchangeAttempt
             moving).ConfigureAwait(false);
         if (pipelined)
         {
-            await TransferFrame.WriteContentAsync(stream, exchange.Cursor, idle, moving).ConfigureAwait(false);
+            await TransferFrame.WriteContentAsync(coalesced, exchange.Cursor, idle, moving).ConfigureAwait(false);
         }
+        await coalesced.SendAsync(moving).ConfigureAwait(false);
 
         (byte taken, _, byte[] where) = await LinkFrame.ReadAsync(stream, idle, moving).ConfigureAwait(false);
         ThrowIfRefused(taken, where, exchange.Flags);

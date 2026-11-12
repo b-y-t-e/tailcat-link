@@ -818,19 +818,40 @@ public sealed class TailcatNode : IAsyncDisposable
     /// to, returning the first answer.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The request goes out on the shared socket and the reply comes back
     /// through the node's own receive loop: only one reader may own that
     /// socket, or STUN answers and peer traffic would steal each other's
     /// packets.
+    /// </para>
+    /// <para>
+    /// The fallback servers are asked together with the map's, not after
+    /// them. The map's relays answer no STUN, so asked first they cost a whole
+    /// timeout before the fallback was tried — about two seconds on every
+    /// handshake, at each end, because a hello waits for its endpoints
+    /// (tools/field-test/RESULTS.md). Resolving the fallback's names is done
+    /// beside the map's questions, so a slow resolver costs nothing when the
+    /// map's servers do answer.
+    /// </para>
     /// </remarks>
     private async Task<IPEndPoint?> DiscoverPublicEndpointAsync(CancellationToken cancellationToken)
     {
-        IPEndPoint? mapped = await AskAsync(_stunServers.Take(MaxStunServersToAsk), cancellationToken)
-            .ConfigureAwait(false);
-        return mapped ?? await AskAsync(
-            await ResolveFallbackAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
-            .ConfigureAwait(false);
+        Task<IReadOnlyList<IPEndPoint>> fallback = ResolveFallbackAsync(cancellationToken);
+        Task<IPEndPoint?> fromMap = AskAsync(_stunServers.Take(MaxStunServersToAsk), cancellationToken);
+        Task<IPEndPoint?> fromFallback = AskFallbackAsync(fallback, cancellationToken);
+
+        Task<IPEndPoint?> first = await Task.WhenAny(fromMap, fromFallback).ConfigureAwait(false);
+        if (await first.ConfigureAwait(false) is IPEndPoint mapped)
+        {
+            return mapped;
+        }
+        return await (first == fromMap ? fromFallback : fromMap).ConfigureAwait(false);
     }
+
+    private async Task<IPEndPoint?> AskFallbackAsync(
+        Task<IReadOnlyList<IPEndPoint>> resolving,
+        CancellationToken cancellationToken) =>
+        await AskAsync(await resolving.ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// Asks every server at once and takes the first answer.

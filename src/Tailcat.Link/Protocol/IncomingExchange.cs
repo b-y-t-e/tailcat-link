@@ -224,10 +224,14 @@ internal sealed class IncomingExchange
             return false;
         }
 
-        await WriteOkAsync(stream, ExchangeFrame.EncodeAnswer(_answerHeader), token).ConfigureAwait(false);
+        // The answer's header, its blocks and the end marker in one write when
+        // they are small: see CoalescingStream.
+        using CoalescingStream coalesced = new(stream);
+        await WriteOkAsync(coalesced, ExchangeFrame.EncodeAnswer(_answerHeader), token).ConfigureAwait(false);
         try
         {
-            await TransferFrame.WriteContentAsync(stream, answer, idle: null, token).ConfigureAwait(false);
+            await TransferFrame.WriteContentAsync(coalesced, answer, idle: null, token).ConfigureAwait(false);
+            await coalesced.SendAsync(token).ConfigureAwait(false);
         }
         catch (LinkContentException ex)
         {

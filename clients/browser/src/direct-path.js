@@ -132,6 +132,10 @@ export class DirectPath {
   // channel open and moved its sending there, so giving up quietly is no
   // longer possible: its records would arrive nowhere.
   #connected = false;
+  // Whether ICE says the path is up right now. A channel that closes while it
+  // is was closed by the other end — its link closing, or its session
+  // replaced — not lost; one that closes after ICE has gone is the path.
+  #iceUp = false;
   #openedAt = null;
   #state = "idle";
 
@@ -276,7 +280,10 @@ export class DirectPath {
       // one that will not open is its business to ignore.
       this.#session.handleRecord(new Uint8Array(event.data)).catch(() => {});
     };
-    channel.onclose = () => this.#fail(new Error("the direct path closed"));
+    channel.onclose = () =>
+      this.#iceUp
+        ? this.#fail(new Error("the other end closed the direct path"), { pathFailed: false })
+        : this.#fail(new Error("the direct path closed"));
     channel.onerror = (event) => this.#fail(event?.error ?? new Error("the direct path failed"));
     channel.onbufferedamountlow = () => {
       const drained = this.#drained;
@@ -309,7 +316,8 @@ export class DirectPath {
     if (this.#state === "closed") return;
     clearTimeout(this.#grace);
     this.#grace = null;
-    if (state === "connected" || state === "completed") {
+    this.#iceUp = state === "connected" || state === "completed";
+    if (this.#iceUp) {
       this.#connected = true;
     } else if (state === "failed" || state === "closed") {
       this.#fail(new Error(`the direct path ${state}`));
@@ -329,12 +337,18 @@ export class DirectPath {
   // The attempt is over. Before ICE connected nothing was ever sent on the
   // channel by either end, and the session carries on by the relay as if
   // nothing had been tried. After, it cannot: see `#connected`.
-  #fail(error) {
+  //
+  // `pathFailed` is false for a channel the other end closed while the path
+  // was up. The session ends all the same, but it is not reported as a path
+  // lost — every client that finished normally used to reach a host's log as
+  // one — and not counted against the path in the dialler's backoff.
+  #fail(error, { pathFailed = true } = {}) {
     if (this.#state === "closed") return;
     const sessionGoesToo = this.#connected;
-    this.#finish(true);
+    this.#finish(pathFailed);
     if (sessionGoesToo) {
-      this.#session.close(new Error(`the direct path was lost: ${error?.message ?? "closed"}`));
+      const message = error?.message ?? "closed";
+      this.#session.close(new Error(pathFailed ? `the direct path was lost: ${message}` : message));
     } else {
       // One path again, and the rule for one: a gap is a record lost.
       this.#session.expectTwoPaths(false);

@@ -226,6 +226,25 @@ test("a session that ends for reasons of its own does not count against the path
   }
 });
 
+test("a page that closes its link is not reported as a lost path", async () => {
+  const relay = memoryRelay();
+  const net = fakeRtc();
+  const host = await startHost(relay, { directPath: net });
+  host.onRequest((peer, text) => text);
+  const left = [];
+  host.events.addEventListener("peer-left", (e) => left.push(e.detail.error?.message ?? ""));
+  const page = await joinPage(relay, { invitationCode: host.invitationCode, directPath: net });
+  try {
+    await until(() => page.route === "direct", "the page to go direct");
+    await page.close();
+    await until(() => left.length > 0, "the host to see the page go");
+    assert.doesNotMatch(left[0], /lost/, "a page that finished was logged as a failure");
+  } finally {
+    await page.close();
+    await host.close();
+  }
+});
+
 test("a host answers no offer before the pairing handshake has let the machine in", async () => {
   // The answer names the host's own addresses, and anyone who knows a host's
   // address can open a session.

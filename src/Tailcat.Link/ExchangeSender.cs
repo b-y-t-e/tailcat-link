@@ -72,17 +72,34 @@ internal sealed class ExchangeSender
                     // It finished between the check and here.
                 }
             }
-            if (running is not null)
+            // Nor waited for, once it has all arrived: what is left is the
+            // acknowledgement and closing the stream, and on QUIC closing it
+            // waits for the other end to close its half — a whole round trip
+            // more, after the answer was already here. Every request paid it:
+            // 85 ms where the path took 41 (tools/field-test/RESULTS.md). The
+            // rest finishes on its own, and nothing it can fail at reaches
+            // the caller, who has everything.
+            if (running is null)
             {
-                try
-                {
-                    await running.ConfigureAwait(false);
-                }
+                return;
+            }
+            if (exchange.Answer is { BodyEnded: true } && !running.IsCompleted)
+            {
+                _ = running.ContinueWith(
+                    static t => _ = t.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+                return;
+            }
+            try
+            {
+                await running.ConfigureAwait(false);
+            }
 #pragma warning disable CA1031 // Whatever ended it has already reached the answer, which is what the caller is letting go of.
-                catch (Exception)
+            catch (Exception)
 #pragma warning restore CA1031
-                {
-                }
+            {
             }
         };
         running = RunRequestAsync(exchange, lifetime);

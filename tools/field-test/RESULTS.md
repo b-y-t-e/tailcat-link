@@ -61,6 +61,14 @@ counted run.
   lost: the direct path closed"**, because the channel closing is the first
   thing it hears. Misleading in an operator's log; the session did not fail.
 
+### Fixed since (measured on the same WAN pair, 2026-11-12)
+
+| | before | after |
+| --- | --- | --- |
+| .NET request over a direct QUIC path | 85 ms (path 41 ms) | 42 ms |
+| .NET client, start to connected | ~10 s | 2.5–4.3 s |
+| host's log for a page that finished | "the direct path was lost" | "the other end closed the direct path" |
+
 Earlier runs that did not count, each for a reason now in the README: a WAN
 path through Tailscale's tunnel (twice: once via `100.x`, once via its IPv6
 range, which the first filter missed), a .NET client against a host on a

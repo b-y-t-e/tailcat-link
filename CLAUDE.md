@@ -346,6 +346,16 @@ library is, roughly how the relays work, and examples that compile.
   `buildTransitive/Tailcat.Link.targets`, which copies it beside the executable
   on publish; `LinkHost` warns when a Windows that has QUIC reports none; the CI
   job `single-file-quic` publishes a consumer that way and fails without QUIC.
+- **On QUIC, a request waited for things that were not its answer.** Two, and
+  each cost a whole round trip on a direct path (85 ms where the path took 41,
+  found by `tools/field-test`): closing a `QuicStream` waits for the other end
+  to close its half, and the answer's release awaited the whole attempt,
+  closing included — so a request whose answer had arrived is now handed back
+  at once and the rest finishes behind it (`ExchangeSender`); and a small
+  exchange written as several flushed writes went out as several packets that
+  QUIC paced apart, so an answer's body landed a round trip after its header
+  every few requests — small frames now go as one write (`CoalescingStream`).
+  Neither shows on loopback or over the relay; measure on a real path.
 - **Half a DERP frame poisons the connection.** A send cancelled after the
   header reached the wire left five bytes the relay took for the next frame's
   header, and every packet after it was misrouted until the process ended —

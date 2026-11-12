@@ -190,14 +190,24 @@ public static class TailcatLink
 
         // The host's key is inside the code, so this end knows who it is
         // talking to before a single packet goes out.
-        NodePublic hostKey = code.Address.Parse().ServerPublic;
+        ConnInfo hostAddress = code.Address.Parse();
+        NodePublic hostKey = hostAddress.ServerPublic;
         await pairing.JoinPeerAsync(code, hostKey, cancellationToken).ConfigureAwait(false);
 
-        // No pinned region: this end publishes no address, so it is free to
-        // use whichever relay is closest to wherever it is switched on today.
-        NodeHolder node = new(options.Gateway, () => pairing.State);
+        // This end publishes no address, so it listens where it pleases — and
+        // where it pleases is the host's own region, as the browser client
+        // does. It has to reach that relay to say anything at all, and the
+        // host answers into the region the hello names; measuring every
+        // region first to find a closer one cost ~5 s on every start
+        // (tools/field-test/RESULTS.md), for a relay this end would use only
+        // to hear the host's answers. Never stored: the host's region is
+        // what the code says, read again on every rebuild.
+        int? hostRegion = hostAddress.RegionID != 0
+            ? hostAddress.RegionID
+            : hostAddress.Region.FirstOrDefault()?.RegionID;
+        NodeHolder node = new(options.Gateway, () => pairing.State with { HomeRegionId = hostRegion });
         node.Adopt(await options.Gateway
-            .CreateAsync(pairing.State.PrivateKey, homeRegionId: null, cancellationToken)
+            .CreateAsync(pairing.State.PrivateKey, hostRegion, cancellationToken)
             .ConfigureAwait(false));
 
         try

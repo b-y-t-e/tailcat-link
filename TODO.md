@@ -20,20 +20,25 @@ reach a peer whose announcement was heard locally. Open questions:
 
 ## From the field test (tools/field-test/RESULTS.md)
 
-- **A .NET request over a direct QUIC path costs two round trips**: 85 ms on
-  a path that probes at 41 ms, where a browser on the same networks took
-  48 ms. Find out where the second one goes (stream opening, an
-  acknowledgement before the answer, QUIC's ACK delay) before anything
-  interactive leans on .NET-to-.NET.
-- **A .NET client connects in ~10 s from cold** (6 s building the node and
-  measuring regions, 4 s of QUIC handshake over the relay); a page in under
-  one. The region measurement could run beside the dial rather than before it.
-- **"The direct path was lost: the direct path closed"** is what a host logs
-  for a client that simply finished. Tell a channel closed by the other end
-  apart from one that failed.
+- ~~A .NET request over a direct QUIC path costs two round trips~~ — fixed:
+  the request no longer waits for its stream to close, and small frames go as
+  one write. 85 ms → 42 ms on a 41 ms path.
+- ~~A .NET client connects in ~10 s from cold~~ — now 2.5–4.3 s. The joining
+  end no longer measures every region (it listens in the host's, as a page
+  does: ~5 s), and STUN asks the fallback servers beside the map's relays,
+  which answer no STUN, instead of after their timeout (~2 s at each end of
+  every handshake).
+- **The QUIC handshake over the relay still takes 1.5–3 s**, against ~70 ms
+  for the hello it follows. Find out what it waits for — a PTO on a lost
+  Initial, msquic's initial RTT guess, the server certificate — with the
+  observer on both ends of a real relay.
+- ~~"The direct path was lost: the direct path closed" for a client that
+  finished~~ — a channel the other end closes while ICE is up is reported as
+  that, and not counted against the path.
 - **The LAN path from a browser to a Node host runs through the router**, as
   Edge's address is an mDNS name `node-datachannel` does not resolve. Works;
-  costs a little latency.
+  costs a few milliseconds. Not ours to fix: resolving `.local` needs mDNS in
+  the host's WebRTC stack, and a host in a page has it.
 
 ## QUIC on Windows 10: try it on one
 
