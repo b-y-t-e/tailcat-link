@@ -36,18 +36,22 @@ internal sealed class Relay1Connection : ITailcatConnection
     private readonly Channel<Relay1Stream> _accepted =
         Channel.CreateUnbounded<Relay1Stream>(new UnboundedChannelOptions { SingleReader = true });
 
-    // Peer streams this end has closed, by id. A frame for one of these must
-    // not reopen it: DisposeAsync runs on whatever task finished with the
-    // stream, before the peer's own FIN for it — still in flight — arrives.
-    private readonly HashSet<ulong> _retiredPeerStreams = new();
-
-    // The first peer-parity stream id that has not been retired; the run
-    // below it collapses into this, and the set only holds what came out of
-    // turn.
-    private ulong _retiredPeerWatermark;
+    // Which peer streams have been opened at all: every peer-parity id below
+    // the watermark, and those above it that arrived out of turn. One that
+    // has been opened and is no longer in _streams is retired, and a frame
+    // for it must not reopen it: DisposeAsync runs on whatever task finished
+    // with the stream, before the peer's own FIN for it — still in flight —
+    // arrives.
+    //
+    // Opened, not closed, is what is counted, so the set holds only the
+    // out-of-turn window. Counting retirements kept every id closed after one
+    // the peer still held open — a game's channel under a stream of requests
+    // — and the set grew by one per request for the life of the session.
+    private readonly HashSet<ulong> _seenPeerStreams = new();
+    private ulong _seenPeerWatermark;
 
     // Streams are forgotten from whatever task closes them; records arrive on
-    // the receive loop. The retirement state is touched from both.
+    // the receive loop. The state is touched from both.
     private readonly Lock _retiredMu = new();
 
     // One record at a time: the counter has to increase in the order the
@@ -85,7 +89,7 @@ internal sealed class Relay1Connection : ITailcatConnection
         // Odd from the dialler, even from the host, so neither end has to ask
         // before opening one and the two can never pick the same id.
         _nextStreamId = isDialer ? 1UL : 2UL;
-        _retiredPeerWatermark = isDialer ? 2UL : 1UL;
+        _seenPeerWatermark = isDialer ? 2UL : 1UL;
     }
 
     /// <inheritdoc/>
@@ -253,7 +257,12 @@ internal sealed class Relay1Connection : ITailcatConnection
             return Relay1RecordOutcome.Taken;
         }
 
-        stream.OnData(payload);
+        if (!stream.OnData(payload))
+        {
+            // Past the window: a peer that keeps no flow control, or one
+            // filling this end's memory on purpose. Either way not a session.
+            return Relay1RecordOutcome.SessionBroken;
+        }
         if (flags.HasFlag(Relay1FrameFlags.Fin))
         {
             stream.OnFin();
@@ -263,10 +272,9 @@ internal sealed class Relay1Connection : ITailcatConnection
 
     internal void Forget(ulong streamId)
     {
-        _streams.TryRemove(streamId, out _);
-        if (IsPeerStreamId(streamId))
+        lock (_retiredMu)
         {
-            RetirePeerStream(streamId);
+            _streams.TryRemove(streamId, out _);
         }
     }
 
@@ -347,33 +355,41 @@ internal sealed class Relay1Connection : ITailcatConnection
 
     // A stream this end has finished with must not come back when the peer's
     // own FIN arrives afterwards, which it does on every request the peer
-    // makes. Only the ids actually retired can say that: a higher id may well
+    // makes. Only the ids actually opened can say that: a higher id may well
     // arrive first, because the peer numbers a stream before taking the lock
     // that serialises its sending, so two of its concurrent requests can
     // reach the relay in the other order. Treating the highest id seen as a
     // watermark dropped the lower one's frames in silence.
-    private void RetirePeerStream(ulong streamId)
+    private void MarkPeerStreamSeen(ulong streamId)
     {
-        lock (_retiredMu)
+        if (streamId < _seenPeerWatermark)
         {
-            _retiredPeerStreams.Add(streamId);
-            // The peer allocates its ids in order, so the run starting at the
-            // oldest collapses into the watermark and the set only holds what
-            // came out of turn.
-            while (_retiredPeerStreams.Remove(_retiredPeerWatermark))
+            return;
+        }
+        _seenPeerStreams.Add(streamId);
+        // The peer allocates its ids in order, so the run starting at the
+        // oldest collapses into the watermark.
+        while (_seenPeerStreams.Remove(_seenPeerWatermark))
+        {
+            _seenPeerWatermark += 2;
+        }
+    }
+
+    // How many peer stream ids are remembered beyond the watermark: the
+    // out-of-turn window, which must not grow with the session's age.
+    internal int PeerStreamIdsRemembered
+    {
+        get
+        {
+            lock (_retiredMu)
             {
-                _retiredPeerWatermark += 2;
+                return _seenPeerStreams.Count;
             }
         }
     }
 
-    private bool IsRetiredPeerStream(ulong streamId)
-    {
-        lock (_retiredMu)
-        {
-            return streamId < _retiredPeerWatermark || _retiredPeerStreams.Contains(streamId);
-        }
-    }
+    private bool WasPeerStreamSeen(ulong streamId) =>
+        streamId < _seenPeerWatermark || _seenPeerStreams.Contains(streamId);
 
     // A frame naming an id this end did not open, and has not seen before, is
     // the peer opening a stream: that is the only announcement there is.
@@ -389,18 +405,23 @@ internal sealed class Relay1Connection : ITailcatConnection
             return null;
         }
 
-        // An id this end has already retired names a stream that has been
-        // closed and forgotten; reviving it would hand the layer above a
-        // stream with nothing in it. See RetirePeerStream.
-        if (IsRetiredPeerStream(streamId))
+        Relay1Stream opened;
+        lock (_retiredMu)
         {
-            return null;
-        }
-
-        Relay1Stream opened = new(this, streamId);
-        if (!_streams.TryAdd(streamId, opened))
-        {
-            return _streams[streamId];
+            if (_streams.TryGetValue(streamId, out Relay1Stream? raced))
+            {
+                return raced;
+            }
+            // Opened before and gone from _streams: closed and forgotten, and
+            // reviving it would hand the layer above a stream with nothing in
+            // it. See MarkPeerStreamSeen.
+            if (WasPeerStreamSeen(streamId))
+            {
+                return null;
+            }
+            opened = new(this, streamId);
+            _streams[streamId] = opened;
+            MarkPeerStreamSeen(streamId);
         }
         if (!_accepted.Writer.TryWrite(opened))
         {

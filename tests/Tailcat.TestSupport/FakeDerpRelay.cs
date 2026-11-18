@@ -147,6 +147,15 @@ public sealed class FakeDerpRelay : IAsyncDisposable
             {
                 Forget(key, frames);
             }
+
+            // And its socket closed and let go of. Kept until the relay was
+            // disposed, every connection a test ever made stayed open: one
+            // handle per node built, which a long soak saw as a leak.
+            lock (_mu)
+            {
+                _sockets.Remove(socket);
+            }
+            await frames.DisposeAsync();
         }
     }
 

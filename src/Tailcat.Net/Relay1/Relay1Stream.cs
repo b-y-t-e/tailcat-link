@@ -52,6 +52,13 @@ internal sealed class Relay1Stream : Stream
     private readonly Lock _mu = new();
     private ReadOnlyMemory<byte> _leftover;
     private int _consumedSinceUpdate;
+
+    // What the peer may have sent in all, and what it has: the window and
+    // every grant against what arrived. Both writers wait for credit, so only
+    // a peer that ignores it gets past — and buffered here without a bound it
+    // was memory a stranger could fill before pairing had said who it was.
+    private long _granted;
+    private long _received;
     private long _credit = InitialWindow;
     private TaskCompletionSource? _creditWaiter;
     private StreamEnd? _ended;  // Null until something ends this stream.
@@ -256,12 +263,23 @@ internal sealed class Relay1Stream : Stream
 
     // ---- driven by the connection's receive path ------------------------
 
-    internal void OnData(ReadOnlyMemory<byte> payload)
+    /// <returns>False when the peer sent past the credit it was given.</returns>
+    internal bool OnData(ReadOnlyMemory<byte> payload)
     {
-        if (!payload.IsEmpty)
+        if (payload.IsEmpty)
         {
-            _inbound.Writer.TryWrite(payload);
+            return true;
         }
+        lock (_mu)
+        {
+            _received += payload.Length;
+            if (_received > InitialWindow + _granted)
+            {
+                return false;
+            }
+        }
+        _inbound.Writer.TryWrite(payload);
+        return true;
     }
 
     internal void OnFin()
@@ -349,6 +367,7 @@ internal sealed class Relay1Stream : Stream
             }
             grant = _consumedSinceUpdate;
             _consumedSinceUpdate = 0;
+            _granted += grant;
         }
 
         byte[] payload = new byte[4];

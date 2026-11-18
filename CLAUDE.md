@@ -358,6 +358,15 @@ library is, roughly how the relays work, and examples that compile.
   `buildTransitive/Tailcat.Link.targets`, which copies it beside the executable
   on publish; `LinkHost` warns when a Windows that has QUIC reports none; the CI
   job `single-file-quic` publishes a consumer that way and fails without QUIC.
+- **relay1 remembers which peer streams were opened, not which were closed.**
+  A frame for a stream this end closed must not reopen it, and ids can arrive
+  out of turn, so something per id is kept. Counting closures kept every id
+  closed after one the peer still held open — a game's channel under a stream
+  of requests — one per request for the life of the session, in both
+  `Relay1Connection.cs` and `relay1.js`. Counting openings keeps only the
+  out-of-turn window. A receiver also holds the peer to the credit it granted
+  and ends a session that sends past it: both writers wait for credit, and
+  what a peer ignoring it sent was buffered without a bound before pairing.
 - **MsQuic drops the first datagram from an address it has not heard from**
   (Windows; Schannel and OpenSSL builds alike; plain sockets do not). Every
   handshake lost the client's first Initial at the listener and the server's

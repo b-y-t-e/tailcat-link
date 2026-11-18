@@ -167,6 +167,13 @@ public sealed class DerpRegionPool : IAsyncDisposable
             // is broken for the life of the pool. Remove this exact entry:
             // removing by key alone could evict a newer, working one.
             _connections.TryRemove(new KeyValuePair<int, Lazy<Task<DerpConnection>>>(regionId, entry));
+            // And the time it was asked for, unless something else holds the
+            // region now: the id comes from a stranger's hello, and one entry
+            // per region nobody could reach was kept for the life of the pool.
+            if (!_connections.ContainsKey(regionId))
+            {
+                _lastUsed.TryRemove(regionId, out _);
+            }
             throw;
         }
 

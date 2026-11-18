@@ -392,6 +392,95 @@ public class Relay1SessionTests
         }
     }
 
+    /// <summary>
+    /// A stream the peer keeps open — a game's channel — does not make this
+    /// end remember every stream the peer opens and closes after it. Counting
+    /// closed streams did, one id per request for the life of the session.
+    /// </summary>
+    [Fact]
+    public async Task AStreamThePeerHoldsOpenDoesNotMakeEveryLaterOneRemembered()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+        await using TailcatNode dialer = await NodeAsync(relay, ct);
+
+        (ITailcatConnection client, ITailcatConnection server) = await PairAsync(relay, listener, dialer, ct);
+        await using (client)
+        await using (server)
+        {
+            await using Stream held = await client.OpenStreamAsync(ct);
+            await held.WriteAsync("channel"u8.ToArray(), ct);
+            await held.FlushAsync(ct);
+            await using Stream heldServed = await server.AcceptStreamAsync(ct);
+
+            byte[] buf = new byte[16];
+            for (int i = 0; i < 200; i++)
+            {
+                Stream request = await client.OpenStreamAsync(ct);
+                await request.WriteAsync("ask"u8.ToArray(), ct);
+                await request.FlushAsync(ct);
+                Stream served = await server.AcceptStreamAsync(ct);
+                _ = await served.ReadAsync(buf, ct);
+                await served.WriteAsync("ok"u8.ToArray(), ct);
+                await served.FlushAsync(ct);
+                await served.DisposeAsync();
+                _ = await request.ReadAsync(buf, ct);
+                await request.DisposeAsync();
+            }
+
+            Assert.True(
+                ((Relay1Connection)server).PeerStreamIdsRemembered < 10,
+                $"{((Relay1Connection)server).PeerStreamIdsRemembered} ids remembered after 200 requests");
+        }
+    }
+
+    /// <summary>
+    /// A peer that sends past the credit it was given ends the session. Both
+    /// writers wait for credit, so only a peer that ignores it gets there, and
+    /// what it sent was buffered without a bound — memory a stranger could
+    /// fill before pairing had said who it was.
+    /// </summary>
+    [Fact]
+    public async Task APeerThatSendsPastItsWindowEndsTheSession()
+    {
+        using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cts.CancelAfter(TimeSpan.FromMinutes(1));
+        CancellationToken ct = cts.Token;
+
+        await using FakeDerpRelay relay = new();
+        await using TailcatNode listener = await NodeAsync(relay, ct);
+        await using TailcatNode dialer = await NodeAsync(relay, ct);
+
+        (ITailcatConnection client, ITailcatConnection server) = await PairAsync(relay, listener, dialer, ct);
+        await using (client)
+        await using (server)
+        {
+            await using Stream opened = await client.OpenStreamAsync(ct);
+            await opened.WriteAsync("hello"u8.ToArray(), ct);
+            await opened.FlushAsync(ct);
+            await using Stream unread = await server.AcceptStreamAsync(ct);
+
+            // Straight past the stream's own credit, as a peer keeping none would.
+            byte[] chunk = new byte[30_000];
+            for (int sent = 0; sent <= 300 * 1024; sent += chunk.Length)
+            {
+                await ((Relay1Connection)client).SendFrameAsync(
+                    ((Relay1Stream)opened).Id, Relay1FrameFlags.None, chunk, ct);
+            }
+
+            using CancellationTokenSource wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            wait.CancelAfter(TimeSpan.FromSeconds(10));
+            Exception ended = await Assert.ThrowsAnyAsync<Exception>(() => server.AcceptStreamAsync(wait.Token));
+            Assert.IsNotType<OperationCanceledException>(ended);
+        }
+    }
+
     /// <summary>Every disposable here is idempotent, as everywhere else.</summary>
     [Fact]
     public async Task DisposingTwiceIsHarmless()

@@ -161,6 +161,8 @@ export class Relay1Stream {
   #inbound = new Queue();
   #leftover = new Uint8Array(0);
   #consumed = 0;
+  #granted = 0;
+  #received = 0;
   #credit = Relay1Stream.INITIAL_WINDOW;
   #creditWaiter = null;
   #finSent = false;
@@ -257,8 +259,16 @@ export class Relay1Stream {
 
   // ---- driven by the session's receive path --------------------------
 
+  /// False when the peer sent past the credit it was given: both writers wait
+  /// for credit, so only a peer that ignores it gets there, and buffered here
+  /// without a bound it was memory a stranger could fill before pairing had
+  /// said who it was. Relay1Stream.OnData does the same.
   _onData(payload) {
-    if (payload.length) this.#inbound.push(payload);
+    if (!payload.length) return true;
+    this.#received += payload.length;
+    if (this.#received > Relay1Stream.INITIAL_WINDOW + this.#granted) return false;
+    this.#inbound.push(payload);
+    return true;
   }
 
   _onFin() {
@@ -313,6 +323,7 @@ export class Relay1Stream {
     if (this.#consumed < Relay1Stream.#UPDATE_THRESHOLD) return;
     const grant = this.#consumed;
     this.#consumed = 0;
+    this.#granted += grant;
     try {
       await this.#session._sendFrame(this.id, FrameFlags.Window, u32be(grant));
     } catch {
@@ -332,8 +343,8 @@ export class Relay1Session {
   #expectedCounter = 0n;
   #streams = new Map();
   #nextStreamId;
-  #retiredPeerStreams = new Set();
-  #retiredBelowPeerStream;
+  #seenPeerStreams = new Set();
+  #seenBelowPeerStream;
   #sending = Promise.resolve();
   #receiving = Promise.resolve();
   #direct = null;
@@ -360,7 +371,7 @@ export class Relay1Session {
     // Odd from the dialler, even from the host, so neither end has to ask
     // before opening one and the two can never pick the same id.
     this.#nextStreamId = isDialer ? 1 : 2;
-    this.#retiredBelowPeerStream = (isDialer ? 2 : 1) - 2;
+    this.#seenBelowPeerStream = (isDialer ? 2 : 1) - 2;
     this.accepted = new Queue();
     this.onclose = null;
     // Called for each record ignored because it would not open. One now and
@@ -615,7 +626,10 @@ export class Relay1Session {
       stream._onReset(str(frame.payload));
       return false;
     }
-    stream._onData(frame.payload);
+    if (!stream._onData(frame.payload)) {
+      this.close(new Error(`the peer sent past the window on stream ${frame.streamId}`));
+      return false;
+    }
     if (frame.flags & FrameFlags.Fin) stream._onFin();
     return false;
   }
@@ -654,24 +668,35 @@ export class Relay1Session {
     return send;
   }
 
+  /// How many peer stream ids are remembered beyond the watermark: the
+  /// out-of-turn window, which must not grow with the session's age. For tests.
+  get _peerStreamIdsRemembered() {
+    return this.#seenPeerStreams.size;
+  }
+
   _forget(streamId) {
     this.#streams.delete(streamId);
-    if (streamId % 2 !== this.#nextStreamId % 2) this.#retirePeerStream(streamId);
   }
 
   // A stream this end has finished with must not come back when the peer's own
   // FIN arrives afterwards, which it does on every request the peer makes.
-  // Only the ids actually retired can say that: a higher id may well arrive
+  // Only the ids actually opened can say that: a higher id may well arrive
   // first, because the .NET end numbers a stream before taking the lock that
   // serialises its sending, so two of its concurrent requests can reach the
   // relay in the other order. Treating the highest id seen as a watermark
   // dropped the lower one's frames in silence.
-  #retirePeerStream(streamId) {
-    this.#retiredPeerStreams.add(streamId);
-    // The peer allocates its ids in order, so the run starting at the oldest
-    // collapses into a watermark and the set only holds what came out of turn.
-    while (this.#retiredPeerStreams.delete(this.#retiredBelowPeerStream + 2)) {
-      this.#retiredBelowPeerStream += 2;
+  //
+  // Opened, not closed, is what is counted — one opened and no longer in
+  // #streams is retired — so the set holds only what came out of turn.
+  // Counting retirements kept every id closed after one the peer still held
+  // open, a game's channel under a stream of requests, and the set grew by
+  // one per request for the life of the session. Relay1Connection.cs does
+  // the same.
+  #markPeerStreamSeen(streamId) {
+    if (streamId <= this.#seenBelowPeerStream) return;
+    this.#seenPeerStreams.add(streamId);
+    while (this.#seenPeerStreams.delete(this.#seenBelowPeerStream + 2)) {
+      this.#seenBelowPeerStream += 2;
     }
   }
 
@@ -700,14 +725,14 @@ export class Relay1Session {
     const mine = this.#nextStreamId % 2;
     if (streamId === 0 || streamId % 2 === mine) return null;
 
-    // An id this end has already retired names a stream that has been closed
-    // and forgotten; reviving it would hand the layer above a stream with
-    // nothing in it. See #retirePeerStream.
-    if (streamId <= this.#retiredBelowPeerStream) return null;
-    if (this.#retiredPeerStreams.has(streamId)) return null;
+    // Opened before and gone from #streams: closed and forgotten, and reviving
+    // it would hand the layer above a stream with nothing in it. See
+    // #markPeerStreamSeen.
+    if (streamId <= this.#seenBelowPeerStream || this.#seenPeerStreams.has(streamId)) return null;
 
     const stream = new Relay1Stream(this, streamId);
     this.#streams.set(streamId, stream);
+    this.#markPeerStreamSeen(streamId);
     this.accepted.push(stream);
     return stream;
   }

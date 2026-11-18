@@ -296,6 +296,46 @@ test("a FIN for the older of two out-of-order streams does not reopen it", async
   assert.equal(await Promise.race([dialer.accepted.next(), Promise.resolve(nothingElse)]), nothingElse);
 });
 
+test("a stream the peer holds open does not make every later one remembered", async () => {
+  // A game's channel under a stream of requests: counting closed streams
+  // kept one id per request for the life of the session.
+  const { dialer, host, settled } = await connectedPair();
+
+  const held = host.openStream();
+  await held.write(utf8("channel"));
+  await settled();
+  await dialer.accepted.next();
+
+  for (let i = 0; i < 200; i++) {
+    const asking = host.openStream();
+    await asking.write(utf8("ask"));
+    await settled();
+    await (await dialer.accepted.next()).close();
+    await asking.finish();
+  }
+  await settled();
+
+  assert.ok(dialer._peerStreamIdsRemembered < 10, `${dialer._peerStreamIdsRemembered} ids remembered`);
+});
+
+test("a peer that sends past the window it was given ends the session", async () => {
+  // Writers wait for credit; only a peer that ignores it gets past, and what
+  // it sent was buffered without a bound.
+  const { dialer, host, settled } = await connectedPair();
+
+  const stream = host.openStream();
+  await stream.write(utf8("hello"));
+  await settled();
+  await dialer.accepted.next();
+
+  const chunk = new Uint8Array(30_000);
+  for (let sent = 0; sent <= 300 * 1024 && !dialer.closed; sent += chunk.length) {
+    await host._sendFrame(stream.id, 0, chunk);
+    await settled();
+  }
+  assert.equal(dialer.closed, true);
+});
+
 // ---- two paths -------------------------------------------------------------
 
 /// A dialler whose records are kept rather than delivered, and the host they
